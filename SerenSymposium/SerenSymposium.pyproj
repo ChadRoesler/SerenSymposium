@@ -1,0 +1,51 @@
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <SchemaVersion>2.0</SchemaVersion>
+    <ProjectGuid>36226534-2bd0-4a15-aef7-18891868f2b4</ProjectGuid>
+    <ProjectHome>.</ProjectHome>
+    <StartupFile>
+    </StartupFile>
+    <SearchPath>
+    </SearchPath>
+    <WorkingDirectory>.</WorkingDirectory>
+    <OutputPath>.</OutputPath>
+    <Name>SerenSymposium</Name>
+    <RootNamespace>SerenSymposium</RootNamespace>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <DebugSymbols>true</DebugSymbols>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <DebugSymbols>true</DebugSymbols>
+    <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="seren_symposium\app.py" />
+    <Compile Include="seren_symposium\config.py" />
+    <Compile Include="seren_symposium\tests\conftest.py" />
+    <Compile Include="seren_symposium\tests\test_app.py" />
+    <Compile Include="seren_symposium\tests\test_config.py" />
+    <Compile Include="seren_symposium\_version.py" />
+    <Compile Include="seren_symposium\__init__.py" />
+    <Compile Include="seren_symposium\__main__.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="seren_symposium\" />
+    <Folder Include="seren_symposium\tests\" />
+    <Folder Include="seren_symposium\ui\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="seren_symposium\ui\index.html" />
+  </ItemGroup>
+  <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
+  <!-- Uncomment the CoreCompile target to enable the Build command in
+       Visual Studio and specify your pre- and post-build commands in
+       the BeforeBuild and AfterBuild targets below. -->
+  <!--<Target Name="CoreCompile" />-->
+  <Target Name="BeforeBuild">
+  </Target>
+  <Target Name="AfterBuild">
+  </Target>
+</Project>

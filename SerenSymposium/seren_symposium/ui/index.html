@@ -1,0 +1,128 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Seren</title>
+<style>
+  :root { --bg:#12141a; --panel:#181b23; --line:#262a35; --fg:#e6e8ee;
+          --muted:#8b91a3; --accent:#8E7CC3; }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--fg); height:100vh;
+         display:flex; flex-direction:column;
+         font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif }
+  header { display:flex; align-items:center; gap:14px; padding:8px 14px;
+           background:var(--panel); border-bottom:1px solid var(--line) }
+  .brand { font-weight:600 }
+  nav { display:flex; gap:2px }
+  nav button { background:none; border:0; color:var(--muted); padding:6px 13px;
+               border-radius:6px; cursor:pointer; font:inherit }
+  nav button[aria-selected=true] { background:#2a2140; color:#cbbdf0 }
+  .status { margin-left:auto; display:flex; align-items:center; gap:7px;
+            color:var(--muted); font-size:12px }
+  .dot { width:8px; height:8px; border-radius:50%; background:#5a5f70 }
+  .dot.up { background:#4ea36a } .dot.down { background:#c05252 }
+  main { flex:1; display:grid; grid-template-columns:190px 1fr; min-height:0 }
+  aside { background:var(--panel); border-right:1px solid var(--line);
+          padding:10px; overflow:auto }
+  .folder { color:var(--muted); font-size:11px; text-transform:lowercase;
+            margin:12px 0 4px }
+  .sess { padding:6px 9px; border-radius:6px; cursor:pointer; color:#c3c7d4 }
+  .sess:hover { background:#20242e }
+  section { display:flex; flex-direction:column; min-height:0 }
+  .log { flex:1; overflow:auto; padding:16px; display:flex;
+         flex-direction:column; gap:10px }
+  .msg { max-width:78%; padding:8px 12px; border-radius:12px;
+         background:var(--panel); border:1px solid var(--line) }
+  .msg.me { align-self:flex-end; background:#2a2140; border-color:#3a2f56 }
+  .meta { font-size:11px; color:var(--muted); margin-top:5px }
+  form { display:flex; gap:8px; padding:11px 14px; border-top:1px solid var(--line) }
+  textarea { flex:1; resize:none; background:var(--panel); color:var(--fg);
+             border:1px solid var(--line); border-radius:7px; padding:8px 10px;
+             font:inherit; height:38px }
+  button.send { background:var(--accent); border:0; color:#fff; padding:0 18px;
+                border-radius:7px; cursor:pointer; font:inherit }
+  iframe { flex:1; border:0; background:#fff }
+</style>
+
+<header>
+  <span class="brand">Seren</span>
+  <nav id="tabs"></nav>
+  <span class="status"><span class="dot" id="dot"></span><span id="stat">checking</span></span>
+</header>
+
+<main>
+  <aside id="side"></aside>
+  <section id="chat">
+    <div class="log" id="log"></div>
+    <form id="composer">
+      <textarea id="input" placeholder="Type a message…"></textarea>
+      <button class="send">Send</button>
+    </form>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let CFG = null, tab = "chat";
+
+async function boot() {
+  CFG = await (await fetch("/api/config")).json();
+  document.documentElement.style.setProperty("--accent", CFG.accent);
+  drawTabs(); drawSide(); poll(); setInterval(poll, 15000);
+}
+
+function drawTabs() {
+  const names = ["chat", ...Object.keys(CFG.viewers)];
+  $("#tabs").innerHTML = names.map(n =>
+    `<button data-t="${n}" aria-selected="${n === tab}">${n}</button>`).join("");
+  $("#tabs").onclick = e => { if (e.target.dataset.t) show(e.target.dataset.t); };
+}
+
+// Sibling viewers are LOADED, not reimplemented - SerenMemory, Workbench and
+// Lodestar already serve these pages on the shared Meninges baseplate.
+function show(t) {
+  tab = t; drawTabs();
+  const main = document.querySelector("main");
+  if (t === "chat") { main.innerHTML = ""; main.append($("#side") || sideEl(), chatEl()); drawSide(); return; }
+  main.innerHTML = `<iframe src="${CFG.viewers[t]}" title="${t}"></iframe>`;
+  main.style.gridTemplateColumns = "1fr";
+}
+
+function drawSide() {
+  const el = document.getElementById("side"); if (!el) return;
+  const folders = CFG.folders.length ? CFG.folders : [{ name: "sessions" }];
+  el.innerHTML = folders.map(f =>
+    `<div class="folder">${f.name}</div><div class="sess">new session</div>`).join("");
+}
+
+async function poll() {
+  try {
+    const h = await (await fetch("/health")).json();
+    const up = h.lodestar.reachable;
+    $("#dot").className = "dot " + (up ? "up" : "down");
+    $("#stat").textContent = up ? "lodestar" : "lodestar down";
+    $("#stat").title = h.lodestar.detail || "";
+  } catch { $("#dot").className = "dot down"; $("#stat").textContent = "offline"; }
+}
+
+function add(role, text, meta) {
+  const d = document.createElement("div");
+  d.className = "msg" + (role === "user" ? " me" : "");
+  d.textContent = text;
+  if (meta) { const m = document.createElement("div"); m.className = "meta"; m.textContent = meta; d.append(m); }
+  $("#log").append(d); $("#log").scrollTop = 1e9;
+}
+
+document.addEventListener("submit", async e => {
+  e.preventDefault();
+  const t = $("#input").value.trim(); if (!t) return;
+  $("#input").value = ""; add("user", t);
+  const r = await fetch("/api/chat", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: t }] }) });
+  const j = await r.json();
+  if (!r.ok) return add("assistant", `${j.error || "error"} - ${j.detail || ""}`);
+  add("assistant", j.content ?? j.text ?? JSON.stringify(j),
+      [j.model, j.toolRounds != null ? `tools:${j.toolRounds}` : null].filter(Boolean).join(" · "));
+});
+
+boot();
+</script>

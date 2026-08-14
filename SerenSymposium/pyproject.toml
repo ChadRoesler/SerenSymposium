@@ -1,0 +1,77 @@
+# ════════════════════════════════════════════════════════════════════════
+#  seren-symposium — the front door to the Seren constellation.
+#
+#  Not "a chat app". A desktop shell: chat in one tab, and each sibling
+#  service's OWN /viewer in the others. Memory, Tools and Cluster are not
+#  reimplemented here - they are already built, already share the Meninges
+#  baseplate, and are already served over HTTP by the services that own them.
+#
+#  Family pattern: same layout as seren-lodestar / seren-workbench. Version
+#  flows from the git tag via setuptools-scm.
+# ════════════════════════════════════════════════════════════════════════
+[build-system]
+requires = ["setuptools>=68", "setuptools-scm>=8", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seren-symposium"
+dynamic = ["version"]
+description = "Desktop front door for the Seren stack - chat, plus every service's viewer in one window."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Chad Roesler" }]
+keywords = ["llm", "desktop", "seren", "chat", "pywebview"]
+
+dependencies = [
+    # A LOOPBACK shim, not a service. Symposium serves its own UI on
+    # 127.0.0.1 and proxies chat to Lodestar with the bearer attached, so the
+    # token never reaches JavaScript and Lodestar never needs CORS. It binds a
+    # port; it does not expose one.
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pyyaml>=6.0.2",
+    "httpx>=0.27.0",
+    # Shared core: token resolution, TLS config, version + update checking,
+    # and the viewer baseplate - so the chat chrome matches the embedded tabs
+    # instead of looking like a different application bolted on.
+    "seren-meninges>=2.2.0,<3",
+    "seren-sinew>=1.0.0,<2",
+]
+
+[project.optional-dependencies]
+# The native window. Deliberately an EXTRA: without it Symposium still runs
+# and serves its UI to a browser, which is what CI and headless boxes want.
+# pywebview wraps the OS webview instead of shipping Chromium - ~10 MB rather
+# than Electron's 150 MB+, at the cost of inheriting whatever WebView2/WebKit
+# the machine has.
+desktop = ["pywebview>=5.0"]
+corp = ["truststore>=0.9"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx>=0.27"]
+
+[project.scripts]
+seren-symposium = "seren_symposium.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/ChadRoesler/SerenSymposium"
+Repository = "https://github.com/ChadRoesler/SerenSymposium"
+"Bug Tracker" = "https://github.com/ChadRoesler/SerenSymposium/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["seren_symposium*"]
+
+[tool.setuptools.package-data]
+seren_symposium = ["ui/*.html", "ui/*.css", "ui/*.js"]
+
+[tool.setuptools_scm]
+root = ".."
+version_scheme = "release-branch-semver"
+version_file = "seren_symposium/_version.py"
+tag_regex = "^v(?P<version>[0-9]+\\.[0-9]+\\.[0-9]+.*)$"
+fallback_version = "0.0.0.dev0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
