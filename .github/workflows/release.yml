@@ -1,0 +1,202 @@
+name: CI / Release
+
+on:
+  push:
+    branches: ["**"]
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: write
+
+# ── Test matrix ───────────────────────────────────────────────────────────
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: "Test py${{ matrix.python-version }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm needs full history + tags
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package + dev extras
+        run: pip install -e ".[dev]"
+        working-directory: SerenSymposium
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
+        working-directory: SerenSymposium
+
+# ── Build + GitHub Release (tags only) ────────────────────────────────────
+  # ── Install shapes ──────────────────────────────────────────────────────
+  #
+  # `test` installs [dev] and runs pytest FROM INSIDE the repo. That proves the
+  # code works with every dev dependency present and ./seren_symposium on sys.path.
+  # It proves nothing about what an operator gets from `pip install seren-symposium`.
+  #
+  # Two real breakages got past `test` and would have been caught here:
+  #   1. An unconditional import of an OPTIONAL dependency - invisible when the
+  #      dev install pulls it in anyway, fatal on a bare install.
+  #   2. A satisfied-but-stale floor (seren-meninges>=2.0.0 happily resolving
+  #      2.0.0 after 2.1.0 shipped). Only a real resolve in a clean env shows it.
+  #
+  # So: install every SHAPE an operator can ask for, then import the app FROM
+  # OUTSIDE THE REPO so the source tree cannot mask a missing dependency.
+  #
+  # Every shape runs on every push, including the slow ones, and this job GATES
+  # the release. The maintainer eats the CI time so nobody eats a broken install.
+  install-shapes:
+    runs-on: ubuntu-latest
+    name: "Install ${{ matrix.shape.label }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        shape:
+          - { label: "bare",          spec: ".",            updates: "unavailable" }
+          - { label: "[updates]", spec: ".[updates]", updates: "wired" }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ${{ matrix.shape.spec }}
+        run: pip install "${{ matrix.shape.spec }}"
+        working-directory: SerenSymposium
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0"
+
+      - name: Install a test client (NOT part of the shape under test)
+        # starlette's TestClient needs httpx at runtime. It is a test tool, not
+        # something seren_symposium imports, so adding it cannot mask a missing runtime
+        # dependency - but leaving it out fails the smoke step for a reason that
+        # has nothing to do with the install shape.
+        run: pip install "httpx2" || pip install "httpx"
+
+      - name: Import and construct the app OUT OF TREE
+        run: |
+          cd "$(mktemp -d)"
+          python - <<'PY'
+          from seren_symposium.app import create_app
+          from fastapi.testclient import TestClient
+
+          app = create_app()
+          print("app constructed OK")
+
+          with TestClient(app) as c:
+              r = c.get("/api/v1/system/version")
+          assert r.status_code == 200, f"/api/v1/system/version returned {r.status_code}: {r.text[:300]}"
+          u = r.json().get("updates")
+
+          assert isinstance(u, dict), f"/api/v1/system/version must always carry an updates dict, got {u!r}"
+          expected = {"status", "distribution", "installed", "latest",
+                      "update_available", "detail", "checked_at"}
+          assert set(u) == expected, f"key drift: {set(u) ^ expected}"
+          assert isinstance(u["update_available"], bool)
+
+          # DELIBERATELY NOT ASSERTED: that a non-[updates] shape reports
+          # "unavailable". That assertion was wrong and cost real debugging
+          # time. seren_meninges.updates lazily imports httpx + packaging, so
+          # the [updates] extra GUARANTEES they are present - but its absence
+          # guarantees nothing. Six of the nine services already depend on
+          # httpx directly, and sentence-transformers drags it in on top, so
+          # update checking simply works without the extra. "It worked" is
+          # not a failure, and a test that says otherwise sends you hunting a
+          # bug that isn't there.
+          #
+          # What IS invariant:
+          KNOWN = {"ok", "disabled", "unavailable", "error"}
+          assert u["status"] in KNOWN, f"unknown status {u['status']!r}"
+          if u["status"] == "unavailable":
+              assert u["update_available"] is False
+              assert u["detail"], "unavailable must say how to fix it"
+          # Update checking is CORE in seren-meninges now, not an extra, so it
+          # must be wired in EVERY shape - bare included. "unavailable" means
+          # the checker was never built or its deps are missing, which with
+          # core deps can only mean seren-meninges resolved too old. "error" is
+          # still fine: a runner with no egress is a legitimate answer.
+          assert u["status"] != "unavailable", (
+              f"status=unavailable in shape ${{ matrix.shape.label }} - update "
+              f"checking is core now, so this means seren-meninges resolved too "
+              f"old or the checker was never constructed. detail={u['detail']}"
+          )
+          print(f"updates block OK: status={u['status']}")
+          PY
+
+  build-and-release:
+    needs: [test, install-shapes]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm reads the full tag graph
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build frontend
+        run: pip install build
+
+      - name: Build wheel and sdist
+        # setuptools-scm derives the version from the git tag automatically.
+        # No sed patching needed - __version__ is resolved at runtime via
+        # importlib.metadata.
+        run: python -m build
+        working-directory: SerenSymposium
+
+      - name: Upload dist as artifact (handed to the publish job)
+        uses: actions/upload-artifact@v4
+        with:
+          name: seren-symposium-dist
+          path: SerenSymposium/dist/
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SerenSymposium/dist/*
+          generate_release_notes: true
+
+# ── PyPI publish (Trusted Publishing, tokenless) ──────────────────────────
+  pypi-publish:
+    needs: [build-and-release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/seren-symposium
+    permissions:
+      id-token: write   # MANDATORY for Trusted Publishing; job-level = least privilege
+    steps:
+      - name: Download the built dist
+        uses: actions/download-artifact@v4
+        with:
+          name: seren-symposium-dist
+          path: dist/
+
+      - name: Publish to PyPI (tokenless)
+        uses: pypa/gh-action-pypi-publish@release/v1

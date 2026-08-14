@@ -1,0 +1,51 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  seren-symposium.yaml - the desktop front door.
+#
+#  Everything here is OPTIONAL; defaults assume the whole stack on
+#  localhost. Symposium is a CLIENT: it holds the token it PRESENTS to
+#  Lodestar, and authenticates nobody itself.
+# ═══════════════════════════════════════════════════════════════════════
+
+lodestar:
+  url: "http://127.0.0.1:6361"
+  timeout_seconds: 120
+  # ONE of these. Same precedence as every other service: inline, keyring, env.
+  # bearer_token: ""
+  # bearer_token_keyring: "seren-lodestar/chad"
+  # bearer_token_env: "SEREN_LODESTAR_BEARER_TOKEN"
+
+# ── The read-only tabs ─────────────────────────────────────────────────
+# These are the OTHER services' own /viewer pages, not copies of them.
+# Blank one out to hide that tab.
+viewers:
+  memory:  "http://127.0.0.1:7420/viewer"
+  tools:   "http://127.0.0.1:7425/viewer"
+  cluster: "http://127.0.0.1:6361/viewer"
+  probe:   ""
+
+ui:
+  host: 127.0.0.1        # loopback ONLY - there is no inbound auth
+  port: 7426
+  confirm_destructive: true
+  window_width: 1280
+  window_height: 860
+
+# ── Folders are CONTEXT BOUNDARIES, not filing ─────────────────────────
+# A folder carries defaults that its sessions inherit, so a session started
+# in "seren stack" already knows what it is about and one in "general" does
+# not drag that context along. The per-session chip still overrides any of it.
+folders:
+  - name: "seren stack"
+    system_prompt: "You are working on the Seren services. Prefer real bytes over recollection."
+    model: ""
+    temperature: 0.6
+    memory_tags: ["seren", "infra"]
+
+  - name: "general"
+    system_prompt: ""
+    temperature: 0.9
+
+updates:
+  enabled: true
+  check_interval_hours: 6
+  allow_prerelease: false
