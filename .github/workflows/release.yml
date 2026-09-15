@@ -66,7 +66,9 @@ jobs:
       fail-fast: false
       matrix:
         shape:
-          - { label: "bare",          spec: ".",            updates: "unavailable" }
+          - { label: "bare",      spec: ".",          updates: "unavailable" }
+          - { label: "[corp]",    spec: ".[corp]",    updates: "unavailable" }
+          - { label: "[desktop]", spec: ".[desktop]", updates: "unavailable" }
           - { label: "[updates]", spec: ".[updates]", updates: "wired" }
 
     steps:
@@ -103,12 +105,16 @@ jobs:
           app = create_app()
           print("app constructed OK")
 
+          # /api/config, NOT / - Symposium's root serves the HTML shell, so it
+          # is the one service in the family whose / has no JSON to assert on.
+          # /api/config is the equivalent surface: what the UI needs to draw
+          # itself, updates block included.
           with TestClient(app) as c:
-              r = c.get("/api/v1/system/version")
-          assert r.status_code == 200, f"/api/v1/system/version returned {r.status_code}: {r.text[:300]}"
+              r = c.get("/api/config")
+          assert r.status_code == 200, f"/api/config returned {r.status_code}: {r.text[:300]}"
           u = r.json().get("updates")
 
-          assert isinstance(u, dict), f"/api/v1/system/version must always carry an updates dict, got {u!r}"
+          assert isinstance(u, dict), f"/api/config must always carry an updates dict, got {u!r}"
           expected = {"status", "distribution", "installed", "latest",
                       "update_available", "detail", "checked_at"}
           assert set(u) == expected, f"key drift: {set(u) ^ expected}"

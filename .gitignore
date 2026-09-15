@@ -438,8 +438,11 @@ dist/
 build/
 .eggs/
 
-# setuptools-scm generated version file (never commit)
-seren_symposium/_version.py
+# setuptools-scm generated version file (never commit).
+# Pattern must be depth-agnostic: the package sits at SerenSymposium/seren_symposium/,
+# and a path-anchored form only matches at the repo root, which silently let the
+# artifact through.
+**/_version.py
 
 # virtual environments
 .venv/

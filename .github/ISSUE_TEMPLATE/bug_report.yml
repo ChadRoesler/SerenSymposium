@@ -1,0 +1,87 @@
+name: Bug report
+description: Something is broken
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, two checks that resolve most reports:
+
+        1. **Is Lodestar up?** `curl http://127.0.0.1:7426/health` — the `lodestar` block
+           reports whether the cluster head answered, and why not if it didn't.
+           Symposium talks to Lodestar and nothing else, so a dead head looks like a dead app.
+        2. **Is the window the problem, or the app?** Run `seren-symposium --serve` and open
+           the URL in a browser. If it works there, the issue is the `[desktop]` extra /
+           your platform's webview, not Symposium.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect vs. what actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run ...
+        2. Click ...
+        3. See ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: SerenSymposium version
+      placeholder: "e.g. v0.2.0  (pip show seren-symposium)"
+    validations:
+      required: true
+
+  - type: input
+    id: lodestar
+    attributes:
+      label: SerenLodestar version
+      description: The cluster head Symposium is pointed at. `curl <lodestar-url>/api/v1/system/version`
+      placeholder: "e.g. v0.2.0, or 'not running'"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "e.g. 3.11.9"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+
+  - type: dropdown
+    id: window
+    attributes:
+      label: How are you running it?
+      options:
+        - Native window (the [desktop] extra)
+        - Headless (--serve) in a browser
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or error output
+      description: Symposium logs to stderr. Browser console errors help for UI issues.
+      render: text

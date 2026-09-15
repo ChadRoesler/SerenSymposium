@@ -60,7 +60,26 @@ class LodestarClientConfig(BaseModel):
     of the family's ServerConfig - there is no host/port to bind, because
     Symposium is not the thing being connected TO."""
     url: str = DEFAULT_LODESTAR
-    timeout_seconds: float = 120.0
+
+    # LONGER than Lodestar's own 120s llama timeout, on purpose. When a model is
+    # cold-loading into VRAM the upstream call can run long, and Lodestar turns
+    # that into a 504 that names the node and says "retry". If our timeout fired
+    # first we would replace that useful answer with a generic 502 "unreachable"
+    # at the exact moment the head was about to explain itself. The client must
+    # outlive the server it is quoting.
+    timeout_seconds: float = 180.0
+
+    # How much conversation history we put on the wire, in characters.
+    #
+    # Lodestar caps context at SEREN_CTX_BUDGET (6000 tokens, ~18000 chars) but
+    # its trimmer ONLY rewrites tool-response messages - ordinary back-and-forth
+    # is never trimmed, so an unbounded history silently sails past the budget
+    # and lands on llama.cpp oversized. Bounding it is therefore the client's
+    # job, and ~4000 tokens leaves room for the system prompt, the injected MCP
+    # tools block, the new message and the answer.
+    #
+    # Only what is SENT is trimmed; the shell still shows the whole thread.
+    history_max_chars: int = 12000
 
     # Token POINTERS - at most one in practice, same precedence as the family.
     bearer_token: str = ""
