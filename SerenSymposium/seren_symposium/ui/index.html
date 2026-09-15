@@ -5,6 +5,7 @@
   :root { --bg:#12141a; --panel:#181b23; --line:#262a35; --fg:#e6e8ee;
           --muted:#8b91a3; --accent:#8E7CC3; }
   * { box-sizing:border-box }
+  [hidden] { display:none !important }
   body { margin:0; background:var(--bg); color:var(--fg); height:100vh;
          display:flex; flex-direction:column;
          font:14px/1.5 system-ui,-apple-system,Segoe UI,sans-serif }
@@ -19,19 +20,27 @@
             color:var(--muted); font-size:12px }
   .dot { width:8px; height:8px; border-radius:50%; background:#5a5f70 }
   .dot.up { background:#4ea36a } .dot.down { background:#c05252 }
+  .dot.warn { background:#c9a227 }
   main { flex:1; display:grid; grid-template-columns:190px 1fr; min-height:0 }
+  main.viewing { grid-template-columns:1fr }
   aside { background:var(--panel); border-right:1px solid var(--line);
           padding:10px; overflow:auto }
-  .folder { color:var(--muted); font-size:11px; text-transform:lowercase;
-            margin:12px 0 4px }
-  .sess { padding:6px 9px; border-radius:6px; cursor:pointer; color:#c3c7d4 }
-  .sess:hover { background:#20242e }
+  .folder { padding:6px 9px; border-radius:6px; cursor:pointer; color:#c3c7d4;
+            font-size:13px }
+  .folder:hover { background:#20242e }
+  .folder[aria-current=true] { background:#2a2140; color:#cbbdf0 }
+  .folder .hint { display:block; font-size:11px; color:var(--muted) }
+  .newsess { margin-top:12px; padding:6px 9px; border-radius:6px; cursor:pointer;
+             color:var(--muted); font-size:11px; text-transform:lowercase }
+  .newsess:hover { background:#20242e; color:#c3c7d4 }
   section { display:flex; flex-direction:column; min-height:0 }
   .log { flex:1; overflow:auto; padding:16px; display:flex;
          flex-direction:column; gap:10px }
   .msg { max-width:78%; padding:8px 12px; border-radius:12px;
-         background:var(--panel); border:1px solid var(--line) }
+         background:var(--panel); border:1px solid var(--line);
+         white-space:pre-wrap; word-break:break-word }
   .msg.me { align-self:flex-end; background:#2a2140; border-color:#3a2f56 }
+  .msg.err { border-color:#6d3535; background:#2a1c1c }
   .meta { font-size:11px; color:var(--muted); margin-top:5px }
   form { display:flex; gap:8px; padding:11px 14px; border-top:1px solid var(--line) }
   textarea { flex:1; resize:none; background:var(--panel); color:var(--fg);
@@ -39,7 +48,8 @@
              font:inherit; height:38px }
   button.send { background:var(--accent); border:0; color:#fff; padding:0 18px;
                 border-radius:7px; cursor:pointer; font:inherit }
-  iframe { flex:1; border:0; background:#fff }
+  button.send[disabled] { opacity:.5; cursor:default }
+  iframe { border:0; background:#fff; width:100%; height:100% }
 </style>
 
 <header>
@@ -48,80 +58,144 @@
   <span class="status"><span class="dot" id="dot"></span><span id="stat">checking</span></span>
 </header>
 
-<main>
+<main id="main">
   <aside id="side"></aside>
   <section id="chat">
     <div class="log" id="log"></div>
     <form id="composer">
       <textarea id="input" placeholder="Type a message…"></textarea>
-      <button class="send">Send</button>
+      <button class="send" id="send">Send</button>
     </form>
   </section>
+  <iframe id="frame" title="viewer" hidden></iframe>
 </main>
 
 <script>
 const $ = s => document.querySelector(s);
-let CFG = null, tab = "chat";
+const esc = s => String(s).replace(/[&<>"]/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+let CFG = null, tab = "chat", folder = "";
+// folder name -> [{role, content}]. Multi-turn context lives here and is sent
+// as `history`; Lodestar is stateless per request and keeps none of it.
+const HISTORY = new Map();
+
+const histFor = f => HISTORY.get(f) || HISTORY.set(f, []).get(f);
 
 async function boot() {
   CFG = await (await fetch("/api/config")).json();
   document.documentElement.style.setProperty("--accent", CFG.accent);
-  drawTabs(); drawSide(); poll(); setInterval(poll, 15000);
+  folder = (CFG.folders[0] || {}).name || "";
+  drawTabs(); drawSide(); drawLog(); poll(); setInterval(poll, 15000);
 }
 
 function drawTabs() {
   const names = ["chat", ...Object.keys(CFG.viewers)];
   $("#tabs").innerHTML = names.map(n =>
-    `<button data-t="${n}" aria-selected="${n === tab}">${n}</button>`).join("");
-  $("#tabs").onclick = e => { if (e.target.dataset.t) show(e.target.dataset.t); };
+    `<button data-t="${esc(n)}" aria-selected="${n === tab}">${esc(n)}</button>`).join("");
 }
+
+// Tabs and the sidebar are delegated from a container that is never replaced,
+// so switching away from chat and back cannot strand a dead listener - or, as
+// it used to, tear the chat pane out of the DOM with no way to rebuild it.
+$("#tabs").onclick = e => { if (e.target.dataset.t) show(e.target.dataset.t); };
+
+$("#side").onclick = e => {
+  const row = e.target.closest("[data-f]");
+  if (row) { folder = row.dataset.f; drawSide(); drawLog(); return; }
+  if (e.target.closest("[data-new]")) { histFor(folder).length = 0; drawLog(); }
+};
 
 // Sibling viewers are LOADED, not reimplemented - SerenMemory, Workbench and
 // Lodestar already serve these pages on the shared Meninges baseplate.
 function show(t) {
   tab = t; drawTabs();
-  const main = document.querySelector("main");
-  if (t === "chat") { main.innerHTML = ""; main.append($("#side") || sideEl(), chatEl()); drawSide(); return; }
-  main.innerHTML = `<iframe src="${CFG.viewers[t]}" title="${t}"></iframe>`;
-  main.style.gridTemplateColumns = "1fr";
+  const viewing = t !== "chat";
+  $("#main").classList.toggle("viewing", viewing);
+  $("#side").hidden = viewing;
+  $("#chat").hidden = viewing;
+  $("#frame").hidden = !viewing;
+  if (viewing) $("#frame").src = CFG.viewers[t];
+  else $("#frame").removeAttribute("src");
 }
 
 function drawSide() {
-  const el = document.getElementById("side"); if (!el) return;
-  const folders = CFG.folders.length ? CFG.folders : [{ name: "sessions" }];
-  el.innerHTML = folders.map(f =>
-    `<div class="folder">${f.name}</div><div class="sess">new session</div>`).join("");
+  const folders = CFG.folders.length ? CFG.folders : [{ name: "" }];
+  $("#side").innerHTML = folders.map(f => {
+    const bits = [f.model, f.temperature != null ? `t=${f.temperature}` : null]
+      .filter(Boolean).join(" · ");
+    return `<div class="folder" data-f="${esc(f.name)}" aria-current="${f.name === folder}">`
+         + `${esc(f.name || "sessions")}`
+         + (bits ? `<span class="hint">${esc(bits)}</span>` : "")
+         + `</div>`;
+  }).join("") + `<div class="newsess" data-new="1">new session</div>`;
 }
+
+function drawLog() {
+  $("#log").innerHTML = "";
+  for (const m of histFor(folder)) add(m.role, m.content);
+}
+
+// "Reachable" is not the same as "usable": Lodestar's /health is public, so a
+// wrong bearer still answers 200. The label says which of those you have.
+const STATUS_LABEL = {
+  ok:           ["up",   "lodestar"],
+  no_inference: ["warn", "no model"],
+  unauthorized: ["down", "bad token"],
+  unreachable:  ["down", "lodestar down"],
+};
 
 async function poll() {
   try {
     const h = await (await fetch("/health")).json();
-    const up = h.lodestar.reachable;
-    $("#dot").className = "dot " + (up ? "up" : "down");
-    $("#stat").textContent = up ? "lodestar" : "lodestar down";
+    const [cls, label] = STATUS_LABEL[h.lodestar.status] || ["down", "unknown"];
+    $("#dot").className = "dot " + cls;
+    $("#stat").textContent = label;
     $("#stat").title = h.lodestar.detail || "";
   } catch { $("#dot").className = "dot down"; $("#stat").textContent = "offline"; }
 }
 
-function add(role, text, meta) {
+function add(role, text, meta, cls) {
   const d = document.createElement("div");
-  d.className = "msg" + (role === "user" ? " me" : "");
+  d.className = "msg" + (role === "user" ? " me" : "") + (cls ? " " + cls : "");
   d.textContent = text;
   if (meta) { const m = document.createElement("div"); m.className = "meta"; m.textContent = meta; d.append(m); }
   $("#log").append(d); $("#log").scrollTop = 1e9;
 }
 
-document.addEventListener("submit", async e => {
+$("#composer").addEventListener("submit", async e => {
   e.preventDefault();
-  const t = $("#input").value.trim(); if (!t) return;
-  $("#input").value = ""; add("user", t);
-  const r = await fetch("/api/chat", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ messages: [{ role: "user", content: t }] }) });
-  const j = await r.json();
-  if (!r.ok) return add("assistant", `${j.error || "error"} - ${j.detail || ""}`);
-  add("assistant", j.content ?? j.text ?? JSON.stringify(j),
-      [j.model, j.toolRounds != null ? `tools:${j.toolRounds}` : null].filter(Boolean).join(" · "));
+  const text = $("#input").value.trim(); if (!text) return;
+  const hist = histFor(folder);
+  $("#input").value = ""; $("#send").disabled = true;
+  add("user", text);
+  try {
+    const r = await fetch("/api/chat", {
+      method: "POST", headers: { "content-type": "application/json" },
+      // The folder NAME goes over the wire, not its preset: the system prompt,
+      // model and temperature are resolved server-side, where the config lives
+      // and where the precedence is tested.
+      body: JSON.stringify({ prompt: text, folder, history: hist.slice() }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      add("assistant", [j.error || `HTTP ${r.status}`, j.detail, j.hint]
+        .filter(Boolean).join(" - "), null, "err");
+      return;
+    }
+    // Recorded only on success, so a failed turn does not poison the context
+    // that every later message replays.
+    hist.push({ role: "user", content: text },
+              { role: "assistant", content: j.response ?? "" });
+    add("assistant", j.response ?? "",
+        [j.model, j.node, j.tool_rounds ? `tools:${j.tool_rounds}` : null]
+          .filter(Boolean).join(" · "));
+  } catch (ex) {
+    add("assistant", `could not reach symposium - ${ex}`, null, "err");
+  } finally {
+    $("#send").disabled = false;
+    $("#input").focus();
+  }
 });
 
 boot();

@@ -44,6 +44,60 @@ log = logging.getLogger("seren_symposium")
 UI_DIR = Path(__file__).resolve().parent / "ui"
 
 
+def _trim_history(history: Any, max_chars: int) -> list[dict[str, Any]]:
+    """Keep the newest whole messages that fit in max_chars, oldest dropped first.
+
+    Whole messages, never partial ones: half a turn reads as the model having
+    been told something it was not. Dropping from the oldest end is what makes
+    a long session degrade into a short-memory one instead of failing outright.
+    """
+    if not history or not isinstance(history, list):
+        return []
+    kept: list[dict[str, Any]] = []
+    budget = max_chars
+    for message in reversed(history):
+        if not isinstance(message, dict):
+            continue
+        cost = len(str(message.get("content", "")))
+        if cost > budget:
+            break
+        budget -= cost
+        kept.append(message)
+    kept.reverse()
+    return kept
+
+
+def to_lodestar_payload(cfg: SymposiumConfig, body: dict[str, Any]) -> dict[str, Any]:
+    """Symposium's request shape -> Lodestar's.
+
+    Lodestar wants a flat {prompt, system_prompt, history, model_override,
+    temperature}; it has never heard of a folder. Resolving the preset here
+    rather than in the shell's JavaScript is what makes the layer precedence -
+    folder default, then explicit per-session override - assertable in pytest.
+
+    Keys are omitted rather than sent empty: Lodestar tests `req.get(...)` for
+    truthiness, so a blank system_prompt and an absent one mean the same thing
+    to it, and omitting keeps the wire readable when debugging.
+    """
+    preset = cfg.folder(body["folder"]) if body.get("folder") else None
+    out: dict[str, Any] = {"prompt": body.get("prompt", "")}
+
+    if history := _trim_history(body.get("history"), cfg.lodestar.history_max_chars):
+        out["history"] = history
+    if system_prompt := (body.get("system_prompt") or (preset.system_prompt if preset else "")):
+        out["system_prompt"] = system_prompt
+    if model := (body.get("model_override") or (preset.model if preset else "")):
+        out["model_override"] = model
+
+    temperature = body.get("temperature")
+    if temperature is None and preset is not None:
+        temperature = preset.temperature
+    if temperature is not None:
+        out["temperature"] = temperature
+
+    return out
+
+
 def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
     cfg = config or load_config()
 
@@ -121,17 +175,70 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
 
     @app.get("/health")
     async def health(request: Request):
-        """Ours is trivial; the useful half is whether the cluster head answers.
-        Silence is signal - the UI shows this as a dot, not a paragraph."""
-        reachable, detail = False, ""
+        """Ours is trivial; the useful half is the cluster head.
+
+        TWO probes, because "the process is up" and "I can actually talk to it"
+        are different questions and only the second one is the one you care
+        about. Lodestar's /health is PUBLIC - it answers 200 for a client whose
+        bearer is wrong, missing, or meant for a different machine. Probing only
+        that yields a green dot on an app where every single message comes back
+        401, which is the most confusing failure this client can produce.
+
+        So the second probe is /api/v1/chat/health, which sits behind the bearer
+        AND reports whether a node is actually serving llama. That splits the
+        outcome four ways, and each one tells the operator a different thing to
+        go fix:
+
+            unreachable   - nothing answered. Is Lodestar running?
+            unauthorized  - it answered, and rejected our token.
+            no_inference  - we are in, but no node is serving llama.
+            ok            - ready.
+        """
+        client = request.app.state.client
+        url = cfg.lodestar.url
+
         try:
-            r = await request.app.state.client.get("/health")
-            reachable = r.status_code == 200
-            detail = f"HTTP {r.status_code}"
+            r = await client.get("/health")
         except Exception as ex:  # noqa: BLE001
-            detail = f"{type(ex).__name__}: {ex}"
-        return {"ok": True, "version": APP_VERSION,
-                "lodestar": {"url": cfg.lodestar.url, "reachable": reachable, "detail": detail}}
+            return {"ok": True, "version": APP_VERSION, "lodestar": {
+                "url": url, "reachable": False, "status": "unreachable",
+                "detail": f"{type(ex).__name__}: {ex}"}}
+
+        if r.status_code != 200:
+            return {"ok": True, "version": APP_VERSION, "lodestar": {
+                "url": url, "reachable": False, "status": "unreachable",
+                "detail": f"HTTP {r.status_code}"}}
+
+        try:
+            chat_health = await client.get("/api/v1/chat/health")
+        except Exception as ex:  # noqa: BLE001
+            # The head answered a moment ago, so this is a flap rather than a
+            # cold service. Say so instead of claiming it is down.
+            return {"ok": True, "version": APP_VERSION, "lodestar": {
+                "url": url, "reachable": True, "status": "unreachable",
+                "detail": f"chat backend probe failed - {type(ex).__name__}: {ex}"}}
+
+        if chat_health.status_code == 401:
+            return {"ok": True, "version": APP_VERSION, "lodestar": {
+                "url": url, "reachable": True, "status": "unauthorized",
+                "detail": "Lodestar rejected our bearer token - check "
+                          "lodestar.bearer_token in seren-symposium.yaml"}}
+
+        if chat_health.status_code != 200:
+            return {"ok": True, "version": APP_VERSION, "lodestar": {
+                "url": url, "reachable": True, "status": "no_inference",
+                "detail": f"chat backend returned HTTP {chat_health.status_code}"}}
+
+        payload = chat_health.json()
+        if not payload.get("ok"):
+            return {"ok": True, "version": APP_VERSION, "lodestar": {
+                "url": url, "reachable": True, "status": "no_inference",
+                "detail": payload.get("reason") or "no node is serving llama"}}
+
+        node = payload.get("node")
+        return {"ok": True, "version": APP_VERSION, "lodestar": {
+            "url": url, "reachable": True, "status": "ok",
+            "detail": f"inference on {node}" if node else "ready"}}
 
     @app.post("/api/chat")
     async def chat(request: Request):
@@ -140,15 +247,36 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         Deliberately thin: Symposium does not know what a tool is, does not
         route, does not touch MCP. Lodestar owns all of that. If logic starts
         accumulating here, it belongs in the cluster head instead.
+
+        The one translation that IS ours is the folder preset, because folders
+        are a Symposium concept the cluster head has never heard of. Lodestar's
+        own field names are never renamed - they are the contract, and a second
+        set of names would just be a second thing to keep in sync.
         """
         body: dict[str, Any] = await request.json()
         try:
-            r = await request.app.state.client.post("/api/v1/chat", json=body)
+            r = await request.app.state.client.post(
+                "/api/v1/chat", json=to_lodestar_payload(cfg, body))
         except Exception as ex:  # noqa: BLE001
             return JSONResponse(
                 {"error": "lodestar unreachable", "detail": f"{type(ex).__name__}: {ex}",
                  "url": cfg.lodestar.url}, status_code=502)
-        return JSONResponse(r.json() if r.headers.get("content-type", "").startswith(
-            "application/json") else {"text": r.text}, status_code=r.status_code)
+
+        payload = (r.json() if r.headers.get("content-type", "").startswith("application/json")
+                   else {"text": r.text})
+
+        # The one error we ANNOTATE rather than relay. Lodestar answers a bad
+        # bearer with {"detail": "unauthorized"}, which is correct and useless
+        # here - it cannot know the token it rejected came from a yaml file on
+        # this machine. Saying which file to edit is knowledge only the client
+        # has, and without it the UI renders a flat "401 unauthorized" that
+        # sends people looking at Lodestar, where nothing is wrong.
+        if r.status_code == 401:
+            payload = dict(payload)
+            payload["error"] = "lodestar rejected our bearer token"
+            payload["hint"] = ("check lodestar.bearer_token in seren-symposium.yaml "
+                               "against the token Lodestar is configured with")
+
+        return JSONResponse(payload, status_code=r.status_code)
 
     return app

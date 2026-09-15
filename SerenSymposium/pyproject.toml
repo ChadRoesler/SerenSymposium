@@ -49,6 +49,13 @@ dependencies = [
 desktop = ["pywebview>=5.0"]
 corp = ["truststore>=0.9"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx>=0.27"]
+# Kept as an EMPTY alias. Update checking is CORE in seren-meninges now, and
+# meninges is already a core dependency of this service, so there is nothing
+# left for this extra to install. The name stays because it appears in the
+# Starwright installers (--updates), in docs, and in people's notes - and an
+# unknown extra only earns a "does not provide the extra" warning that trains
+# operators to ignore warnings.
+updates = []
 
 [project.scripts]
 seren-symposium = "seren_symposium.__main__:main"
