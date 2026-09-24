@@ -110,6 +110,10 @@ class ServiceViewers(BaseModel):
 
 class UiConfig(BaseModel):
     host: str = "127.0.0.1"     # loopback ONLY - see the note in pyproject
+    # The shim has NO inbound auth and holds the Lodestar bearer. Widening it
+    # past loopback refuses to start unless this is set (or
+    # SEREN_SYMPOSIUM_ALLOW_OPEN_LAN=1) - see seren_meninges.exposure.
+    allow_open_lan: bool = False
     port: int = DEFAULT_UI_PORT
     confirm_destructive: bool = True
     window_width: int = 1280

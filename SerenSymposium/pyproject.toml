@@ -36,7 +36,7 @@ dependencies = [
     # Shared core: token resolution, TLS config, version + update checking,
     # and the viewer baseplate - so the chat chrome matches the embedded tabs
     # instead of looking like a different application bolted on.
-    "seren-meninges>=2.2.0,<3",
+    "seren-meninges>=2.4.0,<3",
     "seren-sinew>=1.0.0,<2",
 ]
 
