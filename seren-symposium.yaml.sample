@@ -25,6 +25,10 @@ viewers:
 
 ui:
   host: 127.0.0.1        # loopback ONLY - there is no inbound auth
+  # allow_open_lan: false
+  #   A host beyond loopback with no token REFUSES TO START and prints the
+  #   three ways out. Set this true (or <PREFIX>_ALLOW_OPEN_LAN=1) to run open on
+  #   purpose - a trusted LAN, a lab - and it will say so on every boot.
   port: 7426
   confirm_destructive: true
   window_width: 1280

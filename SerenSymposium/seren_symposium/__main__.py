@@ -44,9 +44,13 @@ def main() -> None:
     print(f"[symposium] v{APP_VERSION}", file=sys.stderr)
     print(f"[symposium] lodestar: {cfg.lodestar.url}", file=sys.stderr)
     print(f"[symposium] ui:       {url}", file=sys.stderr)
-    if cfg.ui.host not in ("127.0.0.1", "localhost", "::1"):
-        print(f"[symposium] WARNING: ui.host is {cfg.ui.host}, not loopback. This server "
-              f"has NO inbound auth by design.", file=sys.stderr)
+    # Not a warning any more. The shim holds the Lodestar bearer and checks
+    # nobody's, so a bind past loopback is refused unless the operator said
+    # allow_open_lan - and then it says so every boot.
+    from seren_meninges.exposure import enforce_exposure
+    enforce_exposure(cfg.ui.host, cfg.ui.port, service="seren-symposium",
+                     allow_open_lan=cfg.ui.allow_open_lan, env_prefix="SEREN_SYMPOSIUM",
+                     supports_token=False, log=lambda m: print(m, file=sys.stderr))
 
     app = create_app(cfg)
 

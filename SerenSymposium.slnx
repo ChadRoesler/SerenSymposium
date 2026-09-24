@@ -1,5 +1,7 @@
 <Solution>
-  <Folder Name="/.github/" />
+  <Folder Name="/.github/">
+    <File Path=".github/dependabot.yml" />
+  </Folder>
   <Project Path="SerenSymposium/SerenSymposium.pyproj" Type="888888a0-9f3d-457c-b088-3a5042f75d52" Id="36226534-2bd0-4a15-aef7-18891868f2b4">
     <Build Project="false" />
   </Project>
