@@ -212,6 +212,6 @@ The suite needs no live stack — an unreachable Lodestar is itself one of the t
 
 ## License
 
-GPL-3.0-or-later. Part of the [Seren](https://github.com/ChadRoesler) project — a fully self-hosted, local-first AI companion stack built to run gracefully on cheap hardware. The floor is a $250 Jetson, not a data center.
+AGPL-3.0-or-later. Part of the [Seren](https://github.com/ChadRoesler) project — a fully self-hosted, local-first AI companion stack built to run gracefully on cheap hardware. The floor is a $250 Jetson, not a data center.
 
 Build for the floor, not the ceiling. Rip it and win.
