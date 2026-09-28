@@ -18,7 +18,7 @@ name = "seren-symposium"
 dynamic = ["version"]
 description = "Desktop front door for the Seren stack - chat, plus every service's viewer in one window."
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.10"
 license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "Chad Roesler" }]
 keywords = ["llm", "desktop", "seren", "chat", "pywebview"]
