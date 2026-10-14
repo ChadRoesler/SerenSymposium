@@ -35,9 +35,9 @@ dependencies = [
     "httpx>=0.27.0",
     # Shared core: token resolution, TLS config, version + update checking,
     # and the viewer baseplate - so the chat chrome matches the embedded tabs
-    # instead of looking like a different application bolted on.
-    "seren-meninges>=2.4.0,<3",
-    "seren-sinew>=1.0.0,<2",
+    # instead of looking like a different application bolted on. No Sinew:
+    # Symposium talks only to Lodestar, and Lodestar does the waking.
+    "seren-meninges>=5.0,<6",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +56,18 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx>=0.27"]
 # unknown extra only earns a "does not provide the extra" warning that trains
 # operators to ignore warnings.
 updates = []
+
+# The Seren apps this one talks to over HTTP, and how new each must be.
+# NEVER INSTALLED: nobody asks for [peers]. The Observatory reads it before an
+# upgrade (seren_observatory.upgrades, PEERS) and holds the upgrade when an app
+# listed here is in the cluster but older; an app that is not there at all is
+# not required. Raise a floor in the same commit that starts using what the
+# newer peer added.
+#
+# Lodestar 5.0: /chat/stream with tool_status, max_tokens and repeat_penalty.
+peers = [
+    "seren-lodestar>=5.0",
+]
 
 [project.scripts]
 seren-symposium = "seren_symposium.__main__:main"

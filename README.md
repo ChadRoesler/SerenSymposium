@@ -2,7 +2,7 @@
 
 **The front door to the Seren constellation.** One window: chat in the first tab, and every sibling service's own operator page in the rest.
 
-Symposium is not "a chat app," and it is emphatically not a ninth service. It is the **desktop shell** the other eight already earned — Memory, Workbench, Lodestar and Probe each serve a perfectly good `/viewer` on the shared Meninges baseplate, and reimplementing any of them inside a client would be building a second copy of something that already works. So Symposium loads them. What it adds is the one surface nobody else owns: a place to actually *talk* to the stack.
+Symposium is not "a chat app," and it is emphatically not another service. It is the **desktop shell** the rest of the family already earned — Memory, Workbench, Lodestar and Probe each serve a perfectly good `/viewer` on the shared Meninges baseplate, and reimplementing any of them inside a client would be building a second copy of something that already works. So Symposium loads them. What it adds is the one surface nobody else owns: a place to actually *talk* to the stack.
 
 ```bash
 pip install "seren-symposium[desktop]"
@@ -17,9 +17,13 @@ seren-symposium
 
 **One endpoint, enforced by a test.** Symposium does not know what a tool is, does not route, does not touch MCP, and never reaches a leaf service directly. Lodestar owns all of that. Since that kind of erosion is gradual and easy to miss in review, `test_symposium_exposes_no_route_that_bypasses_lodestar` fails the build rather than trusting the convention.
 
-**A loopback shim, not a web server.** Serving the UI from Python means the bearer never reaches JavaScript and Lodestar never needs CORS opened for a desktop app. The cost is one loopback port — and no inbound auth, which is why it binds `127.0.0.1` only. Widen `ui.host` past loopback and you haven't exposed the UI, you've built a different, unauthenticated service.
+**Two voices.** A chat is answered by a local model through Lodestar, or — with `voice: claude` — by the `claude` CLI on your machine, with its own login, MCP servers and hooks. Each chat is one Claude conversation, resumed turn after turn; switch voices mid-chat and Claude is handed what it missed.
 
-**Folders are context boundaries, not filing.** A session opened in `seren stack` inherits a system prompt, model and temperature and already knows what it's about; one opened in `general` drags none of it along. Grouping is the side effect, not the point.
+**A loopback shim, not a web server.** Serving the UI from Python means the bearer never reaches JavaScript and Lodestar never needs CORS opened for a desktop app. The cost is one loopback port — and no inbound auth, which is why it binds `127.0.0.1` only. Widen `ui.host` past loopback and you haven't exposed the UI, you've built a different, unauthenticated service. And because loopback keeps out the LAN but not the other tabs in your browser, every request must come from Symposium's own page: a loopback `Host`, our own `Origin`, and JSON.
+
+**Chats are kept.** Each conversation is a JSON file next to your config — renamed, moved between projects, exported, imported. Answers stream in, with a live `calling recall…` while a tool runs and a receipt underneath: model, node, tools, seconds.
+
+**Projects are context boundaries, not filing.** A chat opened in `seren stack` inherits a system prompt, model and temperature and already knows what it's about; one opened in `general` drags none of it along. Grouping is the side effect, not the point.
 
 ---
 
@@ -44,8 +48,10 @@ Configuration is optional and assumes the whole stack on localhost. See [`SerenS
 | SerenLodestar (cluster head) | 6361 |
 | SerenMemory | 7420 |
 | SerenLoci | 7422 |
+| SerenHippocampus | 7424 |
 | SerenWorkbench | 7425 |
 | **SerenSymposium** | **7426** |
+| SerenTheatre | 7427 |
 | SerenProbe | 7430 |
 
 Symposium connects to **Lodestar only**. The other rows are there because their `/viewer` pages become its tabs — blank a viewer URL in the config and that tab disappears rather than rendering dead.

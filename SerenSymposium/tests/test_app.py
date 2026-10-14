@@ -54,6 +54,44 @@ def test_blank_viewer_urls_are_dropped_not_shown_dead(make_client):
     assert "memory" in viewers
 
 
+def test_memory_is_a_group_of_its_four_stores(make_client):
+    """Memory is not one service, so it is not one page: the tab opens onto
+    SerenMemory, Loci, the Callosum and the Hippocampus (13 Oct 2026)."""
+    viewers = make_client(SymposiumConfig()).get("/api/config").json()["viewers"]
+    assert list(viewers["memory"]) == ["memory", "loci", "callosum", "hippocampus"]
+    assert all(u.endswith("/viewer") for u in viewers["memory"].values())
+
+
+def test_a_group_drops_its_blank_members_and_then_itself(make_client):
+    cfg = SymposiumConfig()
+    cfg.viewers.memory = {"memory": "http://node-a:7250/viewer", "loci": "", "callosum": ""}
+    assert cfg.viewers.shown()["memory"] == {"memory": "http://node-a:7250/viewer"}
+    cfg.viewers.memory = {"memory": "", "loci": ""}
+    assert "memory" not in make_client(cfg).get("/api/config").json()["viewers"]
+
+
+def test_a_plain_memory_url_still_makes_one_tab(tmp_path):
+    """A yaml written before the group keeps working, as a single tab."""
+    from seren_symposium.config import load_config
+    yml = tmp_path / "seren-symposium.yaml"
+    yml.write_text('viewers:\n  memory: "http://node-a:7250/viewer"\n', encoding="utf-8")
+    assert load_config(str(yml)).viewers.shown()["memory"] == "http://node-a:7250/viewer"
+
+
+def test_the_page_wears_the_meninges_baseplate(client):
+    """The same shell every sibling's /viewer wears, in Symposium's colour,
+    with every stud filled or emptied - no marker left showing."""
+    r = client.get("/")
+    assert r.status_code == 200
+    page = r.text
+    assert 'class="seren-topbar"' in page and 'id="tabbar"' in page
+    assert "Seren<b>Symposium</b>" in page
+    assert "--accent: #a3b18a" in page
+    assert 'id="chat"' in page and 'id="viewer"' in page and 'id="stat-pill"' in page
+    assert "async function call(" in page
+    assert "{{" not in page
+
+
 def test_chat_returns_502_when_lodestar_is_down(client):
     """Not a 500. The app is fine; the cluster head is not, and the UI needs to
     be able to tell those apart."""
@@ -71,7 +109,11 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
     review, so it gets a test.
     """
     paths = {r.path for r in client.app.routes}
-    allowed = {"/", "/health", "/api/config", "/api/chat",
+    allowed = {"/", "/health", "/api/config",
+               # -> Lodestar, through app.state.client and nothing else
+               "/api/chat", "/api/chat/stream", "/api/models",
+               # -> files on this machine; no network at all
+               "/api/sessions", "/api/sessions/{sid}",
                "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
     unexpected = paths - allowed
     assert not unexpected, (

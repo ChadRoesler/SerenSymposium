@@ -8,7 +8,10 @@
 
 lodestar:
   url: "http://127.0.0.1:6361"
-  timeout_seconds: 120
+  # Longer than Lodestar's own 120s on purpose: when a model is cold-loading,
+  # Lodestar answers with a 504 naming the node, and we must still be
+  # listening to pass that on instead of a bare "unreachable".
+  timeout_seconds: 180
   # ONE of these. Same precedence as every other service: inline, keyring, env.
   # bearer_token: ""
   # bearer_token_keyring: "seren-lodestar/alice"
@@ -16,9 +19,14 @@ lodestar:
 
 # ── The read-only tabs ─────────────────────────────────────────────────
 # These are the OTHER services' own /viewer pages, not copies of them.
-# Blank one out to hide that tab.
+# Blank one out to hide that tab. A tab can be a GROUP - names to URLs, one
+# tab with a row of its own - and Memory is one: memory is four stores.
 viewers:
-  memory:  "http://127.0.0.1:7420/viewer"
+  memory:
+    memory:      "http://127.0.0.1:7420/viewer"
+    loci:        "http://127.0.0.1:7422/viewer"
+    callosum:    "http://127.0.0.1:7423/viewer"
+    hippocampus: "http://127.0.0.1:7424/viewer"
   tools:   "http://127.0.0.1:7425/viewer"
   cluster: "http://127.0.0.1:6361/viewer"
   probe:   ""
@@ -33,17 +41,43 @@ ui:
 # ── Folders are CONTEXT BOUNDARIES, not filing ─────────────────────────
 # A folder carries defaults that its sessions inherit, so a session started
 # in "seren stack" already knows what it is about and one in "general" does
-# not drag that context along. The per-session chip still overrides any of it.
+# not drag that context along. A session's own settings still override any of it.
+# The shell shows folders as PROJECTS and sessions as CHATS.
 folders:
   - name: "seren stack"
+    voice: ""                            # "" / "lodestar": a local model; "claude": see below
     system_prompt: "You are working on the Seren services. Prefer real bytes over recollection."
     model: ""
     temperature: 0.6
-    memory_tags: ["seren", "infra"]
+    # max_tokens: 1024
+    # repeat_penalty: 1.1
+    memory_tags: ["seren", "infra"]      # not wired yet: nothing reads it
 
   - name: "general"
     system_prompt: ""
     temperature: 0.9
+
+# ── Sessions: one JSON file each, kept on this machine ─────────────────
+# Blank: a `sessions` folder next to this file (~/seren-symposium/sessions
+# when there is no file). Back it up like anything else you'd miss.
+sessions:
+  dir: ""
+
+# ── The claude voice: chats where Claude answers ───────────────────────
+# A folder (or one chat, in its settings) with voice: "claude" is answered
+# by the `claude` CLI on THIS machine instead of a local model through
+# Lodestar - with the CLI's own login, MCP servers and hooks. Each chat is
+# one CLI conversation, resumed turn after turn. The command is yours;
+# a request only ever supplies the prompt (on stdin).
+claude:
+  enabled: true
+  name: "claude"            # what the answers are signed as in the shell
+  command: ["claude"]
+  cwd: ""                   # decides which project settings / MCP servers load
+  model: ""                 # blank: the CLI's default; a folder or chat can name one
+  permission_mode: ""       # -p can't ask, so a tool that would ask is refused...
+  allowed_tools: []         # ...unless listed here, e.g. ["mcp__workbench__*"]
+  timeout_seconds: 900
 
 updates:
   enabled: true

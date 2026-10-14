@@ -1,0 +1,90 @@
+/* Symposium on the Meninges baseplate: the shared tokens (--surface, --border,
+   --text, --text-dim, --accent) and nothing of its own but layout. The one
+   way it differs from its siblings is height - a chat fills the window and
+   scrolls inside itself, where a dashboard scrolls the page. */
+:root {
+    --sel: color-mix(in srgb, var(--accent) 20%, var(--surface));
+    --sel-text: color-mix(in srgb, var(--accent) 55%, var(--text));
+    --faint: color-mix(in srgb, var(--text-dim) 60%, var(--bg));
+}
+[hidden] { display: none !important; }
+
+body { height: 100vh; display: flex; flex-direction: column; font-size: 14px; }
+.seren-topbar { flex: none; }
+#views { flex: 1; min-height: 0; max-width: none; }
+.view { padding: 0; height: 100%; }
+#chat.view.active { display: grid; grid-template-columns: 240px 1fr; }
+#viewer.view.active { display: flex; flex-direction: column; }
+
+/* No 🔑 here: Symposium takes no bearer from the page - it is loopback-only
+   and holds Lodestar's itself. Each framed viewer keeps its own key. */
+#tokenBtn { display: none; }
+
+/* the Lodestar pill */
+#stat-pill { display: flex; align-items: center; gap: 7px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.dot.up { background: var(--ok); }
+.dot.down { background: var(--danger); }
+.dot.warn { background: #c9a227; }
+
+/* projects and their chats */
+aside { background: color-mix(in srgb, var(--surface) 70%, transparent); border-right: 1px solid var(--border);
+        padding: 10px; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
+.folder { display: flex; align-items: center; gap: 6px; padding: 7px 6px 2px;
+          color: var(--text-dim); font-size: 12px; letter-spacing: .02em; }
+.folder .name { cursor: pointer; display: flex; gap: 6px; min-width: 0;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folder .name:hover { color: var(--text); }
+.folder .hint { color: var(--faint); }
+.folder button { margin-left: auto; background: none; border: 0; color: var(--text-dim);
+                 padding: 0 5px; border-radius: 4px; }
+.folder button:hover { background: var(--surface-2); color: var(--accent); }
+.sess { padding: 4px 9px 4px 22px; border-radius: 6px; cursor: pointer; color: var(--text);
+        font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sess:hover { background: var(--surface-2); }
+.sess[aria-current=true] { background: var(--sel); color: var(--sel-text); }
+.sess.empty { color: var(--faint); font-style: italic; cursor: default; background: none; }
+.foot { margin-top: auto; padding-top: 10px; display: flex; gap: 6px; }
+button.ghost { background: none; color: var(--text-dim); padding: 3px 9px; border-radius: 6px; font-size: 12px; }
+button.ghost:hover { color: var(--text); }
+button.ghost.danger:hover { color: var(--danger); border-color: var(--danger); }
+
+/* the conversation */
+.talk { display: flex; flex-direction: column; min-height: 0; }
+.bar { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+.bar input.title { flex: 1; min-width: 0; background: none; border: 1px solid transparent;
+                   padding: 3px 7px; font-weight: 600; }
+.bar input.title:hover, .bar input.title:focus { border-color: var(--border); outline: none; }
+.bar select { padding: 3px 6px; }
+.settings { display: grid; grid-template-columns: auto 1fr auto 90px; gap: 6px 10px;
+            padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--surface);
+            align-items: center; font-size: 12px; color: var(--text-dim); }
+.settings textarea { grid-column: 2 / -1; height: 60px; resize: vertical; }
+.settings input, .settings textarea, .settings select { padding: 4px 7px; }
+.settings .note { grid-column: 1 / -1; font-size: 11px; color: var(--faint); }
+.log { flex: 1; overflow: auto; padding: 16px 22px; display: flex; flex-direction: column; gap: 10px; }
+.msg { max-width: 78%; padding: 8px 12px; border-radius: 12px; background: var(--surface);
+       border: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; }
+.msg.me { align-self: flex-end; background: var(--sel); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.msg.err { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
+.msg.live .text:empty::after { content: "…"; color: var(--text-dim); }
+.tool { font-size: 12px; color: var(--text-dim); font-style: italic; }
+.meta { font-size: 11px; color: var(--text-dim); margin-top: 5px; display: flex; gap: 8px; align-items: center;
+        font-family: var(--mono); }
+.meta button { background: none; border: 0; color: var(--text-dim); padding: 0;
+               text-decoration: underline; font-size: 11px; }
+.meta button:hover { color: var(--accent); }
+.blank { margin: auto; color: var(--text-dim); text-align: center; }
+form { display: flex; gap: 8px; padding: 11px 14px; border-top: 1px solid var(--border); }
+form textarea { flex: 1; resize: none; height: 58px; }
+button.send { padding: 0 18px; }
+button.send[disabled] { opacity: .5; cursor: default; }
+
+/* the siblings' viewers */
+.subtabs { display: flex; gap: 2px; padding: 0 22px; border-bottom: 1px solid var(--border);
+           background: color-mix(in srgb, var(--surface) 50%, transparent); }
+.subtabs button { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+                  color: var(--text-dim); padding: 7px 13px; font-size: .82rem; }
+.subtabs button:hover { color: var(--text); }
+.subtabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+iframe { border: 0; background: var(--bg); width: 100%; flex: 1; }

@@ -24,6 +24,8 @@
   <ItemGroup>
     <Compile Include="seren_symposium\app.py" />
     <Compile Include="seren_symposium\config.py" />
+    <Compile Include="seren_symposium\claude_voice.py" />
+    <Compile Include="seren_symposium\sessions.py" />
     <Compile Include="seren_symposium\tests\conftest.py" />
     <Compile Include="seren_symposium\tests\test_app.py" />
     <Compile Include="seren_symposium\tests\test_config.py" />
@@ -37,7 +39,11 @@
     <Folder Include="seren_symposium\ui\" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="seren_symposium\ui\index.html" />
+    <Content Include="seren_symposium\ui\body.html" />
+    <Content Include="seren_symposium\ui\header_aside.html" />
+    <Content Include="seren_symposium\ui\scripts.js" />
+    <Content Include="seren_symposium\ui\styles.css" />
+    <Content Include="seren_symposium\ui\tabs.html" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in

@@ -35,8 +35,13 @@ def offline_update_checks(monkeypatch):
     monkeypatch.setattr(UpdateChecker, "_fetch_from_index", _no_network)
 
 
+# What the shell itself sends from: the Host check refuses TestClient's
+# default "testserver", as it would any name that is not this machine.
+SHELL = "http://127.0.0.1:7426"
+
+
 @pytest.fixture
-def make_client():
+def make_client(tmp_path):
     """A Symposium whose Lodestar leg CANNOT reach anything.
 
     The default config points at 127.0.0.1:6361, so "Lodestar is down" used to
@@ -47,7 +52,7 @@ def make_client():
     instead of a property of the developer's machine.
 
     Tests that want a Lodestar replace app.state.client with their own
-    MockTransport.
+    MockTransport. Sessions go to the test's own tmp_path, never to ~.
     """
     clients = []
 
@@ -56,8 +61,10 @@ def make_client():
 
     def _factory(cfg: SymposiumConfig | None = None) -> TestClient:
         cfg = cfg or SymposiumConfig()
+        if not cfg.sessions.dir:
+            cfg.sessions.dir = str(tmp_path / "sessions")
         app = create_app(cfg)
-        tc = TestClient(app, raise_server_exceptions=False)
+        tc = TestClient(app, base_url=SHELL, raise_server_exceptions=False)
         tc.__enter__()
         # After __enter__, so this replaces the client lifespan just built.
         bearer = cfg.lodestar.resolve_bearer()

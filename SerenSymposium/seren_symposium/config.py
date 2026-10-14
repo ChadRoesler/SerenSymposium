@@ -9,9 +9,9 @@ so a token lives in exactly one place per machine.
 
 FOUR LAYERS, split by how often you touch a thing rather than what it is:
 
-    per-install    lodestar url, ui port, confirm_destructive   (Config tab)
-    per-folder     system prompt, model, temperature            (folder preset)
-    per-session    overrides of the above                       (header chip)
+    per-install    lodestar url, ui port, confirm_destructive   (this yaml)
+    per-folder     voice, system prompt, model, temperature, ... (folder preset)
+    per-session    overrides of the above                       (session settings)
     per-message    the composer
 
 The folder layer is the one that is easy to mistake for filing. It isn't:
@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field
@@ -34,7 +34,7 @@ from seren_meninges import TlsConfig, resolve_token
 log = logging.getLogger(__name__)
 
 # Loopback UI port. Family map: lodestar 6361 · memory 7420 · margin 7421 ·
-# loci 7422 · corpus-callosum 7423 · workbench 7425 · symposium 7426 ·
+# loci 7422 · corpus-callosum 7423 · hippocampus 7424 · workbench 7425 · symposium 7426 ·
 # probe 7430 · observatory 7777.
 DEFAULT_UI_PORT = 7426
 DEFAULT_LODESTAR = "http://127.0.0.1:6361"
@@ -48,10 +48,16 @@ class FolderPreset(BaseModel):
     through to whatever the model or Lodestar defaults to".
     """
     name: str
+    # Who answers: "lodestar" (a local model, routed by Lodestar) or "claude"
+    # (the claude CLI on this machine - see ClaudeConfig). "" = lodestar.
+    voice: str = ""
     system_prompt: str = ""
     model: str = ""
     temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    repeat_penalty: Optional[float] = None
     # Which memory tags sessions here should read. Empty = no filter.
+    # NOT WIRED YET: nothing reads it.
     memory_tags: list[str] = Field(default_factory=list)
 
 
@@ -95,17 +101,66 @@ class LodestarClientConfig(BaseModel):
         )
 
 
+class ClaudeConfig(BaseModel):
+    """The claude voice: chats where Claude answers, through the `claude` CLI
+    on this machine (seren_symposium.claude_voice has the why).
+
+    Everything that decides WHAT runs lives here, never in a request: the
+    program, where it runs, which tools it may use without asking.
+    """
+    enabled: bool = True
+    # What the answers are signed as in the shell ("claude", or a name).
+    name: str = "claude"
+    # The program and any fixed leading arguments; Symposium adds -p, the
+    # stream flags, the session and the per-chat model / system prompt.
+    command: list[str] = Field(default_factory=lambda: ["claude"])
+    # The working directory: decides which project settings, CLAUDE.md and
+    # project MCP servers the CLI loads. Blank = Symposium's own.
+    cwd: str = ""
+    # Model when neither the folder nor the chat names one. Blank = the CLI's.
+    model: str = ""
+    # --permission-mode and --allowedTools. With -p nobody is there to answer
+    # a permission prompt, so a tool that would ask is refused instead; list
+    # the ones this voice may use (e.g. "mcp__workbench__*").
+    permission_mode: str = ""
+    allowed_tools: list[str] = Field(default_factory=list)
+    # A turn that runs longer is killed; tools and thinking take a while.
+    timeout_seconds: float = 900.0
+
+
 class ServiceViewers(BaseModel):
     """Where the read-only tabs point.
 
     These are the OTHER services' own /viewer pages - not reimplementations.
     Blank a URL to hide that tab (someone who does not run Probe should not
     have a dead Probe tab).
+
+    A tab can also be a GROUP: a map of names to URLs, shown as one tab with
+    its own row of sub-tabs. Memory is one by default, because memory is not
+    one service - SerenMemory holds the episodes, Loci the facts, the Callosum
+    searches across both and the Hippocampus consolidates them. A plain URL
+    there still works, as one tab.
     """
-    memory: str = "http://127.0.0.1:7420/viewer"
-    tools: str = "http://127.0.0.1:7425/viewer"
-    cluster: str = "http://127.0.0.1:6361/viewer"
-    probe: str = ""
+    memory: Union[str, dict[str, str]] = Field(default_factory=lambda: {
+        "memory":      "http://127.0.0.1:7420/viewer",
+        "loci":        "http://127.0.0.1:7422/viewer",
+        "callosum":    "http://127.0.0.1:7423/viewer",
+        "hippocampus": "http://127.0.0.1:7424/viewer",
+    })
+    tools: Union[str, dict[str, str]] = "http://127.0.0.1:7425/viewer"
+    cluster: Union[str, dict[str, str]] = "http://127.0.0.1:6361/viewer"
+    probe: Union[str, dict[str, str]] = ""
+
+    def shown(self) -> dict[str, Union[str, dict[str, str]]]:
+        """The tabs worth drawing: blank URLs dropped, and a group left with
+        nothing in it dropped with them."""
+        out: dict[str, Union[str, dict[str, str]]] = {}
+        for name, v in self.model_dump().items():
+            if isinstance(v, dict):
+                v = {k: u for k, u in v.items() if u}
+            if v:
+                out[name] = v
+        return out
 
 
 class UiConfig(BaseModel):
@@ -128,16 +183,41 @@ class UpdatesConfig(BaseModel):
     allow_prerelease: bool = False
 
 
+class SessionsConfig(BaseModel):
+    """Where sessions are kept: one JSON file each.
+
+    On disk, in Python, rather than in the webview's localStorage: that is
+    per ORIGIN, port included, so moving ui.port (or --port) would have
+    silently lost every conversation; pywebview's default private mode keeps
+    nothing at all; and a file is something you can back up and read.
+
+    Blank: a `sessions` folder next to seren-symposium.yaml, or
+    ~/seren-symposium/sessions when there is no yaml.
+    """
+    dir: str = ""
+
+
 class SymposiumConfig(BaseModel):
     lodestar: LodestarClientConfig = Field(default_factory=LodestarClientConfig)
     viewers: ServiceViewers = Field(default_factory=ServiceViewers)
     ui: UiConfig = Field(default_factory=UiConfig)
     updates: UpdatesConfig = Field(default_factory=UpdatesConfig)
     tls: TlsConfig = Field(default_factory=TlsConfig)
+    sessions: SessionsConfig = Field(default_factory=SessionsConfig)
+    claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
     folders: list[FolderPreset] = Field(default_factory=list)
+    # The yaml this came from, when there was one. Not a setting.
+    config_path: Optional[str] = Field(default=None, exclude=True)
 
     def folder(self, name: str) -> Optional[FolderPreset]:
         return next((f for f in self.folders if f.name == name), None)
+
+    def sessions_dir(self) -> Path:
+        if self.sessions.dir:
+            return Path(os.path.expanduser(self.sessions.dir))
+        if self.config_path:
+            return Path(self.config_path).resolve().parent / "sessions"
+        return Path.home() / "seren-symposium" / "sessions"
 
 
 def _apply_env_overrides(cfg: SymposiumConfig) -> SymposiumConfig:
@@ -156,6 +236,8 @@ def _apply_env_overrides(cfg: SymposiumConfig) -> SymposiumConfig:
             cfg.ui.port = int(v)
         except ValueError:
             log.warning("SEREN_SYMPOSIUM_PORT=%r is not an int; keeping %s", v, cfg.ui.port)
+    if v := env.get("SEREN_SYMPOSIUM_SESSIONS_DIR"):
+        cfg.sessions.dir = v
     if (v := env.get("SEREN_SYMPOSIUM_UPDATES_ENABLED")) is not None:
         cfg.updates.enabled = v.strip().lower() in ("1", "true", "yes", "on")
     if v := env.get("SEREN_SYMPOSIUM_TRUST_SYSTEM_STORE"):
@@ -180,5 +262,8 @@ def load_config(path: Optional[str] = None) -> SymposiumConfig:
             log.warning("could not read %s: %s - using defaults + env", cfg_path, ex)
             data = {}
 
+    data.pop("config_path", None)
     cfg = SymposiumConfig(**data)
+    if cfg_path.is_file():
+        cfg.config_path = str(cfg_path)
     return _apply_env_overrides(cfg)
