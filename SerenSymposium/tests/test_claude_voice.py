@@ -54,22 +54,33 @@ def test_a_claude_turn_streams_in_lodestars_shape_and_is_kept(make_client, runs)
 
     events = stream(client, {"session": sid, "prompt": "hi"})
 
-    assert [e["type"] for e in events] == ["tool_status", "chunk", "chunk", "done", "saved"]
+    assert [e["type"] for e in events] == ["tool_status", "tool_call", "tool_result", "thinking",
+                                           "chunk", "chunk", "done", "saved"]
     assert events[0]["tool"] == "mcp__workbench__get_time"          # ToolSearch is bookkeeping
+    assert events[1]["summary"] == '{"zone": "UTC"}' and events[2] == {
+        "type": "tool_result", "id": events[1]["id"], "ok": True, "preview": "12:00 UTC"}
     assert "".join(e["content"] for e in events if e["type"] == "chunk") == "Hello there"
-    assert events[3]["response"] == "Hello there"                    # no subagent, no thinking
+    assert events[6]["response"] == "Hello there"                    # no subagent, no thinking
 
     s = client.get(f"/api/sessions/{sid}").json()
     assert [m["content"] for m in s["messages"]] == ["hi", "Hello there"]
     meta = s["messages"][1]["meta"]
     assert meta["model"] == "fake-model" and meta["node"] == "claude"
     assert meta["tools"] == ["mcp__workbench__get_time"] and meta["tool_rounds"] == 2
+    # how it got there, folded under the answer
+    assert meta["steps"] == [
+        {"kind": "tool", "id": events[1]["id"], "tool": "mcp__workbench__get_time",
+         "summary": '{"zone": "UTC"}', "ok": True, "result": "12:00 UTC"},
+        {"kind": "thinking", "text": "hmm"}]
 
     (run,) = runs()
     assert run["prompt"] == "hi"
     assert flag(run["argv"], "--session-id") == s["claude"]["session"]
     assert flag(run["argv"], "--model") == "opus"
-    assert flag(run["argv"], "--append-system-prompt") == "be brief"
+    system = flag(run["argv"], "--append-system-prompt")
+    folder = flag(run["argv"], "--add-dir")
+    assert system.startswith("be brief\n\nYou are answering in Seren Symposium")   # the chat's, then ours
+    assert folder.endswith(f"{sid}.files") and folder in system                     # files: where, and readable
     assert s["claude"]["seen"] == 2
 
 

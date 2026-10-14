@@ -87,7 +87,7 @@ def test_the_page_wears_the_meninges_baseplate(client):
     assert 'class="seren-topbar"' in page and 'id="tabbar"' in page
     assert "Seren<b>Symposium</b>" in page
     assert "--accent: #a3b18a" in page
-    assert 'id="chat"' in page and 'id="viewer"' in page and 'id="stat-pill"' in page
+    assert 'id="chat"' in page and 'id="services"' in page and 'id="stat-pill"' in page
     assert "async function call(" in page
     assert "{{" not in page
 
@@ -114,6 +114,17 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                "/api/chat", "/api/chat/stream", "/api/models",
                # -> files on this machine; no network at all
                "/api/sessions", "/api/sessions/{sid}",
+               "/api/sessions/{sid}/files", "/api/sessions/{sid}/files/{name}",
+               "/api/sessions/{sid}/rewind", "/api/sessions/{sid}/fork",
+               "/api/sessions/{sid}/messages/{index}",
+               # -> the prefs file beside the chats
+               "/api/prefs", "/api/projects", "/api/projects/remove", "/api/claude",
+               # -> the claude voice's own permission tool, and your answer to it
+               "/api/permit", "/api/permit/answer",
+               # -> this desktop's screen, taken here
+               "/api/screen", "/api/screen/latest", "/api/screen/sources",
+               # -> the renderer we ship
+               "/vendor",
                "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
     unexpected = paths - allowed
     assert not unexpected, (

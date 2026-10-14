@@ -2,9 +2,15 @@
 seren_symposium.__main__
 ════════════════════════════════════════════════════════════════════════
 
-Two ways to run, and the difference is only the window:
+The ways to run, and the difference is only who holds the window:
 
-    seren-symposium              native window (needs the [desktop] extra)
+    seren-symposium              a native window (the [desktop] extra) - onto
+                                 the Symposium already serving if there is
+                                 one, else serving for as long as it is open
+    seren-symposium --tray       serve, with an icon in the tray and no window
+                                 until you open one: what starts at logon
+    seren-symposium --window     only a window, onto the Symposium serving
+                                 (what the tray's Open runs)
     seren-symposium --serve      no window; open the URL in a browser
 
 --serve is not a fallback, it is the headless path: it is what CI exercises,
@@ -49,6 +55,30 @@ def log_without_console(config: str | None) -> Path | None:
     return path
 
 
+ICON = Path(__file__).with_name("symposium.ico")      # the favicon, as the window's icon
+
+
+def own_taskbar_button() -> None:
+    """On Windows, a pythonw window is grouped under Python's taskbar button
+    and wears Python's icon. An app id of its own gives Symposium its own
+    button, with the window's icon on it."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Seren.Symposium")
+    except (AttributeError, OSError):
+        pass
+
+
+def webview_profile(cfg) -> Path:
+    """The window's browser profile: a `webview` folder beside the sessions
+    folder, made if missing."""
+    path = cfg.sessions_dir().parent / "webview"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def came_up(server, thread, seconds: float = START_SECONDS, step: float = 0.05) -> bool:
     """Wait for uvicorn to be serving. False as soon as its thread has died
     (a port already taken: uvicorn logs it and exits the thread), or when it
@@ -63,13 +93,50 @@ def came_up(server, thread, seconds: float = START_SECONDS, step: float = 0.05) 
     return bool(getattr(server, "started", False))
 
 
+def already_serving(url: str, seconds: float = 1.5) -> bool:
+    """Is a Symposium answering at `url` - not just anything on the port?"""
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/health", timeout=seconds) as r:
+            return json.loads(r.read().decode("utf-8")).get("service") == "SerenSymposium"
+    except Exception:  # noqa: BLE001 - refused, timed out, not JSON: not us
+        return False
+
+
+def open_window(cfg, url: str) -> None:
+    """A window onto `url`, until it is closed. No pywebview: the browser."""
+    try:
+        import webview
+    except ImportError:
+        import webbrowser
+        print("[symposium] pywebview not installed - opening your browser instead.", file=sys.stderr)
+        webbrowser.open(url)
+        return
+    own_taskbar_button()
+    # text_select: pywebview turns selection off unless asked, and a chat you
+    # cannot copy a line out of is not much of a chat.
+    webview.create_window("Seren Symposium", url, text_select=True,
+                          width=cfg.ui.window_width, height=cfg.ui.window_height)
+    # pywebview starts private by default, which empties localStorage every
+    # time the window closes: a project with no chat yet, the folded projects,
+    # the tab and the screen-share choices were all gone on the next launch.
+    # The profile lives beside the sessions, so it moves with them.
+    webview.start(private_mode=False, storage_path=str(webview_profile(cfg)), icon=str(ICON))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="SerenSymposium - front door to the Seren stack")
     p.add_argument("--config", "-c", default=None,
                    help="Path to seren-symposium.yaml (default: ./seren-symposium.yaml "
                         "or $SEREN_SYMPOSIUM_CONFIG)")
-    p.add_argument("--serve", action="store_true",
-                   help="Serve only; do not open a native window")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--serve", action="store_true",
+                      help="Serve only; do not open a native window")
+    mode.add_argument("--tray", action="store_true",
+                      help="Serve with an icon in the tray; a window only when you open one (what starts at logon)")
+    mode.add_argument("--window", action="store_true",
+                      help="Only a window, onto the Symposium already serving")
     p.add_argument("--port", type=int, default=0, help="Override the loopback UI port")
     args = p.parse_args()
     log_without_console(args.config)
@@ -85,6 +152,19 @@ def main() -> None:
         cfg.ui.port = args.port
 
     url = f"http://{cfg.ui.host}:{cfg.ui.port}"
+    here = f"http://{'127.0.0.1' if cfg.ui.host in ('0.0.0.0', '::', '') else cfg.ui.host}:{cfg.ui.port}"
+    serving = not args.serve and already_serving(here)
+    if args.window or (serving and not args.tray):
+        # The tray (or another window) is serving already: be a window onto it.
+        if not serving:
+            print(f"[symposium] nothing is serving {url} - start it (seren-symposium --tray) first.",
+                  file=sys.stderr)
+            raise SystemExit(1)
+        open_window(cfg, url)
+        return
+    if args.tray and serving:
+        print(f"[symposium] already running at {url} - one tray is plenty.", file=sys.stderr)
+        return
     print(f"[symposium] v{APP_VERSION}", file=sys.stderr)
     print(f"[symposium] lodestar: {cfg.lodestar.url}", file=sys.stderr)
     print(f"[symposium] ui:       {url}", file=sys.stderr)
@@ -106,17 +186,24 @@ def main() -> None:
         server.run()
         return
 
-    try:
-        import webview
-    except ImportError:
-        print("[symposium] pywebview not installed - serving headless instead.\n"
-              "            pip install 'seren-symposium[desktop]' for a native window,\n"
-              f"            or open {url} in a browser.", file=sys.stderr)
+    from . import tray
+    if args.tray and not tray.available():
+        print("[symposium] no tray here (pystray and Pillow: the [desktop] extra) - serving headless.",
+              file=sys.stderr)
         server.run()
         return
+    if not args.tray:
+        try:
+            import webview  # noqa: F401
+        except ImportError:
+            print("[symposium] pywebview not installed - serving headless instead.\n"
+                  "            pip install 'seren-symposium[desktop]' for a native window,\n"
+                  f"            or open {url} in a browser.", file=sys.stderr)
+            server.run()
+            return
 
-    # uvicorn in a thread, webview on the main thread: most GUI toolkits insist
-    # on owning the main thread, and pywebview is no exception.
+    # uvicorn in a thread; the window or the tray on the main thread - GUI
+    # toolkits insist on owning it.
     t = threading.Thread(target=server.run, daemon=True)
     t.start()
     # A window onto nothing is worse than no window: it looks like the app is
@@ -126,9 +213,12 @@ def main() -> None:
               f"(another Symposium?) Use --port or ui.port.", file=sys.stderr)
         raise SystemExit(1)
 
-    webview.create_window("Seren", url,
-                          width=cfg.ui.window_width, height=cfg.ui.window_height)
-    webview.start()
+    if args.tray:
+        own_taskbar_button()
+        tray.run(url, cfg.config_path or args.config, stop=lambda: setattr(server, "should_exit", True))
+        t.join(timeout=10)
+        return
+    open_window(cfg, url)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,18 @@ def offline_update_checks(monkeypatch):
     monkeypatch.setattr(UpdateChecker, "_fetch_from_index", _no_network)
 
 
+@pytest.fixture(autouse=True)
+def no_image_fetching(monkeypatch):
+    """An answer that shows a web image gets it fetched; in a test, that
+    fetch is refused unless the test hands in its own transport."""
+    from seren_symposium import attachments
+
+    def _refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no network in tests", request=request)
+
+    monkeypatch.setattr(attachments, "FETCH_TRANSPORT", httpx.MockTransport(_refuse))
+
+
 # What the shell itself sends from: the Host check refuses TestClient's
 # default "testserver", as it would any name that is not this machine.
 SHELL = "http://127.0.0.1:7426"

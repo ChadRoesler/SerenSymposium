@@ -4,11 +4,22 @@ so the claude voice is tested without a login, a network or a bill.
 
 FAKE_CLAUDE picks what happens:  ok (default) | fail | die
 FAKE_CLAUDE_LOG, when set, gets one JSON line per run: {argv, prompt}.
+FAKE_CLAUDE_REPLY, when set, is the answer instead of "Hello there".
+FAKE_CLAUDE_SAVE=name: the answer first writes a small PNG of that name into
+the first --add-dir (as Claude saving an image into the chat would).
+FAKE_CLAUDE_ASK={"tool_name", "input"}: as the real CLI does with a tool not on
+the list, start the --permission-prompt-tool from --mcp-config, ask it over
+stdio, and answer "asked: allow" or "asked: deny" with what came back.
 """
 import json
 import os
+import subprocess
 import sys
 import uuid
+
+# The smallest PNG there is: one transparent pixel.
+PNG = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                    "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")
 
 
 def out(d):
@@ -17,6 +28,29 @@ def out(d):
 
 def event(inner, parent=None):
     out({"type": "stream_event", "event": inner, "parent_tool_use_id": parent})
+
+
+def ask_permission(args, ask):
+    """What the CLI does: start the permission tool it was given, as an MCP
+    server over stdio, and call it."""
+    server = json.loads(args[args.index("--mcp-config") + 1])["mcpServers"]["symposium"]
+    tool = args[args.index("--permission-prompt-tool") + 1]
+    assert tool == "mcp__symposium__permit", tool
+    p = subprocess.Popen([server["command"], *server["args"]], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, text=True, encoding="utf-8")
+    for msg in ({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                 "params": {"name": "permit", "arguments": {**ask, "tool_use_id": "toolu_fake"}}}):
+        p.stdin.write(json.dumps(msg) + "\n")
+        p.stdin.flush()
+    for line in p.stdout:
+        reply = json.loads(line)
+        if reply.get("id") == 2:
+            p.stdin.close()
+            p.wait(timeout=10)
+            return json.loads(reply["result"]["content"][0]["text"])
+    raise SystemExit("the permission tool never answered")
 
 
 def main():
@@ -40,20 +74,34 @@ def main():
 
     event({"type": "message_start", "message": {}})
     for name in ("ToolSearch", "mcp__workbench__get_time"):
+        tid = "toolu_" + uuid.uuid4().hex[:12]
         event({"type": "content_block_start", "index": 0,
-               "content_block": {"type": "tool_use", "id": uuid.uuid4().hex, "name": name, "input": {}}})
+               "content_block": {"type": "tool_use", "id": tid, "name": name, "input": {}}})
         event({"type": "content_block_delta", "index": 0,
-               "delta": {"type": "input_json_delta", "partial_json": "{}"}})
+               "delta": {"type": "input_json_delta", "partial_json": '{"zone": '}})
+        event({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "input_json_delta", "partial_json": '"UTC"}'}})
+        event({"type": "content_block_stop", "index": 0})
+        out({"type": "user", "parent_tool_use_id": None,
+             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid,
+                                                      "content": [{"type": "text", "text": "12:00 UTC"}]}]}})
     event({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
           parent="toolu_sub")
     event({"type": "content_block_delta", "index": 0,
            "delta": {"type": "text_delta", "text": "a subagent talking"}}, parent="toolu_sub")
     event({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}})
     event({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "hmm"}})
-    for word in ("Hello", " there"):
+    event({"type": "content_block_stop", "index": 0})
+    if save := os.environ.get("FAKE_CLAUDE_SAVE"):
+        with open(os.path.join(args[args.index("--add-dir") + 1], save), "wb") as f:
+            f.write(PNG)
+    reply = os.environ.get("FAKE_CLAUDE_REPLY", "Hello there")
+    if (want := os.environ.get("FAKE_CLAUDE_ASK")) and "--permission-prompt-tool" in args:
+        reply = f"asked: {ask_permission(args, json.loads(want))['behavior']}"
+    for word in (reply[:5], reply[5:]):
         event({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": word}})
-    out({"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello there"}]}})
-    out({"type": "result", "subtype": "success", "is_error": False, "result": "Hello there",
+    out({"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}})
+    out({"type": "result", "subtype": "success", "is_error": False, "result": reply,
          "num_turns": 3, "session_id": sid})
 
 

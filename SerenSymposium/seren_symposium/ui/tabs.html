@@ -1,4 +1,7 @@
-<!-- Shell contract: class="tab" data-tab=<id>. Chat is the only tab this page
-     owns; the rest are the siblings' own viewers, named by the yaml, so
-     scripts.js draws them after /api/config answers. -->
-<button class="tab" data-tab="chat">chat</button>
+<!-- Shell contract: class="tab" data-tab=<id>, matching .view sections in
+     body.html. Chat is the room; Settings is this chat, the projects and
+     Symposium itself; Backend is a button for each sibling service, with
+     the little widget that says whether it is there. -->
+<button class="tab" data-tab="chat">Chat</button>
+<button class="tab" data-tab="settings">Settings</button>
+<button class="tab" data-tab="backend">Backend</button>

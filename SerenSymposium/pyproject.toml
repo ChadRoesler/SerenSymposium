@@ -46,7 +46,11 @@ dependencies = [
 # pywebview wraps the OS webview instead of shipping Chromium - ~10 MB rather
 # than Electron's 150 MB+, at the cost of inheriting whatever WebView2/WebKit
 # the machine has.
-desktop = ["pywebview>=5.0"]
+# pystray: the tray icon Symposium sits in when it starts at logon (--tray).
+desktop = ["pywebview>=5.0", "mss>=9.0", "Pillow>=10.0", "pystray>=0.19"]
+# Screen share on its own (a browser, no native window): mss takes the still,
+# Pillow scales and encodes it. Part of [desktop] already.
+screen = ["mss>=9.0", "Pillow>=10.0"]
 corp = ["truststore>=0.9"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx>=0.27"]
 # Kept as an EMPTY alias. Update checking is CORE in seren-meninges now, and
@@ -82,7 +86,7 @@ where = ["."]
 include = ["seren_symposium*"]
 
 [tool.setuptools.package-data]
-seren_symposium = ["ui/*.html", "ui/*.css", "ui/*.js"]
+seren_symposium = ["*.ico", "ui/*.html", "ui/*.css", "ui/*.js", "ui/vendor/*"]
 
 [tool.setuptools_scm]
 root = ".."

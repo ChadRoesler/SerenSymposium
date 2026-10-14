@@ -1,44 +1,220 @@
+<!-- The icons, drawn once. A project is a krater - the bowl the whole table
+     drinks from; a chat is a kylix, the cup passed between two. Filled when
+     open / when it is the one you are in. The rest are the message tools. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-krater" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.5 4.5h17"/>
+      <path d="M4.5 4.5c.3 4.6 2.6 8.6 6 9.6h3c3.4-1 5.7-5 6-9.6"/>
+      <path d="M6.6 11.2c-2.2-.2-2.9 2.3-.9 3"/><path d="M17.4 11.2c2.2-.2 2.9 2.3.9 3"/>
+      <path d="M10.6 14.1v3.4M13.4 14.1v3.4"/><path d="M8 19.6c1.2-1.4 6.8-1.4 8 0z"/>
+    </symbol>
+    <symbol id="i-krater-full" viewBox="0 0 24 24">
+      <path d="M5.3 7.2h13.4c-.8 3.2-2.6 5.6-5 6.3h-3.4c-2.4-.7-4.2-3.1-5-6.3z" fill="currentColor" opacity=".45"/>
+      <use href="#i-krater"/>
+    </symbol>
+    <symbol id="i-kylix" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2.5 9h19c-.9 3.6-4.8 5.3-9.5 5.3S3.4 12.6 2.5 9z"/>
+      <path d="M4.2 10.6C1.6 10.9.9 8.9 2.4 8.1"/><path d="M19.8 10.6c2.6.3 3.3-1.7 1.8-2.5"/>
+      <path d="M12 14.3v3.6"/><path d="M8.6 19.5c1-1.3 5.8-1.3 6.8 0z"/>
+    </symbol>
+    <symbol id="i-kylix-full" viewBox="0 0 24 24">
+      <path d="M4.6 10.2h14.8c-1.4 2-4 2.9-7.4 2.9s-6-.9-7.4-2.9z" fill="currentColor" opacity=".55"/>
+      <use href="#i-kylix"/>
+    </symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>
+    </symbol>
+    <symbol id="i-retry" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 4v4.5h4.5"/>
+    </symbol>
+    <symbol id="i-rewind" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M11 7l-6 5 6 5z"/><path d="M19 7l-6 5 6 5z"/>
+    </symbol>
+    <symbol id="i-fork" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="6" cy="5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="19" r="2"/>
+      <path d="M6 7v2a3 3 0 0 0 3 3h6a3 3 0 0 0 3-3V7"/><path d="M12 12v5"/>
+    </symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/>
+    </symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>
+    </symbol>
+    <symbol id="i-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/>
+    </symbol>
+    <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+      <path d="M9 6h11M9 12h11M9 18h11"/><path d="M4.5 6h.01M4.5 12h.01M4.5 18h.01" stroke-width="2.6"/>
+    </symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round">
+      <rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/>
+      <rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>
+    </symbol>
+    <symbol id="i-screen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="4" width="18" height="12" rx="2"/><path d="M9 20h6M12 16v4"/>
+    </symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M12 2.8v2.4M12 18.8v2.4M2.8 12h2.4M18.8 12h2.4M5.5 5.5l1.7 1.7M16.8 16.8l1.7 1.7M5.5 18.5l1.7-1.7M16.8 7.2l1.7-1.7"/>
+    </symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4.5h-4.5"/>
+    </symbol>
+  </defs>
+</svg>
+
+<!-- ── Chat ─────────────────────────────────────────────────────────── -->
 <section class="view" id="chat">
   <aside id="side"></aside>
-  <div class="talk">
-    <div class="bar" id="bar" hidden>
-      <input class="title" id="title" placeholder="untitled" maxlength="120">
-      <select id="move" title="move to another project"></select>
-      <button class="ghost" id="gear" title="settings for this chat">settings</button>
-      <button class="ghost" id="export" title="save this chat as JSON">export</button>
-      <button class="ghost danger" id="del">delete</button>
-    </div>
-    <div class="settings" id="settings" hidden>
-      <label for="s-voice">voice</label>
-      <select id="s-voice"></select>
-      <span></span><span></span>
-      <label for="s-system_prompt">system</label>
-      <textarea id="s-system_prompt"></textarea>
-      <label for="s-model_override">model</label>
-      <input id="s-model_override" list="models">
-      <label for="s-temperature">temperature</label>
-      <input id="s-temperature" type="number" step="0.05" min="0" max="2">
-      <label for="s-max_tokens">max tokens</label>
-      <input id="s-max_tokens" type="number" step="64" min="1">
-      <label for="s-repeat_penalty">repeat penalty</label>
-      <input id="s-repeat_penalty" type="number" step="0.05" min="0">
-      <span class="note">Blank means the project's value (shown greyed). Saved as you leave each field.
-        Temperature, max tokens and repeat penalty are for local models; claude keeps its own.</span>
-      <datalist id="models"></datalist>
+
+  <div class="room" id="room">
+    <div class="titlebar" id="titlebar" hidden>
+      <input class="title" id="title" placeholder="untitled" maxlength="120" readonly>
+      <button class="ghost" id="rename">Edit Name</button>
+      <span class="grow"></span>
+      <button class="ghost" id="copy-all" title="the whole chat, as text">Copy all</button>
+      <button class="ghost icon" id="chat-gear" title="this chat's settings"><svg class="i"><use href="#i-gear"/></svg></button>
+      <button class="ghost danger" id="del">Delete</button>
     </div>
     <div class="log" id="log"></div>
+
+    <div class="tray" id="tray" tabindex="0" role="button" title="attach files">
+      <span class="tray-label">Files attached:</span>
+      <span class="tray-items" id="tray-items"></span>
+      <span class="tray-hint" id="tray-hint">drop files here, paste an image, or click to choose</span>
+    </div>
     <form id="composer">
-      <textarea id="input" placeholder="Type a message… (Enter sends, Shift+Enter for a new line)"></textarea>
-      <button class="primary send" id="send">Send</button>
+      <textarea id="input" placeholder="Type a message… Markdown works. Enter sends, Shift+Enter for a new line"></textarea>
+      <div class="buttons">
+        <button type="button" class="ghost" id="clear">clear</button>
+        <button class="primary send" id="send">send</button>
+      </div>
     </form>
+    <div class="dropcover" id="dropcover">drop to attach</div>
+  </div>
+
+  <div class="rail">
+    <details class="panel" id="p-files" open>
+      <summary>Files <span class="count" id="files-count"></span></summary>
+      <div class="files-bar">
+        <input id="files-q" type="search" placeholder="search this chat's files" autocomplete="off">
+        <span class="seg" id="files-view">
+          <button type="button" data-view="list" title="list">
+            <svg class="i"><use href="#i-list"/></svg></button><button type="button" data-view="grid" title="thumbnails">
+            <svg class="i"><use href="#i-grid"/></svg></button>
+        </span>
+      </div>
+      <label class="files-screens"><input type="checkbox" id="files-screens"> include screen shares</label>
+      <div class="files" id="files"></div>
+    </details>
+    <details class="panel" id="p-screen">
+      <summary>Screen share <span class="count" id="screen-state"></span></summary>
+      <div class="screen">
+        <div class="source">
+          <select id="screen-source" title="what to share"></select>
+          <button type="button" class="ghost icon" id="screen-sources" title="look for windows again">
+            <svg class="i"><use href="#i-refresh"/></svg></button>
+        </div>
+        <div class="preview" id="screen-preview"><span class="muted">no frame yet</span></div>
+        <p class="caption" id="screen-caption"></p>
+        <div class="modes">
+          <label><input type="radio" name="screen-mode" value="polling"> polling</label>
+          <label><input type="radio" name="screen-mode" value="push"> push</label>
+        </div>
+        <div class="screen-set poll-only">
+          <label>every <input id="screen-every" type="number" min="1" max="600" step="1"> s</label>
+          <label class="check"><input type="checkbox" id="screen-attach"> newest frame goes with my next message</label>
+        </div>
+        <div class="screen-go">
+          <button type="button" class="ghost poll-only" id="screen-toggle">start</button>
+          <button type="button" class="ghost push-only" id="screen-look">take one</button>
+          <button type="button" class="primary push-only" id="screen-send" disabled>send this</button>
+        </div>
+        <p class="note" id="screen-note"></p>
+        <div class="shared" id="shared" hidden>
+          <div class="shared-head">shared in this chat <span class="count" id="shared-count"></span></div>
+          <div class="shots" id="shots"></div>
+        </div>
+      </div>
+    </details>
   </div>
 </section>
 
-<!-- Every viewer tab lands here: the sibling's own page in a frame. A group
-     (Memory) gets a second row naming its members. -->
-<section class="view" id="viewer">
-  <nav class="subtabs" id="subtabs" hidden></nav>
-  <iframe id="frame" title="viewer"></iframe>
+<!-- ── Settings: the whole app ─────────────────────────────────────── -->
+<section class="view" id="settings">
+  <div class="pages">
+    <div class="card">
+      <h3>You and the voices</h3>
+      <div class="form">
+        <label for="a-you">your name</label><input id="a-you" maxlength="60">
+        <label for="a-claude_name">Claude's name</label><input id="a-claude_name" maxlength="60">
+        <span></span><label class="check"><input type="checkbox" id="a-confirm_destructive"> ask before deleting or rewinding</label>
+        <p class="note">Kept with your chats (<span id="a-prefs-file"></span>), not in the yaml, so a reinstall leaves them alone.</p>
+      </div>
+    </div>
+    <div class="card" id="set-claude">
+      <h3>Claude <span class="muted" id="c-title"></span></h3>
+      <dl class="facts" id="c-facts"></dl>
+      <div class="form c-form">
+        <label for="c-mode">permission mode</label>
+        <select id="c-mode">
+          <option value="">the CLI's own default</option>
+          <option value="default">default - asks before anything that changes things</option>
+          <option value="acceptEdits">acceptEdits - edits files without asking</option>
+          <option value="plan">plan - looks, never touches</option>
+        </select>
+        <span></span><label class="check"><input type="checkbox" id="c-ask"> ask me here when Claude wants a tool that is not on its list</label>
+        <label>allowed without asking</label>
+        <div class="rules"><span class="chips" id="c-tools"></span>
+          <input id="c-tool-add" placeholder="add one: Read, Bash(git:*), mcp__workbench__* - Enter" autocomplete="off"></div>
+        <label>folders it may work in</label>
+        <div class="rules"><span class="chips" id="c-dirs"></span>
+          <input id="c-dir-add" placeholder="add a full path - Enter" autocomplete="off"></div>
+        <p class="note">An <b>Always</b> answer in a chat lands on this list. Kept with your chats, not in the yaml.</p>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>Projects</h3><button type="button" class="ghost" id="p-add">+ new project</button></div>
+      <p class="muted">A project's settings are where its chats start; a chat can change any of them for itself (⚙ above the chat).</p>
+      <div id="set-projects"></div>
+    </div>
+    <div class="card">
+      <h3>Symposium</h3>
+      <dl class="facts" id="set-about"></dl>
+    </div>
+  </div>
+  <datalist id="models"></datalist>
 </section>
 
+<!-- ── One chat's settings (⚙ in the chat's title bar) ─────────────────── -->
+<dialog class="sheet" id="chat-settings">
+  <form method="dialog" class="sheet-head"><h3>This chat</h3><button class="ghost" title="close">✕</button></form>
+  <div class="form" id="set-chat-form">
+    <label for="s-title">name</label><input id="s-title" maxlength="120">
+    <label for="s-move">project</label><select id="s-move"></select>
+    <label for="s-voice">voice</label><select id="s-voice"></select>
+    <label for="s-system_prompt">system prompt</label><textarea id="s-system_prompt"></textarea>
+    <label for="s-model_override">model</label><input id="s-model_override" list="models">
+    <label for="s-temperature">temperature</label><input id="s-temperature" type="number" step="0.05" min="0" max="2">
+    <label for="s-max_tokens">max tokens</label><input id="s-max_tokens" type="number" step="64" min="1">
+    <label for="s-repeat_penalty">repeat penalty</label><input id="s-repeat_penalty" type="number" step="0.05" min="0">
+    <span></span>
+    <div class="row-buttons">
+      <button type="button" class="ghost" id="export">export as JSON</button>
+      <button type="button" class="ghost" id="import">import a chat…</button>
+    </div>
+    <p class="note">Blank means the project's value (shown greyed). Saved as you leave each field.
+      Temperature, max tokens and repeat penalty are for local models; Claude keeps its own.</p>
+  </div>
+</dialog>
+
+<!-- ── Backend ──────────────────────────────────────────────────────── -->
+<section class="view" id="backend">
+  <div class="pages" id="services"></div>
+</section>
+
+<div class="lightbox" id="lightbox" hidden><img id="lightbox-img" alt=""></div>
+<div class="menu" id="menu" hidden role="menu"></div>
+<input type="file" id="picker" multiple hidden>
 <input type="file" id="importer" accept="application/json,.json" hidden>

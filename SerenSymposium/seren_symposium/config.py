@@ -124,8 +124,35 @@ class ClaudeConfig(BaseModel):
     # the ones this voice may use (e.g. "mcp__workbench__*").
     permission_mode: str = ""
     allowed_tools: list[str] = Field(default_factory=list)
+    # Folders Claude may read and work in besides its cwd (--add-dir).
+    add_dirs: list[str] = Field(default_factory=list)
+    # A tool that is not on the list is asked about IN THE WINDOW - Allow
+    # once, Always, Deny - instead of refused (seren_symposium.permit).
+    ask: bool = True
+    # The Claude Code carabiner clipped on this box: its claude.yaml, or the
+    # folder it is in. Blank: KBH_CONFIG, then <cwd>/kbh, then ~/.seren/kbh.
+    # Read for the Settings tab only - Symposium never uses its tokens.
+    carabiner: str = ""
     # A turn that runs longer is killed; tools and thinking take a while.
     timeout_seconds: float = 900.0
+    # How much of the chat goes over when a new CLI conversation picks it up
+    # (its first turn, after a rewind or edit, in a fork). Claude reads far
+    # more than a local model, so this is not lodestar.history_max_chars.
+    handover_max_chars: int = 100000
+    # Claude may save files into the chat's own folder - a drawing, notes,
+    # code - which then show in the chat. Only there: everything else it may
+    # write is still whatever permission_mode and allowed_tools say.
+    save_files: bool = True
+    # Said to every Claude turn after the chat's own system prompt: where it
+    # is answering, and how files and images come and go. {files} is this
+    # chat's folder. Blank says nothing.
+    framing: str = (
+        "You are answering in Seren Symposium, a chat window; your reply is shown as Markdown. "
+        "This chat's files are in {files} - when a message attaches one, its path is given, and "
+        "you can open it. To show an image, write it as Markdown: ![caption](https://...) for "
+        "one on the web (Symposium saves it into the chat), or save a file into that folder - "
+        "an SVG you draw, notes, code - and write ![caption](files/<filename>) for a picture or "
+        "[name](files/<filename>) for anything else.")
 
 
 class ServiceViewers(BaseModel):
@@ -171,6 +198,8 @@ class UiConfig(BaseModel):
     allow_open_lan: bool = False
     port: int = DEFAULT_UI_PORT
     confirm_destructive: bool = True
+    # Your name on your own messages.
+    you: str = "you"
     window_width: int = 1280
     window_height: int = 860
 
@@ -197,8 +226,33 @@ class SessionsConfig(BaseModel):
     dir: str = ""
 
 
+class FilesConfig(BaseModel):
+    """What a chat can carry. Files live beside the session (sessions.py)."""
+    # One attachment's ceiling. Generous on purpose: a local model's limits
+    # are the model's to have, not the window's.
+    max_mb: float = 25.0
+    # Text files go INTO the prompt for a local model (it cannot open a path);
+    # this much, across a message's files, and the rest is cut with a note.
+    inline_max_chars: int = 20000
+    # An answer that shows an image from the web - ![caption](https://...) -
+    # gets it saved into the chat, so it is still there next year. This is the
+    # one outbound call that is not to Lodestar; off, such an image stays a link.
+    fetch_images: bool = True
+
+
+class ScreenConfig(BaseModel):
+    """Screen share: a picture of this desktop, taken here (mss), riding along
+    with a message - every few seconds (polling) or on a button (push)."""
+    enabled: bool = True
+    # Wider frames are scaled down to this; a 4K screenshot is mostly bytes.
+    max_width: int = 1600
+    jpeg_quality: int = 80
+
+
 class SymposiumConfig(BaseModel):
     lodestar: LodestarClientConfig = Field(default_factory=LodestarClientConfig)
+    files: FilesConfig = Field(default_factory=FilesConfig)
+    screen: ScreenConfig = Field(default_factory=ScreenConfig)
     viewers: ServiceViewers = Field(default_factory=ServiceViewers)
     ui: UiConfig = Field(default_factory=UiConfig)
     updates: UpdatesConfig = Field(default_factory=UpdatesConfig)

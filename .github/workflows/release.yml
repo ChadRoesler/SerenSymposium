@@ -69,6 +69,7 @@ jobs:
           - { label: "bare",      spec: ".",          updates: "unavailable" }
           - { label: "[corp]",    spec: ".[corp]",    updates: "unavailable" }
           - { label: "[desktop]", spec: ".[desktop]", updates: "unavailable" }
+          - { label: "[screen]",  spec: ".[screen]",  updates: "unavailable" }
           - { label: "[updates]", spec: ".[updates]", updates: "wired" }
 
     steps:

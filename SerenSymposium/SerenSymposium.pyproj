@@ -23,9 +23,15 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="seren_symposium\app.py" />
+    <Compile Include="seren_symposium\attachments.py" />
+    <Compile Include="seren_symposium\carabiner.py" />
     <Compile Include="seren_symposium\config.py" />
+    <Compile Include="seren_symposium\permit.py" />
+    <Compile Include="seren_symposium\prefs.py" />
+    <Compile Include="seren_symposium\screen.py" />
     <Compile Include="seren_symposium\claude_voice.py" />
     <Compile Include="seren_symposium\sessions.py" />
+    <Compile Include="seren_symposium\tray.py" />
     <Compile Include="seren_symposium\tests\conftest.py" />
     <Compile Include="seren_symposium\tests\test_app.py" />
     <Compile Include="seren_symposium\tests\test_config.py" />
@@ -37,13 +43,22 @@
     <Folder Include="seren_symposium\" />
     <Folder Include="seren_symposium\tests\" />
     <Folder Include="seren_symposium\ui\" />
+    <Folder Include="seren_symposium\ui\vendor\" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include="seren_symposium\symposium.ico" />
     <Content Include="seren_symposium\ui\body.html" />
+    <Content Include="seren_symposium\ui\head.html" />
     <Content Include="seren_symposium\ui\header_aside.html" />
     <Content Include="seren_symposium\ui\scripts.js" />
     <Content Include="seren_symposium\ui\styles.css" />
     <Content Include="seren_symposium\ui\tabs.html" />
+    <Content Include="seren_symposium\ui\vendor\README.md" />
+    <Content Include="seren_symposium\ui\vendor\github-dark.min.css" />
+    <Content Include="seren_symposium\ui\vendor\highlight.min.js" />
+    <Content Include="seren_symposium\ui\vendor\marked.min.js" />
+    <Content Include="seren_symposium\ui\vendor\powershell.min.js" />
+    <Content Include="seren_symposium\ui\vendor\purify.min.js" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in

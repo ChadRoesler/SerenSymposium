@@ -1,8 +1,8 @@
 # SerenSymposium
 
-**The front door to the Seren constellation.** One window: chat in the first tab, and every sibling service's own operator page in the rest.
+**The front door to the Seren constellation.** One window, three tabs: **Chat**, **Settings**, and **Backend** — a card for every sibling service, with a widget saying whether it's there, that opens its own operator page in your browser.
 
-Symposium is not "a chat app," and it is emphatically not another service. It is the **desktop shell** the rest of the family already earned — Memory, Workbench, Lodestar and Probe each serve a perfectly good `/viewer` on the shared Meninges baseplate, and reimplementing any of them inside a client would be building a second copy of something that already works. So Symposium loads them. What it adds is the one surface nobody else owns: a place to actually *talk* to the stack.
+Symposium is not "a chat app," and it is emphatically not another service. It is the **desktop shell** the rest of the family already earned — Memory, Workbench, Lodestar and Probe each serve a perfectly good `/viewer` on the shared Meninges baseplate, and reimplementing any of them inside a client would be building a second copy of something that already works. So Symposium points at them. What it adds is the one surface nobody else owns: a place to actually *talk* to the stack.
 
 ```bash
 pip install "seren-symposium[desktop]"
@@ -21,7 +21,15 @@ seren-symposium
 
 **A loopback shim, not a web server.** Serving the UI from Python means the bearer never reaches JavaScript and Lodestar never needs CORS opened for a desktop app. The cost is one loopback port — and no inbound auth, which is why it binds `127.0.0.1` only. Widen `ui.host` past loopback and you haven't exposed the UI, you've built a different, unauthenticated service. And because loopback keeps out the LAN but not the other tabs in your browser, every request must come from Symposium's own page: a loopback `Host`, our own `Origin`, and JSON.
 
-**Chats are kept.** Each conversation is a JSON file next to your config — renamed, moved between projects, exported, imported. Answers stream in, with a live `calling recall…` while a tool runs and a receipt underneath: model, node, tools, seconds.
+**Chats are kept.** Each conversation is a JSON file next to your config — renamed, moved between projects (drag it), exported, imported — with its files in a folder beside it. Answers stream in as Markdown (code blocks highlighted), with how they got there folded above the words — the thinking, each tool and what it returned — and a receipt underneath: model, node, tools, seconds. Any message can be copied, edited, rewound to, forked into a new chat, or deleted.
+
+**Asked, not refused.** `claude -p` has nobody at a terminal to say yes, so a tool not on its list used to just fail. Symposium hands the CLI a permission tool of its own instead: the ask shows in the chat — the command, the file — with **Allow once**, **Always** (no wider than that folder, that command, that site) and **Deny**.
+
+**Files both ways.** Drop or paste them in — memes included — and Claude opens them; a local model gets the text of text files. Answers bring pictures back: one from the web is saved into the chat, and Claude can draw one (an SVG) straight into it. Screen share sends stills of a display or one window — previewed first, kept in a panel of their own rather than the conversation — every few seconds with your next message, or when you press send.
+
+**What you set stays set.** Your name, Claude's, its permissions, the projects — changed in the window, they're kept beside your chats, not in the yaml an installer rewrites.
+
+**Always on.** It starts when you log in and sits in the tray; the window is something you open onto it and close. At logon, as you — not a system service, because the Claude voice needs your login and screen share needs your desktop.
 
 **Projects are context boundaries, not filing.** A chat opened in `seren stack` inherits a system prompt, model and temperature and already knows what it's about; one opened in `general` drags none of it along. Grouping is the side effect, not the point.
 
@@ -30,7 +38,8 @@ seren-symposium
 ## Run it
 
 ```bash
-seren-symposium                  # native window (needs the [desktop] extra)
+seren-symposium                  # a window (needs the [desktop] extra) - onto the tray's, if it is running
+seren-symposium --tray           # serve from the tray; what starts at logon
 seren-symposium --serve          # headless; open the URL yourself
 seren-symposium --port 7500
 ```
@@ -54,7 +63,7 @@ Configuration is optional and assumes the whole stack on localhost. See [`SerenS
 | SerenTheatre | 7427 |
 | SerenProbe | 7430 |
 
-Symposium connects to **Lodestar only**. The other rows are there because their `/viewer` pages become its tabs — blank a viewer URL in the config and that tab disappears rather than rendering dead.
+Symposium connects to **Lodestar only** (and fetches the web images answers show, which `files.fetch_images: false` turns off). The other rows are there because their `/viewer` pages are what its Backend cards open — in your browser, where each keeps its own sign-in. Blank a viewer URL in the config and that card disappears rather than sitting dead.
 
 ---
 

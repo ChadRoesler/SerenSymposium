@@ -17,10 +17,11 @@ lodestar:
   # bearer_token_keyring: "seren-lodestar/alice"
   # bearer_token_env: "SEREN_LODESTAR_BEARER_TOKEN"
 
-# ── The read-only tabs ─────────────────────────────────────────────────
-# These are the OTHER services' own /viewer pages, not copies of them.
-# Blank one out to hide that tab. A tab can be a GROUP - names to URLs, one
-# tab with a row of its own - and Memory is one: memory is four stores.
+# ── The Backend cards ───────────────────────────────────────────────────
+# These are the OTHER services' own /viewer pages, not copies of them: a card
+# opens one in your browser. Blank one out to hide its card. A viewer can be a
+# GROUP - names to URLs, a row of cards of its own - and Memory is one: memory
+# is four stores.
 viewers:
   memory:
     memory:      "http://127.0.0.1:7420/viewer"
@@ -39,6 +40,14 @@ ui:
   #   purpose - a trusted LAN, a lab - and it will say so on every boot.
   port: 7426
   confirm_destructive: true
+  you: "you"             # your name on your own messages
+
+# ── What the window sets wins ──────────────────────────────────────────
+# Your name, Claude's, its permissions and folders, confirm_destructive and the
+# projects can all be changed in Settings. Those changes are kept in
+# symposium-prefs.json beside the sessions folder - NOT here, because an
+# installer rewrites this file - and are laid over it at start. Until a thing
+# is changed in the window, the value here shows through.
   window_width: 1280
   window_height: 860
 
@@ -46,7 +55,9 @@ ui:
 # A folder carries defaults that its sessions inherit, so a session started
 # in "seren stack" already knows what it is about and one in "general" does
 # not drag that context along. A session's own settings still override any of it.
-# The shell shows folders as PROJECTS and sessions as CHATS.
+# The shell shows folders as PROJECTS and sessions as CHATS. These seed the
+# projects; once one is made, renamed or changed in the window, the prefs
+# file owns the list.
 folders:
   - name: "seren stack"
     voice: ""                            # "" / "lodestar": a local model; "claude": see below
@@ -79,9 +90,26 @@ claude:
   command: ["claude"]
   cwd: ""                   # decides which project settings / MCP servers load
   model: ""                 # blank: the CLI's default; a folder or chat can name one
-  permission_mode: ""       # -p can't ask, so a tool that would ask is refused...
-  allowed_tools: []         # ...unless listed here, e.g. ["mcp__workbench__*"]
+  permission_mode: ""       # -p can't ask at a terminal, so...
+  ask: true                 # ...a tool not listed below is asked about IN THE WINDOW (Allow once / Always / Deny)
+  allowed_tools: []         # what it may use without asking, e.g. ["mcp__workbench__*"]
+  add_dirs: []              # folders it may work in besides cwd
+  carabiner: ""             # the Claude Code carabiner's claude.yaml, shown in Settings; blank looks for it
   timeout_seconds: 900
+  save_files: true          # may write into the chat's own folder - a drawing, notes - and only there
+  handover_max_chars: 100000  # how much of the chat a NEW claude conversation is handed
+  # framing: "..."          # what each turn is told about the window ({files} = the chat's folder)
+
+# ── Files and screen share ─────────────────────────────────────────────
+files:
+  max_mb: 25                # one attachment's ceiling
+  inline_max_chars: 20000   # text a local model is given from a message's files
+  fetch_images: true        # web images an answer shows are saved into the chat
+
+screen:                     # stills of this desktop (needs the [desktop] or [screen] extra)
+  enabled: true
+  max_width: 1600
+  jpeg_quality: 80
 
 updates:
   enabled: true

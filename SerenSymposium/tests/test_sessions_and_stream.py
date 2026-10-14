@@ -8,7 +8,7 @@ import sys
 import httpx
 import pytest
 
-from seren_symposium.__main__ import LOG_MAX_BYTES, came_up, log_without_console
+from seren_symposium.__main__ import LOG_MAX_BYTES, came_up, log_without_console, webview_profile
 from seren_symposium.app import refuse_cross_site
 from seren_symposium.config import FolderPreset, SymposiumConfig, load_config
 from seren_symposium.sessions import SessionStore
@@ -317,6 +317,18 @@ def test_without_one_output_goes_beside_the_config(tmp_path, monkeypatch):
     assert "[symposium] hello" in path.read_text(encoding="utf-8")
     assert sys.stdout is sys.stderr
     sys.stderr.close()
+
+
+def test_the_window_keeps_its_profile_beside_the_sessions(tmp_path, monkeypatch):
+    """pywebview starts private unless told otherwise, and private empties
+    localStorage on close: a project with no chat was gone on every launch."""
+    monkeypatch.delenv("SEREN_SYMPOSIUM_SESSIONS_DIR", raising=False)
+    yml = tmp_path / "seren-symposium.yaml"
+    yml.write_text("sessions:\n  dir: " + str(tmp_path / "stores" / "sessions").replace("\\", "/") + "\n",
+                   encoding="utf-8")
+    path = webview_profile(load_config(str(yml)))
+    assert path == tmp_path / "stores" / "webview"
+    assert path.is_dir()
 
 
 def test_a_log_grown_too_big_starts_over(tmp_path, monkeypatch):
