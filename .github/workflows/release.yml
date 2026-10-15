@@ -1,4 +1,4 @@
-name: CI / Release
+name: Build & Release
 
 on:
   push:
@@ -109,8 +109,9 @@ jobs:
           # /api/config, NOT / - Symposium's root serves the HTML shell, so it
           # is the one service in the family whose / has no JSON to assert on.
           # /api/config is the equivalent surface: what the UI needs to draw
-          # itself, updates block included.
-          with TestClient(app) as c:
+          # itself, updates block included. From 127.0.0.1, as the shell sends:
+          # the Host check refuses TestClient's default "testserver".
+          with TestClient(app, base_url="http://127.0.0.1:7426") as c:
               r = c.get("/api/config")
           assert r.status_code == 200, f"/api/config returned {r.status_code}: {r.text[:300]}"
           u = r.json().get("updates")

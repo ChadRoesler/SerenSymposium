@@ -75,14 +75,7 @@ pip install -e ".[dev]"
 python -m pytest tests/ -v
 ```
 
-Or mirror the CI matrix in throwaway venvs, which is the only way a stale dependency floor actually shows itself:
-
-```bash
-make test          # .[dev]
-make test-desktop  # .[dev,desktop]
-make test-corp     # .[dev,corp]
-make shapes        # bare install, app constructed from OUTSIDE the repo
-```
+CI runs the rest of the matrix (`.[dev,desktop]`, `.[dev,corp]`, and the bare install with the app constructed from outside the repo), which is where a stale dependency floor shows itself.
 
 The suite needs no live stack — an unreachable Lodestar is itself one of the things under test.
 

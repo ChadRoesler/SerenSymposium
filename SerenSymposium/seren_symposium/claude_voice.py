@@ -59,7 +59,7 @@ import subprocess
 import sys
 import threading
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from contextlib import aclosing
 from typing import Any, AsyncIterator, Optional
 
@@ -126,7 +126,10 @@ def _target(tool: str, tool_input: dict[str, Any]) -> str:
 def suggest_rule(tool: str, tool_input: Any) -> str:
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     if tool in FILE_TOOLS and (target := _target(tool, tool_input)):
-        where = Path(target)
+        # Spelled the way the CLI sent it, not the way this OS spells paths:
+        # on Linux, Path("D:\\a\\b.txt") is one file name with no folder.
+        windows = "\\" in target or (len(target) > 1 and target[1] == ":")
+        where = PureWindowsPath(target) if windows else PurePosixPath(target)
         folder = where if tool in ("Glob", "Grep", "LS") or not where.suffix else where.parent
         return folder_rule(str(folder), FILE_TOOLS[tool])
     if tool == "Bash" and isinstance(tool_input.get("command"), str):
