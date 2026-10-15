@@ -1121,7 +1121,7 @@ for (const k of SETTINGS) {
   });
 }
 
-// The Settings tab is the whole app's: you, the voices, the projects.
+// The Settings tab is the whole app's: who's here, the backends, the projects.
 let OPEN_PROJECT = null;
 function drawSettings() {
   loadModels();
