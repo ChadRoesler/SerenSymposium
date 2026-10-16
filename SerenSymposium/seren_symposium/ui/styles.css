@@ -89,10 +89,10 @@ input.inplace { padding: 2px 6px; font-size: 13px; min-width: 0; width: 100%; }
        background: var(--surface); border: 1px solid var(--border); align-self: flex-start; min-width: 140px; }
 .msg.me { align-self: flex-end; background: var(--mine); border-color: var(--mine-line); }
 /* the tail: bottom-left on theirs, bottom-right on yours, as drawn */
-.msg::after { content: ""; position: absolute; bottom: -7px; left: 14px; width: 12px; height: 12px;
+.msg::after { content: ""; position: absolute; bottom: -20px; left: 0; width: 30px; height: 20px;
               background: inherit; border: inherit; border-top: 0; border-right: 0;
-              transform: skewX(35deg); border-radius: 0 0 0 3px; }
-.msg.me::after { left: auto; right: 14px; transform: skewX(-35deg) scaleX(-1); }
+              transform: skewX(-35deg); border-radius: 0 0 10px 5px; }
+.msg.me::after { left: auto; right: 0; transform: skewX(35deg) scaleX(-1); }
 .msg.err { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
 .who { font-size: 12px; font-weight: 600; color: var(--accent); margin-bottom: 2px; }
 .msg.me .who { color: var(--sel-text); }
