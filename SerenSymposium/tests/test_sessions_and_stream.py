@@ -331,6 +331,24 @@ def test_the_window_keeps_its_profile_beside_the_sessions(tmp_path, monkeypatch)
     assert path.is_dir()
 
 
+def test_the_serving_symposium_leaves_its_pid_beside_the_config(tmp_path, monkeypatch):
+    """A per-user app, not a service: the pid file is how its node's
+    Observatory knows it is running and stops it for an upgrade (the
+    `launcher` type). It sits beside the config, where the Starwright card's
+    manifest says it is - unless --pid-file says otherwise."""
+    import os
+    from seren_symposium.__main__ import pid_file_path, write_pid
+    monkeypatch.delenv("SEREN_SYMPOSIUM_SESSIONS_DIR", raising=False)
+    yml = tmp_path / "apps" / "seren-symposium.yaml"
+    yml.parent.mkdir()
+    yml.write_text("ui:\n  port: 7426\n", encoding="utf-8")
+    cfg = load_config(str(yml))
+    assert pid_file_path(cfg) == tmp_path / "apps" / "seren-symposium.pid"
+    assert pid_file_path(cfg, str(tmp_path / "elsewhere.pid")) == tmp_path / "elsewhere.pid"
+    path = write_pid(pid_file_path(cfg))
+    assert path.read_text(encoding="utf-8") == str(os.getpid())
+
+
 def test_a_log_grown_too_big_starts_over(tmp_path, monkeypatch):
     cfg = tmp_path / "seren-symposium.yaml"
     cfg.write_text("", encoding="utf-8")

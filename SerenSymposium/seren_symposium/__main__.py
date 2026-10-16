@@ -25,6 +25,7 @@ is also the first place to look when the window never opens.
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
 import os
 import sys
@@ -93,6 +94,36 @@ def came_up(server, thread, seconds: float = START_SECONDS, step: float = 0.05) 
     return bool(getattr(server, "started", False))
 
 
+def pid_file_path(cfg, override: str | None = None) -> Path:
+    """Where the serving Symposium leaves its pid: beside the config, which
+    is what the Observatory's manifest for it names (the Starwright card
+    writes both) - or where --pid-file says."""
+    if override:
+        return Path(override)
+    if cfg.config_path:
+        return Path(cfg.config_path).with_name("seren-symposium.pid")
+    return cfg.sessions_dir().parent / "seren-symposium.pid"
+
+
+def write_pid(path: Path) -> Path:
+    """Our pid into `path`, taken away again at exit (only if it is still
+    ours: a newer Symposium may have written its own by then). Symposium is a
+    per-user app, not a service, so this file is how its node's Observatory
+    knows it is running, stops it, and starts it again after an upgrade
+    (the `launcher` service type in seren_observatory.lifecycle)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(os.getpid()), encoding="utf-8")
+
+    def gone() -> None:
+        try:
+            if path.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                path.unlink()
+        except OSError:
+            pass
+    atexit.register(gone)
+    return path
+
+
 def already_serving(url: str, seconds: float = 1.5) -> bool:
     """Is a Symposium answering at `url` - not just anything on the port?"""
     import json
@@ -138,6 +169,8 @@ def main() -> None:
     mode.add_argument("--window", action="store_true",
                       help="Only a window, onto the Symposium already serving")
     p.add_argument("--port", type=int, default=0, help="Override the loopback UI port")
+    p.add_argument("--pid-file", default=None,
+                   help="Where the serving Symposium writes its pid (default: seren-symposium.pid beside the config)")
     args = p.parse_args()
     log_without_console(args.config)
 
@@ -177,6 +210,9 @@ def main() -> None:
                      supports_token=False, log=lambda m: print(m, file=sys.stderr))
 
     app = create_app(cfg)
+    # Past the window-only paths: whatever follows serves, and the pid file
+    # is the Observatory's handle on it.
+    print(f"[symposium] pid file: {write_pid(pid_file_path(cfg, args.pid_file))}", file=sys.stderr)
 
     import uvicorn
     server = uvicorn.Server(uvicorn.Config(app, host=cfg.ui.host, port=cfg.ui.port,
