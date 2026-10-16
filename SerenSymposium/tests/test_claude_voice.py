@@ -216,3 +216,25 @@ def test_the_command_is_the_configs_and_the_prompt_never_an_argument():
     assert flag(argv, "--permission-mode") == "default"
     assert flag(argv, "--allowedTools") == "mcp__workbench__*"
     assert flag(claude_voice.argv(cfg, resume="r1", new_id="x", model="opus"), "--model") == "opus"
+
+
+PNG_MAGIC = bytes.fromhex("89504e470d0a1a0a")
+
+
+def test_a_picture_a_tool_sent_back_is_kept_in_the_chat(make_client, runs, monkeypatch):
+    """15 Oct 2026: make_image draws on the NUC, and its answer used to be a
+    path there. Now the picture rides in the tool result as image content;
+    the turn keeps it in the chat, named for the file the tool saved."""
+    monkeypatch.setenv("FAKE_CLAUDE_DRAW", "1")
+    client = make_client(config())
+    sid = client.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    events = stream(client, {"session": sid, "prompt": "draw me a wren"})
+    done = next(e for e in events if e["type"] == "done")
+    assert [f["orig"] for f in done["files"]] == ["023502-42-a-wren.png"]   # stored under a unique name
+    answer = client.get(f"/api/sessions/{sid}").json()["messages"][1]
+    (f,) = answer["files"]
+    assert f["orig"] == "023502-42-a-wren.png" and f["type"] == "image/png"
+    got = client.get(f"/api/sessions/{sid}/files/{f['name']}")
+    assert got.status_code == 200 and got.content.startswith(PNG_MAGIC)
+    step = next(s for s in answer["meta"]["steps"] if s.get("tool", "").endswith("make_image"))
+    assert "023502-42-a-wren.png" in step["result"] and "base64" not in step["result"], "the bytes stay out of the receipt"

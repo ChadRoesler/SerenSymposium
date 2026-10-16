@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import mimetypes
 import re
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -187,6 +188,38 @@ async def capture_images(answer: str, store: SessionStore, sid: str, max_bytes: 
     return _MD_IMAGE.sub(point, answer), list(saved.values())
 
 
+_SAVED_NAME = re.compile(r"[^\"'\\/\s]+\.(?:png|jpe?g|webp|gif)", re.I)
+
+
+def keep_tool_images(images: list[dict[str, Any]], store: SessionStore, sid: str, max_bytes: int,
+                     steps: Optional[list[dict[str, Any]]] = None) -> list[dict[str, Any]]:
+    """Pictures a tool sent back as image content (make_image, drawn on
+    another box), kept in the chat as the answer's files. Each is named for
+    the file the tool says it saved, when it says one, so the copy here and
+    the one in the gallery match; else picture-<time>-<n>."""
+    said: dict[Any, list[str]] = {}
+    for s in steps or []:
+        if s.get("kind") == "tool" and s.get("result"):
+            said[s.get("id")] = _SAVED_NAME.findall(s["result"])
+    used: dict[Any, int] = {}
+    out = []
+    for i, im in enumerate(images):
+        data = im.get("data") or b""
+        kind = sniff_image(data)
+        if not kind or len(data) > max_bytes:
+            continue
+        n = used.get(im.get("tool_use_id"), 0)
+        used[im.get("tool_use_id")] = n + 1
+        names = said.get(im.get("tool_use_id")) or []
+        name = names[n] if n < len(names) else time.strftime(f"picture-%H%M%S-{i + 1}{kind[1]}")
+        if not name.lower().endswith(kind[1]):
+            name = f"{Path(name).stem}{kind[1]}"
+        entry = store.add_file(sid, name, data, kind[0])
+        if entry is not None:
+            out.append(entry)
+    return out
+
+
 def adopt_saved(answer: str, store: SessionStore, sid: str, before: set[str]) -> tuple[str, list[dict[str, Any]]]:
     """Files the answer wrote into the chat's folder during the turn, kept,
     and every mention of their old names pointed at the stored ones."""
@@ -205,5 +238,5 @@ def adopt_saved(answer: str, store: SessionStore, sid: str, before: set[str]) ->
     return answer, entries
 
 
-__all__ = ["for_claude", "for_local", "with_files", "capture_images", "adopt_saved", "serve_headers",
+__all__ = ["for_claude", "for_local", "with_files", "capture_images", "adopt_saved", "keep_tool_images", "serve_headers",
            "guess_type", "head", "sniff_image", "is_text", "safe_name"]

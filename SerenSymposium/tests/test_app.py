@@ -113,7 +113,7 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                # -> Lodestar, through app.state.client and nothing else
                "/api/chat", "/api/chat/stream", "/api/models",
                # -> files on this machine; no network at all
-               "/api/sessions", "/api/sessions/{sid}",
+               "/api/sessions", "/api/sessions/{sid}", "/api/sessions/{sid}/live",
                "/api/sessions/{sid}/files", "/api/sessions/{sid}/files/{name}",
                "/api/sessions/{sid}/rewind", "/api/sessions/{sid}/fork",
                "/api/sessions/{sid}/messages/{index}",
@@ -123,6 +123,11 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                "/api/permit", "/api/permit/answer",
                # -> this desktop's screen, taken here
                "/api/screen", "/api/screen/latest", "/api/screen/sources",
+               # -> Lodestar, through app.state.client: the picture panel asks it
+               #    to translate (its chat), plan and draw, and reads its gallery;
+               #    what is kept lands beside the chat (seren_symposium.pictures)
+               "/api/pictures/options", "/api/pictures/translate", "/api/pictures/plan", "/api/pictures/draw",
+               "/api/pictures/gallery", "/api/pictures/gallery/{node}/{day}", "/api/pictures/gallery/{node}/{day}/{name}",
                # -> the renderer we ship
                "/vendor",
                "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}

@@ -7,14 +7,20 @@ FAKE_CLAUDE_LOG, when set, gets one JSON line per run: {argv, prompt}.
 FAKE_CLAUDE_REPLY, when set, is the answer instead of "Hello there".
 FAKE_CLAUDE_SAVE=name: the answer first writes a small PNG of that name into
 the first --add-dir (as Claude saving an image into the chat would).
+FAKE_CLAUDE_DRAW=1: a make_image call whose result is text AND an image block
+(how an MCP tool's picture reaches the CLI), naming the file it saved.
 FAKE_CLAUDE_ASK={"tool_name", "input"}: as the real CLI does with a tool not on
 the list, start the --permission-prompt-tool from --mcp-config, ask it over
 stdio, and answer "asked: allow" or "asked: deny" with what came back.
+FAKE_CLAUDE_WAIT=path: after thinking, wait (up to 20s) until that file exists
+before answering - a turn a test can hold open, then let finish.
 """
+import base64
 import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 
 # The smallest PNG there is: one transparent pixel.
@@ -85,6 +91,19 @@ def main():
         out({"type": "user", "parent_tool_use_id": None,
              "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid,
                                                       "content": [{"type": "text", "text": "12:00 UTC"}]}]}})
+    if os.environ.get("FAKE_CLAUDE_DRAW"):
+        tid = "toolu_" + uuid.uuid4().hex[:12]
+        event({"type": "content_block_start", "index": 0,
+               "content_block": {"type": "tool_use", "id": tid, "name": "mcp__wren-workbench__make_image", "input": {}}})
+        event({"type": "content_block_delta", "index": 0,
+               "delta": {"type": "input_json_delta", "partial_json": '{"prompt": "a wren"}'}})
+        event({"type": "content_block_stop", "index": 0})
+        said = json.dumps({"ok": True, "saved": ["/mnt/nvme/x/gallery/2026-10-15/023502-42-a-wren.png"], "shown": 1})
+        out({"type": "user", "parent_tool_use_id": None,
+             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": [
+                 {"type": "text", "text": said},
+                 {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                              "data": base64.b64encode(PNG).decode()}}]}]}})
     event({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
           parent="toolu_sub")
     event({"type": "content_block_delta", "index": 0,
@@ -92,6 +111,10 @@ def main():
     event({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}})
     event({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "hmm"}})
     event({"type": "content_block_stop", "index": 0})
+    if gate := os.environ.get("FAKE_CLAUDE_WAIT"):
+        deadline = time.time() + 20
+        while not os.path.exists(gate) and time.time() < deadline:
+            time.sleep(0.05)
     if save := os.environ.get("FAKE_CLAUDE_SAVE"):
         with open(os.path.join(args[args.index("--add-dir") + 1], save), "wb") as f:
             f.write(PNG)

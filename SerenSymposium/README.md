@@ -246,7 +246,8 @@ Three of these reach Lodestar; the session and screen routes touch only this mac
 | GET | `/` | the shell — Chat, Settings, Backend |
 | GET | `/api/config` | what the UI needs to draw itself: viewers, folders, version, updates. **No secrets.** |
 | POST | `/api/chat` | proxied to Lodestar `/api/v1/chat`, bearer injected |
-| POST | `/api/chat/stream` | proxied to Lodestar `/api/v1/chat/stream`, line for line |
+| POST | `/api/chat/stream` | proxied to Lodestar `/api/v1/chat/stream`, line for line; with a session the turn runs on its own and this only follows it (409 while that chat is still answering) |
+| GET | `/api/sessions/{id}/live` | the turn running in a chat right now, replayed from its first event then followed; 404 when nothing is. `GET /api/sessions` marks such chats `answering` |
 | GET | `/api/models` | the models on Lodestar's llama node, as names |
 | PATCH | `/api/prefs` | what the window sets: `you`, `claude_name`, `confirm_destructive`, `claude_mode`, `claude_ask`, `claude_tools`, `claude_dirs` |
 | POST, PATCH | `/api/projects` | make a project; change one's settings or rename it (`{name, set?, rename?}` — its chats move along) |

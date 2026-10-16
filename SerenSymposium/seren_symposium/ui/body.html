@@ -87,6 +87,8 @@
     <form id="composer">
       <textarea id="input" placeholder="Type a message… Markdown works. Enter sends, Shift+Enter for a new line"></textarea>
       <div class="buttons">
+        <button type="button" class="ghost" id="picture-btn" title="ask for a picture">🖼 picture</button>
+        <span class="grow"></span>
         <button type="button" class="ghost" id="clear">clear</button>
         <button class="primary send" id="send">send</button>
       </div>
@@ -95,6 +97,53 @@
   </div>
 
   <div class="rail">
+    <!-- The picture panel: words -> a prompt the model reads (translate) ->
+         what would be drawn and where (plan) -> any of it changed (tweak) ->
+         drawn and kept in this chat (draw). Lodestar plans and draws;
+         Symposium asks, shows and keeps (seren_symposium.pictures). -->
+    <details class="panel" id="p-picture">
+      <summary>Picture <span class="count" id="pic-state"></span></summary>
+      <div class="pic">
+        <textarea id="pic-text" rows="3" placeholder="what do you want to see? plain words"></textarea>
+        <div class="pic-row">
+          <select id="pic-model" title="the model"><option value="">any model that can draw it</option></select>
+          <button type="button" class="ghost icon" id="pic-reload" title="look at the cluster again"><svg class="i"><use href="#i-refresh"/></svg></button>
+        </div>
+        <p class="pic-guide muted" id="pic-guide"></p>
+        <div class="pic-go">
+          <button type="button" class="ghost" id="pic-translate" title="have whoever answers this chat write the prompt in this model's style">translate</button>
+          <button type="button" class="ghost" id="pic-plan" title="what would be drawn, and where, without drawing">plan</button>
+        </div>
+        <label class="pic-label">prompt <span class="muted">(editable)</span></label>
+        <textarea id="pic-prompt" rows="4" placeholder="the prompt the model reads - translate writes a draft, or write your own"></textarea>
+        <label class="pic-label">negative</label>
+        <textarea id="pic-negative" rows="2" placeholder="what to keep out (the model's own negative is added for you)"></textarea>
+        <div class="pic-grid">
+          <label>size <select id="pic-size">
+            <option value="">the model's own</option>
+            <option value="1024x1024">1024 × 1024</option><option value="832x1216">832 × 1216 portrait</option>
+            <option value="1216x832">1216 × 832 landscape</option><option value="768x1344">768 × 1344 tall</option>
+            <option value="1344x768">1344 × 768 wide</option><option value="512x768">512 × 768 (SD 1.5)</option>
+          </select></label>
+          <label>seed <input id="pic-seed" type="number" min="0" step="1" placeholder="random"></label>
+          <label>count <input id="pic-count" type="number" min="1" max="4" value="1"></label>
+        </div>
+        <!-- folded by default: a long list of LoRAs, or a plan, must not push
+             the draw button off the bottom of the rail -->
+        <details class="pic-fold" id="pic-loras-box">
+          <summary>LoRAs <span class="muted" id="pic-loras-hint">pick a model first</span></summary>
+          <div class="pic-loras" id="pic-loras"></div>
+        </details>
+        <details class="pic-fold" id="pic-plan-box" hidden>
+          <summary>plan <span class="muted" id="pic-plan-sum"></span></summary>
+          <div class="pic-facts" id="pic-plan-facts"></div>
+        </details>
+        <div class="pic-go">
+          <span class="muted pic-note" id="pic-note"></span>
+          <button type="button" class="primary" id="pic-draw" disabled>draw</button>
+        </div>
+      </div>
+    </details>
     <details class="panel" id="p-files" open>
       <summary>Files <span class="count" id="files-count"></span></summary>
       <div class="files-bar">

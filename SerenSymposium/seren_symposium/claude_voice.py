@@ -52,6 +52,7 @@ ASKED, NOT REFUSED:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import shutil
@@ -253,6 +254,10 @@ class ClaudeTurn:
         # Under the fold: [{"kind": "thinking", "text"} | {"kind": "tool", "id",
         # "tool", "summary", "ok"?, "result"?} | {"kind": "asked", ...}]
         self.steps: list[dict[str, Any]] = []
+        # Pictures a tool sent back as image content (make_image's drawing):
+        # [{"tool_use_id", "mime", "data": bytes}], for the caller to keep
+        # in the chat - the tool's own copy is on another box.
+        self.images: list[dict[str, Any]] = []
 
     def step(self, s: dict[str, Any]) -> None:
         if len(self.steps) < MAX_STEPS:
@@ -269,6 +274,25 @@ class ClaudeTurn:
     def kept_steps(self) -> list[dict[str, Any]]:
         return [{k: v for k, v in s.items() if k != "closed"} for s in self.steps
                 if s["kind"] != "thinking" or s["text"].strip()]
+
+
+MAX_TOOL_IMAGES = 8
+
+
+def _result_images(content: Any, tool_use_id: Any) -> list[dict[str, Any]]:
+    """The base64 image blocks in a tool_result's content, decoded."""
+    out = []
+    for c in content if isinstance(content, list) else []:
+        src = c.get("source") if isinstance(c, dict) and c.get("type") == "image" else None
+        if not isinstance(src, dict) or src.get("type") != "base64":
+            continue
+        try:
+            data = base64.b64decode(src.get("data") or "", validate=True)
+        except (ValueError, TypeError):
+            continue
+        if data:
+            out.append({"tool_use_id": tool_use_id, "mime": src.get("media_type") or "", "data": data})
+    return out
 
 
 def _result_text(content: Any) -> str:
@@ -343,6 +367,8 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                     for c in (ev.get("message") or {}).get("content") or []:
                         if not (isinstance(c, dict) and c.get("type") == "tool_result"):
                             continue
+                        got = _result_images(c.get("content"), c.get("tool_use_id"))
+                        turn.images += got[:max(0, MAX_TOOL_IMAGES - len(turn.images))]
                         step = next((s for s in turn.steps if s.get("id") == c.get("tool_use_id")), None)
                         if step is None:
                             continue
@@ -363,3 +389,17 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
         return
     yield {"type": "error", "error": "claude stopped before answering",
            "detail": "".join(stderr)[-STDERR_TAIL:].strip() or "no output"}
+
+
+async def one_shot(cfg: ClaudeConfig, prompt: str, system_prompt: str = "", model: str = "") -> dict[str, Any]:
+    """One question, one answer, no session kept: a fresh CLI session that is
+    never resumed. For a small job in the chat's own voice - the picture
+    panel's translate, which asks Claude to write a prompt in a model's
+    style. Returns {ok, response, model, node} or {ok: false, error, detail}."""
+    out: dict[str, Any] = {"ok": False, "error": "claude gave no answer"}
+    async for ev in events(cfg, prompt=prompt, resume=None, model=model, system_prompt=system_prompt):
+        if ev["type"] == "done":
+            out = {"ok": True, "response": ev.get("response") or "", "model": ev.get("model"), "node": ev.get("node")}
+        elif ev["type"] == "error":
+            out = {"ok": False, "error": ev.get("error"), "detail": ev.get("detail")}
+    return out

@@ -25,7 +25,7 @@ const PRESET = { model_override: "model" };
 
 // Projects are the yaml's folders; a chat is a session in one. The server
 // still says folder and session - those are the wire names.
-let CFG = null, tab = "chat", folder = "", SESSIONS = [], current = null, busy = false, HEALTH = null;
+let CFG = null, tab = "chat", folder = "", SESSIONS = [], current = null, drawing = false, HEALTH = null;
 // Files waiting in the tray: {id, name, size, type, file?, url?, stored?} -
 // `stored` once it is on the server (an edit puts a message's files back).
 let PENDING = [];
@@ -34,6 +34,20 @@ let PENDING = [];
 const local = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
 const keep = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 let FOLDED = new Set(local("symposium.folded", []));
+// Chats with an answer coming right now: the server's `answering`, plus the
+// one this window just sent. Only THAT chat refuses a new message; every
+// other chat is open, and the answer keeps coming whether or not anyone is
+// looking at it (the server runs the turn; a window only follows it).
+let ANSWERING = new Set();
+// The one live stream this window is reading, if any: {sid, ctrl}.
+let FOLLOWER = null;
+const PLACEHOLDER = $("#input").placeholder;
+const chatBusy = () => drawing || (current != null && ANSWERING.has(current.id));
+function lockComposer() {
+  const locked = chatBusy();
+  $("#send").disabled = locked;
+  $("#input").placeholder = locked && !drawing ? "answering… read or write in another chat meanwhile" : PLACEHOLDER;
+}
 
 const voiceName = v => v === "claude" ? (CFG.claude?.name || "claude") : "local model";
 const fileUrl = (sid, name) => `/api/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(name)}`;
@@ -75,7 +89,8 @@ function show(t) {
 
 async function refresh() {
   SESSIONS = (await call("GET", "/api/sessions")).sessions;
-  drawSide();
+  for (const s of SESSIONS) s.answering ? ANSWERING.add(s.id) : ANSWERING.delete(s.id);
+  drawSide(); lockComposer();
 }
 
 // The projects, then any name a chat still uses that no project has (a
@@ -100,8 +115,8 @@ async function adoptOldProjects() {
 async function newProject(name) {
   await call("POST", "/api/projects", { name });
   await reloadConfig();
-  FOLDED.delete(name); folder = name; current = null;
-  drawSide(); drawLog(); if (tab === "settings") drawSettings();
+  stopFollowing(); FOLDED.delete(name); folder = name; current = null;
+  drawSide(); drawLog(); lockComposer(); if (tab === "settings") drawSettings();
 }
 
 const presetFor = name => CFG.folders.find(f => f.name === name) || {};
@@ -116,7 +131,8 @@ function drawSide() {
     const rows = open ? chats.map(s => {
       const here = current && s.id === current.id;
       return `<div class="sess" draggable="true" data-s="${esc(s.id)}" data-folder="${esc(name)}" aria-current="${here}"
-                   title="${esc(s.title || "untitled")} · ${s.count} messages">${icon(here ? "kylix-full" : "kylix")}<span>${esc(s.title || "untitled")}</span></div>`;
+                   title="${esc(s.title || "untitled")} · ${s.count} messages">${icon(here ? "kylix-full" : "kylix")}<span>${esc(s.title || "untitled")}</span>`
+           + (ANSWERING.has(s.id) ? `<i class="live-dot" title="an answer is coming"></i>` : "") + `</div>`;
     }) : [];
     return `<div class="folder" data-folder="${esc(name)}"><span class="name" data-fold="${esc(name)}" title="${open ? "fold" : "unfold"}">`
          + `${icon(open ? "krater-full" : "krater")}<span>${esc(name || "chats")}</span></span>`
@@ -132,7 +148,7 @@ $("#side").onclick = async e => {
   const row = e.target.closest("[data-s]");
   if (row) return openSession(row.dataset.s);
   const add = e.target.closest("[data-new]");
-  if (add) { folder = add.dataset.new; current = null; drawSide(); drawLog(); $("#input").focus(); return; }
+  if (add) { stopFollowing(); folder = add.dataset.new; current = null; drawSide(); drawLog(); lockComposer(); $("#input").focus(); return; }
   const fold = e.target.closest("[data-fold]");
   if (fold) {
     const name = fold.dataset.fold;
@@ -279,10 +295,13 @@ async function deleteChat(id) {
 }
 
 async function openSession(id) {
+  stopFollowing();
   current = await call("GET", `/api/sessions/${id}`);
   folder = current.folder;
-  drawSide(); drawLog();
+  drawSide(); drawLog(); lockComposer();
   if ($("#chat-settings").open) drawChatSettings();
+  // An answer still coming in this chat: pick it up where it is.
+  if (current.answering) followLive(id);
 }
 
 // ── The conversation ────────────────────────────────────────────────────
@@ -316,6 +335,7 @@ function whoName(m) {
   if (m.role === "user") return CFG.you || "you";
   const meta = m.meta || {};
   if (CFG.claude?.name && String(meta.node).toLowerCase() === CFG.claude.name.toLowerCase()) return CFG.claude.name;
+  if (meta.voice === "picture") return `🖼 ${String(meta.model?.name || meta.model || "a picture").replace(/\.safetensors$/i, "")}`;
   return meta.model ? meta.model.replace(/\.gguf$/i, "") : "local model";
 }
 
@@ -424,7 +444,7 @@ $("#log").addEventListener("click", async e => {
     const m = current.messages[Number(btn.dataset.i)];
     return copyText(m ? m.content : "", btn, icon("copy"));
   }
-  if (!btn || busy || !current) return;
+  if (!btn || chatBusy() || !current) return;
   try { await act(btn.dataset.act, Number(btn.dataset.i)); } catch (ex) { alert(ex.message); }
 });
 
@@ -664,15 +684,17 @@ $("#composer").addEventListener("submit", e => {
 });
 
 async function send(ask) {
-  if (busy) return;
-  busy = true; $("#send").disabled = true;
+  if (chatBusy()) return;
   const given = { prompt: ask.prompt, pending: PENDING };
   // Only the newest answer can be retried, and nothing moves while one is coming.
   $("#log").querySelectorAll(".acts").forEach(b => b.remove());
+  let sid = null;
   try {
     // A session exists before its first message so the answer and the files
     // have somewhere to land; one whose first turn fails is left empty.
     if (!current) { current = await call("POST", "/api/sessions", { folder }); await refresh(); }
+    sid = current.id;
+    ANSWERING.add(sid); lockComposer(); drawSide();
     if (ask.retry) {
       // The answer being retried comes off the screen; it stays on disk until
       // its replacement is in.
@@ -687,16 +709,24 @@ async function send(ask) {
       toBottom(true);
       $("#input").value = ""; PENDING = []; drawTray();
     }
-    if (await stream({ session: current.id, ...ask })) {
+    // true: kept. false: it failed, so what you sent goes back in the
+    // composer. null: you opened another chat meanwhile - the answer is still
+    // coming over there, so nothing is given back and nothing is drawn here.
+    const kept = await stream({ session: sid, ...ask });
+    if (kept) {
       given.pending.forEach(p => p.url && URL.revokeObjectURL(p.url));
       if (ask.screen) { SCREEN.sentAt = SCREEN.at; drawTray(); drawCaption(); }
-    } else giveBack(ask, given);
+    } else if (kept === false) giveBack(ask, given);
   } catch (ex) {
-    $("#log").append(bubble({ role: "assistant", content: [ex.message, ex.body?.detail, ex.body?.hint].filter(Boolean).join(" - ") },
-                            -1, 0, { cls: "err", bare: true, who: "symposium" }));
-    giveBack(ask, given);
+    if (sid) ANSWERING.delete(sid);
+    if (!sid || current?.id === sid) {
+      $("#log").append(bubble({ role: "assistant", content: [ex.message, ex.body?.detail, ex.body?.hint].filter(Boolean).join(" - ") },
+                              -1, 0, { cls: "err", bare: true, who: "symposium" }));
+      giveBack(ask, given);
+    }
   } finally {
-    busy = false; $("#send").disabled = false; $("#input").focus();
+    lockComposer(); drawSide();
+    if (!sid || current?.id === sid) $("#input").focus();
   }
 }
 
@@ -708,8 +738,39 @@ function giveBack(ask, given) {
   if (!PENDING.length) { PENDING = given.pending; drawTray(); }
 }
 
-// True when the answer came back and was kept.
+function stopFollowing() {
+  if (FOLLOWER) { FOLLOWER.ctrl.abort(); FOLLOWER = null; }
+}
+
+// Send, and follow the answer. true: kept; false: it failed; null: this window
+// stopped watching (another chat was opened) - the server keeps the turn going.
 async function stream(body) {
+  const ctrl = new AbortController();
+  const r = await fetch("/api/chat/stream", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: ctrl.signal });
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw Object.assign(new Error(j.error || `HTTP ${r.status}`), { body: j });
+  }
+  return follow(body.session, r, ctrl);
+}
+
+// An answer already coming in this chat - opened, or come back to, mid-answer:
+// the server replays it from its first event, then the rest as it happens.
+async function followLive(sid) {
+  const ctrl = new AbortController();
+  let r;
+  try { r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/live`, { signal: ctrl.signal }); } catch { return null; }
+  if (r.status === 404) { ANSWERING.delete(sid); lockComposer(); drawSide(); return null; }
+  if (!r.ok) return null;
+  return follow(sid, r, ctrl);
+}
+
+// Read a turn's events into a live bubble. The bubble belongs to the chat
+// `sid`; if you leave for another chat the follower is aborted (stopFollowing)
+// and nothing more is drawn or given back here - the turn itself goes on.
+async function follow(sid, r, ctrl) {
+  FOLLOWER = { sid, ctrl };
   const live = bubble({ role: "assistant", content: "" }, -1, 0,
                       { cls: "live", bare: true, who: voiceName(voiceOfChat()) });
   $("#log").append(live);
@@ -729,13 +790,6 @@ async function stream(body) {
     toBottom();
   };
   const later = () => { if (!queued) { queued = true; requestAnimationFrame(paint); } };
-  const r = await fetch("/api/chat/stream", {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-  if (!r.ok) {
-    live.remove();
-    const j = await r.json().catch(() => ({}));
-    throw Object.assign(new Error(j.error || `HTTP ${r.status}`), { body: j });
-  }
   const reader = r.body.getReader(), dec = new TextDecoder();
   let buf = "", failed = null, kept = false;
   const handle = ev => {
@@ -759,31 +813,48 @@ async function stream(body) {
       if (s) { s.ok = ev.ok; s.result = ev.preview; later(); }
     } else if (ev.type === "permission") {
       live.insertBefore(permitCard(ev), md); toBottom(true);
+    } else if (ev.type === "permission_answered") {
+      // Replayed to a window that came back: the ask, and that it was answered.
+      const card = live.querySelector(`.permit[data-permit-id="${ev.id}"]`);
+      if (card && !card.classList.contains("answered")) {
+        card.classList.add("answered", ev.answer);
+        card.querySelector(".p-buttons").innerHTML = `<b>${esc(ANSWERED[ev.answer] || ev.answer)}</b>`;
+      }
     } else if (ev.type === "done") {
       raw = ev.response ?? raw; paint(); tool?.remove();
     } else if (ev.type === "saved") {
-      // The server has it; redraw from the file so what you see is what's kept.
-      kept = true;
-      return refresh().then(() => openSession(ev.session.id));
+      // The server has it. Redraw from the file - if this chat is still the
+      // one on screen; otherwise the sidebar is enough.
+      kept = true; ANSWERING.delete(sid);
+      return refresh().then(() => { if (current?.id === sid) return openSession(sid); });
     } else if (ev.type === "error") {
       failed = ev;
     }
   };
   const pending = [];
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let i;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, i); buf = buf.slice(i + 1);
-      if (line.trim()) { try { pending.push(handle(JSON.parse(line))); } catch {} }
+  let left = false;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        if (line.trim()) { try { pending.push(handle(JSON.parse(line))); } catch {} }
+      }
     }
+  } catch (ex) {
+    if (ex.name !== "AbortError") throw ex;
+    left = true;                                   // stopFollowing: another chat was opened
   }
+  if (FOLLOWER?.ctrl === ctrl) FOLLOWER = null;
   await Promise.all(pending);
+  if (left) return kept ? true : null;
   if (!kept && !failed) failed = { error: "the answer stopped before it was kept" };
   if (failed) {
     // Shown, never kept: the session file only ever gets turns that came back.
+    ANSWERING.delete(sid); lockComposer(); drawSide();
     live.classList.add("err"); live.classList.remove("live"); tool?.remove();
     raw = [raw && `${raw}\n\n`, failed.error, failed.detail, failed.hint].filter(Boolean).join(" ");
     paint();
@@ -999,7 +1070,7 @@ function drawCaption() {
     else say = `preview of ${SCREEN.label} - not shared`;
   }
   $("#screen-caption").textContent = say;
-  $("#screen-send").disabled = !(screenOk() && SCREEN.mode === "push" && SCREEN.at && fresh && !busy);
+  $("#screen-send").disabled = !(screenOk() && SCREEN.mode === "push" && SCREEN.at && fresh && !chatBusy());
 }
 
 async function snap() {
@@ -1061,7 +1132,7 @@ $("#screen-attach").onchange = () => { SCREEN.attach = $("#screen-attach").check
 $("#screen-toggle").onclick = () => SCREEN.running ? screenStop() : screenStart();
 $("#screen-look").onclick = look;
 $("#screen-send").onclick = () => {
-  if (busy || !SCREEN.at || SCREEN.at <= SCREEN.sentAt) return;
+  if (chatBusy() || !SCREEN.at || SCREEN.at <= SCREEN.sentAt) return;
   send({ prompt: $("#input").value.trim(), screen: true });
 };
 $("#screen-preview").addEventListener("click", e => { if (e.target.tagName === "IMG") lightbox(e.target.src); });
@@ -1366,3 +1437,167 @@ function drawPings() {
 
 
 boot();
+
+// ── The picture panel ───────────────────────────────────────────────────
+// Words -> translate (a local model writes the prompt in the chosen model's
+// style) -> plan (Lodestar says what it would draw, and where) -> tweak any
+// of it -> draw. The picture lands in this chat as a turn and a file, at
+// full size. Lodestar plans and draws; this panel asks, shows and keeps.
+const PIC = Object.assign({ model: "", size: "", loras: {} }, local("symposium.picture", {}));
+const savePic = () => keep("symposium.picture", { model: PIC.model, size: PIC.size, loras: PIC.loras });
+let PIC_OPTIONS = null, PIC_LORAS = [], PIC_PLAN = null;
+
+const picEl = id => $("#pic-" + id);
+const picNote = (text, bad = false) => { picEl("note").textContent = text || ""; picEl("note").classList.toggle("bad", !!bad); };
+const picState = text => { picEl("state").textContent = text || ""; };
+
+function picModel() { return PIC_OPTIONS?.models.find(m => m.key === PIC.model || m.name === PIC.model) || null; }
+
+async function picLoadOptions() {
+  picNote("looking at the cluster…");
+  try {
+    PIC_OPTIONS = await call("GET", "/api/pictures/options");
+    const sel = picEl("model");
+    sel.innerHTML = `<option value="">any model that can draw it</option>` + PIC_OPTIONS.models.map(m =>
+      `<option value="${esc(m.name)}" ${m.drawable_on.length ? "" : "disabled"}>${esc(m.name)}`
+      + ` · ${esc(m.family || "?")}${m.base ? " / " + esc(m.base) : ""}${m.drawable_on.length ? "" : " (no node draws it)"}</option>`).join("");
+    sel.value = PIC.model && PIC_OPTIONS.models.some(m => m.name === PIC.model) ? PIC.model : "";
+    PIC.model = sel.value;
+    picNote(`${PIC_OPTIONS.models.filter(m => m.drawable_on.length).length} models can be drawn on `
+      + `${PIC_OPTIONS.nodes.map(n => n.node).join(", ") || "no node"}`);
+    picState(PIC_OPTIONS.nodes.length ? `${PIC_OPTIONS.nodes.length} node${PIC_OPTIONS.nodes.length === 1 ? "" : "s"}` : "no image node");
+    await picModelChanged();
+  } catch (ex) {
+    PIC_OPTIONS = null;
+    picNote(ex.body?.error || ex.message, true);
+    picState("unavailable");
+  }
+  picEl("draw").disabled = !PIC_OPTIONS;
+}
+
+async function picModelChanged() {
+  const m = picModel();
+  picEl("guide").textContent = m?.style?.guide ? `${m.style.style}: ${m.style.guide}` : "";
+  PIC_LORAS = [];
+  picEl("loras").innerHTML = "";
+  picEl("loras-hint").textContent = m ? "loading…" : "pick a model first";
+  if (!m) return;
+  try {
+    const got = await call("GET", `/api/pictures/options?model=${encodeURIComponent(m.name)}`);
+    PIC_LORAS = got.loras || [];
+    picEl("loras-hint").textContent = PIC_LORAS.length ? "click to wear one; the number is its weight" : "none fit this model";
+    const worn = PIC.loras[m.name] || {};
+    picEl("loras").innerHTML = PIC_LORAS.map(l => {
+      const on = worn[l.name] != null;
+      return `<span class="lora${on ? " on" : ""}" data-lora="${esc(l.name)}" title="${esc(l.fit || "")}">${esc(l.name.replace(/\.safetensors$/i, ""))}`
+        + `${l.fit ? ` <span class="fit">${esc(l.fit)}</span>` : ""}`
+        + `<input type="number" step="0.05" min="-2" max="2" value="${on ? worn[l.name] : (l.weight ?? 0.8)}" ${on ? "" : "hidden"}></span>`;
+    }).join("");
+  } catch (ex) { picEl("loras-hint").textContent = ex.body?.error || ex.message; }
+}
+
+function picRequest() {
+  // what Lodestar is asked for: the prompt as edited, the model, what is worn
+  const req = { prompt: picEl("prompt").value.trim() || picEl("text").value.trim() };
+  const m = picModel();
+  if (m) req.model = m.name;
+  const neg = picEl("negative").value.trim();
+  if (neg) req.negative = neg;
+  if (PIC.size) { const [w, h] = PIC.size.split("x").map(Number); req.width = w; req.height = h; }
+  const seed = picEl("seed").value.trim();
+  if (seed) req.seed = Number(seed);
+  const count = Number(picEl("count").value || 1);
+  if (count > 1) req.count = count;
+  const worn = m ? Object.entries(PIC.loras[m.name] || {}) : [];
+  if (worn.length) req.loras = worn.map(([name, weight]) => ({ name, weight }));
+  return req;
+}
+
+async function picTranslate() {
+  const text = picEl("text").value.trim();
+  if (!text) { picNote("say what you want to see first", true); return; }
+  const m = picModel();
+  const button = picEl("translate");
+  button.disabled = true; picNote("writing the prompt…");
+  try {
+    // whoever answers this chat writes the draft: Claude in a Claude chat, the chat's own model otherwise
+    const got = await call("POST", "/api/pictures/translate", { text, guide: m?.style?.guide || "", session: current?.id, folder });
+    picEl("prompt").value = got.prompt || "";
+    picEl("negative").value = got.negative || "";
+    const by = got.voice === "claude" ? voiceName("claude") : (got.model || "a local model");
+    picNote(`drafted by ${by}${got.node && got.voice !== "claude" ? " on " + got.node : ""} - edit it as you like`);
+  } catch (ex) { picNote(ex.body?.error || ex.message, true); }
+  finally { button.disabled = false; }
+}
+
+async function picPlan() {
+  const req = picRequest();
+  if (!req.prompt) { picNote("a prompt first: translate, or write one", true); return; }
+  picNote("planning…");
+  try {
+    PIC_PLAN = await call("POST", "/api/pictures/plan", req);
+    const p = PIC_PLAN;
+    picEl("plan-box").hidden = false;                         // stays folded; the summary line says the gist
+    picEl("plan-sum").textContent = `${p.model?.name || p.model || "?"} on ${p.node}${p.also?.length ? " (or " + p.also.join(", ") + ")" : ""}`;
+    const rows = [["node", p.node], ["model", p.model?.name || p.model], ["family", p.arch],
+                  ["size", p.width && p.height ? `${p.width} × ${p.height}` : null],
+                  ["loras", (p.loras || []).map(l => `${l.name} ${l.weight ?? ""}`).join(", ") || "none"],
+                  ["seed", p.seed], ["steps", p.settings ? `${p.settings.steps} · cfg ${p.settings.cfg} · ${p.settings.sampler}` : null],
+                  ["prompt", p.prompt], ["negative", p.negative], ["notes", (p.notes || []).join("; ") || null]];
+    picEl("plan-facts").innerHTML = rows.filter(([, v]) => v != null && v !== "").map(([k, v]) => `<div class="row"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join("");
+    picNote(`plan: ${p.node} will draw it with ${p.model?.name || p.model}`);
+  } catch (ex) { PIC_PLAN = null; picEl("plan-box").hidden = true; picNote(ex.body?.error || ex.message, true); }
+}
+
+async function picDraw() {
+  if (chatBusy()) return;
+  const req = picRequest();
+  if (!req.prompt) { picNote("a prompt first: translate, or write one", true); return; }
+  const asked = picEl("text").value.trim() || req.prompt;
+  drawing = true; lockComposer(); picEl("draw").disabled = true;
+  $("#chat .pic").classList.add("busy"); picNote("drawing… this can take a minute or two");
+  try {
+    if (!current) { current = await call("POST", "/api/sessions", { folder }); await refresh(); }
+    const got = await call("POST", "/api/pictures/draw", { session: current.id, asked, why: asked, request: req });
+    await openSession(current.id);
+    picNote(`drawn on ${got.node} with ${got.model?.name || got.model || "?"} in ${got.seconds ?? "?"}s · seed ${got.seed}`);
+    if (got.seed != null) picEl("seed").placeholder = `last: ${got.seed}`;
+  } catch (ex) {
+    picNote([ex.body?.error, ex.body?.detail].filter(Boolean).join(" - ") || ex.message, true);
+  } finally {
+    drawing = false; lockComposer(); picEl("draw").disabled = !PIC_OPTIONS;
+    $("#chat .pic").classList.remove("busy");
+  }
+}
+
+$("#picture-btn").onclick = () => {
+  const p = $("#p-picture");
+  p.open = true;
+  if (!PIC_OPTIONS) picLoadOptions();
+  picEl("text").focus();
+  p.scrollIntoView({ block: "nearest" });
+};
+$("#p-picture").addEventListener("toggle", () => { if ($("#p-picture").open && !PIC_OPTIONS) picLoadOptions(); });
+picEl("reload").onclick = picLoadOptions;
+picEl("model").onchange = async () => { PIC.model = picEl("model").value; savePic(); await picModelChanged(); };
+picEl("size").onchange = () => { PIC.size = picEl("size").value; savePic(); };
+picEl("size").value = PIC.size || "";
+picEl("translate").onclick = picTranslate;
+picEl("plan").onclick = picPlan;
+picEl("draw").onclick = picDraw;
+picEl("text").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); picTranslate(); } });
+picEl("loras").addEventListener("click", e => {
+  const chip = e.target.closest(".lora");
+  if (!chip || e.target.tagName === "INPUT") return;
+  const m = picModel(); if (!m) return;
+  const worn = PIC.loras[m.name] = PIC.loras[m.name] || {};
+  const input = chip.querySelector("input");
+  if (chip.classList.toggle("on")) { worn[chip.dataset.lora] = Number(input.value); input.hidden = false; }
+  else { delete worn[chip.dataset.lora]; input.hidden = true; }
+  savePic();
+});
+picEl("loras").addEventListener("change", e => {
+  if (e.target.tagName !== "INPUT") return;
+  const chip = e.target.closest(".lora"), m = picModel();
+  if (chip && m && chip.classList.contains("on")) { (PIC.loras[m.name] = PIC.loras[m.name] || {})[chip.dataset.lora] = Number(e.target.value); savePic(); }
+});

@@ -57,6 +57,9 @@ aside { background: color-mix(in srgb, var(--surface) 70%, transparent); border-
 .sess[aria-current=true] { background: var(--sel); color: var(--sel-text); }
 .sess[aria-current=true] svg { color: var(--accent); }
 .sess.empty { color: var(--faint); font-style: italic; cursor: default; background: none; padding-left: 42px; }
+/* an answer is coming in this chat (whether or not it is the one on screen) */
+.sess .live-dot { flex: none; width: 6px; height: 6px; margin-left: auto; border-radius: 50%; background: var(--accent); animation: live-dot 1.4s ease-in-out infinite; }
+@keyframes live-dot { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
 .foot { margin-top: auto; padding-top: 10px; display: flex; gap: 6px; }
 /* dragging a chat to another project, or out of them all */
 .sess[draggable=true] { -webkit-user-drag: element; }
@@ -252,6 +255,38 @@ details.project svg { color: var(--accent); width: 18px; height: 18px; }
 details.project .p-name { font-weight: 600; }
 details.project .p-sub { font-size: 12px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 details.project .form { padding: 4px 0 14px 27px; }
+
+/* ── the picture panel ───────────────────────────────────────────────── */
+.pic { border-top: 1px solid var(--border); padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; }
+.pic textarea { resize: vertical; font-size: 12.5px; padding: 7px 9px; }
+.pic-row { display: flex; gap: 6px; align-items: center; }
+.pic-row select { flex: 1; min-width: 0; }
+.pic-guide { margin: 0; font-size: 11.5px; line-height: 1.4; }
+.pic-go { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+.pic-go .pic-note { margin-right: auto; font-size: 11.5px; min-height: 1em; }
+.pic-label { font-size: 11.5px; color: var(--text-dim); margin-top: 2px; }
+.pic-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+.pic-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-dim); min-width: 0; }
+.pic-grid input, .pic-grid select { width: 100%; min-width: 0; font-size: 12px; padding: 5px 7px; }
+.pic-loras { display: flex; flex-wrap: wrap; gap: 5px; min-height: 18px; }
+.pic-loras .lora { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
+                   border: 1px solid var(--border); color: var(--text-dim); font-size: 11px; cursor: pointer; user-select: none; }
+.pic-loras .lora.on { color: var(--accent); border-color: var(--accent); }
+.pic-loras .lora input { width: 44px; font-size: 11px; padding: 1px 4px; }
+.pic-loras .lora .fit { opacity: .7; }
+.pic-fold { border: 1px solid var(--border); border-radius: 8px; padding: 0 9px; }
+.pic-fold > summary { cursor: pointer; font-size: 12px; color: var(--text-dim); padding: 6px 0; list-style: none; display: flex; align-items: center; gap: 6px; }
+.pic-fold > summary::-webkit-details-marker { display: none; }
+.pic-fold > summary::before { content: "⌄"; color: var(--text-dim); transition: transform .15s; }
+.pic-fold:not([open]) > summary::before { transform: rotate(-90deg); }
+.pic-fold > summary .muted { font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pic-fold .pic-loras { padding: 2px 0 8px; }
+.pic-facts { padding: 2px 0 8px; display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; }
+.pic-facts .row { display: flex; flex-direction: column; gap: 1px; }
+.pic-facts .row b { font-size: 10.5px; color: var(--faint); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+.pic-facts .row span { color: var(--text); word-break: break-word; white-space: pre-wrap; }
+#pic-draw[disabled] { opacity: .5; cursor: default; }
+.pic.busy { opacity: .6; pointer-events: none; }
 
 /* Claude's settings */
 #set-claude h3 .muted { font-weight: 400; font-size: 13px; }

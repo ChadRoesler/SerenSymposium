@@ -32,6 +32,7 @@ Serves:
     GET    /api/models            the models Lodestar's llama node has
     GET    /api/sessions          every session, newest first (POST: new, or import)
     GET    /api/sessions/{id}     one session, whole - also the export (PATCH, DELETE)
+    GET    /api/sessions/{id}/live          the turn running in it now, replayed then followed (LiveTurn)
     POST   /api/sessions/{id}/files         attach a file (JSON, base64) - GET .../files/{name} reads it
     PATCH  /api/prefs             your name, the claude voice's settings, confirm - kept beside the chats
     GET    /api/claude            the claude voice's settings and the carabiner clipped on this box
@@ -70,7 +71,7 @@ from seren_meninges import get_version
 from seren_meninges.viewer import render_from_dir
 
 from . import __version__ as _fallback_version
-from . import attachments, carabiner, claude_voice, screen
+from . import attachments, carabiner, claude_voice, pictures, screen
 from .config import SymposiumConfig, load_config
 from .prefs import Invalid as BadPref
 from .prefs import Prefs
@@ -398,6 +399,12 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
         async for event in (_with_asks(spoken, desk) if desk else spoken):
             if event["type"] == "done":
                 event["response"], found = await bring_back(cfg, store, turn, event.get("response") or "", before)
+                # Pictures a tool sent back (make_image draws on another box):
+                # kept in the chat beside the answer, not left as a path there.
+                found += attachments.keep_tool_images(heard.images, store, turn.session,
+                                                      int(cfg.files.max_mb * 1024 * 1024), heard.steps)
+                if found:
+                    event["files"] = found
             yield event
             if event["type"] == "done":
                 saved = store.record(turn.session, turn.prompt, event["response"],
@@ -430,7 +437,117 @@ async def _with_asks(spoken, desk: PermitDesk):
     finally:
         if not task.done():
             task.cancel()
-        desk.close("the window stopped listening")
+        desk.close("the turn ended before anyone answered")
+
+
+async def lodestar_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn, r: httpx.Response):
+    """Lodestar's /chat/stream, already open as `r`, as events - line for
+    line, nothing renamed - written to the session when `done` comes back,
+    then `saved`. Mirrors claude_answer for the other voice."""
+    tools: list[str] = []
+    try:
+        async for line in r.aiter_lines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            yield event
+            if event.get("type") == "tool_status" and event.get("tool"):
+                tools.append(event["tool"])
+            elif event.get("type") == "done" and turn.session:
+                kept, found = await bring_back(cfg, store, turn, event.get("response") or "")
+                saved = store.record(turn.session, turn.prompt, kept, turn.receipt(event, tools), keep=turn.keep,
+                                     files=turn.files, answer_files=found)
+                if saved is not None:
+                    yield {"type": "saved", "session": summary(saved)}
+    except httpx.HTTPError as ex:
+        yield {"type": "error", "error": "lodestar stopped mid-answer", "detail": f"{type(ex).__name__}: {ex}"}
+    finally:
+        await r.aclose()
+
+
+class LiveTurn:
+    """A turn in flight, kept apart from whoever is watching it.
+
+    The voice (the CLI, or Lodestar's stream) is read by a task of this
+    object's own and every event it says is kept here. A window FOLLOWS the
+    turn - from the first event, however late it arrives - and may stop
+    following without stopping anything. Before this the reader WAS the
+    response: close the window, or click another chat while the answer was
+    coming, and the response generator closed, which killed the CLI
+    mid-thought, and the answer was gone along with whatever it had reasoned
+    and every tool it had run. Now the turn ends when the voice is done, is
+    recorded then, and the window is only ever a spectator.
+
+    One per session at a time (app.state.live, by session id), and the
+    session is in app.state.answering from start to finish: a second message
+    into THAT chat is refused with 409, any other chat is free."""
+
+    def __init__(self, session: str, answering: set[str], live: dict[str, "LiveTurn"]):
+        self.session = session
+        self.events: list[dict[str, Any]] = []
+        self.finished = asyncio.Event()
+        self.changed = asyncio.Condition()
+        self._answering, self._live = answering, live
+        self.task: Optional[asyncio.Task] = None
+
+    @classmethod
+    def begin(cls, request: Request, session: str, source) -> "LiveTurn":
+        """Start `source` (an async iterator of events) running on its own,
+        registered for the session. The caller checked nobody else is."""
+        state = request.app.state
+        turn = cls(session, state.answering, state.live)
+        state.answering.add(session)
+        state.live[session] = turn
+        turn.task = asyncio.create_task(turn._run(source))
+        return turn
+
+    async def _run(self, source) -> None:
+        try:
+            async for ev in source:
+                await self._push(ev)
+        except asyncio.CancelledError:
+            await self._push({"type": "error", "error": "the turn was stopped",
+                              "detail": "Symposium shut down while the answer was coming"})
+            raise
+        except Exception as ex:  # noqa: BLE001 - a follower must hear the end, whatever it was
+            await self._push({"type": "error", "error": "the turn stopped unexpectedly",
+                              "detail": f"{type(ex).__name__}: {ex}"})
+        finally:
+            self._answering.discard(self.session)
+            if self._live.get(self.session) is self:
+                del self._live[self.session]
+            self.finished.set()
+            async with self.changed:
+                self.changed.notify_all()
+
+    async def _push(self, ev: dict[str, Any]) -> None:
+        self.events.append(ev)
+        async with self.changed:
+            self.changed.notify_all()
+
+    async def follow(self):
+        """Every event so far, then each new one as it comes, until the turn
+        is over. Stopping early (the window went away) stops only this."""
+        i = 0
+        while True:
+            while i < len(self.events):
+                yield self.events[i]
+                i += 1
+            if self.finished.is_set():
+                return
+            async with self.changed:
+                if i >= len(self.events) and not self.finished.is_set():
+                    await self.changed.wait()
+
+
+def _ndjson(events) -> StreamingResponse:
+    async def lines():
+        async for ev in events:
+            yield json.dumps(ev) + "\n"
+    return StreamingResponse(lines(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache"})
 
 
 def _annotate_401(payload: dict[str, Any]) -> dict[str, Any]:
@@ -488,7 +605,8 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.config = cfg
         app.state.sessions = SessionStore(cfg.sessions_dir())
-        app.state.answering = set()     # sessions with a claude turn running
+        app.state.answering = set()     # sessions with a turn running (either voice)
+        app.state.live = {}             # session id -> LiveTurn, while it runs
         app.state.screen = None         # the newest screen-share frame (screen.Frame)
         # trust_env=False for a loopback head, ON PURPOSE.
         #
@@ -668,13 +786,18 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         if isinstance(turn, JSONResponse):
             return turn
         if turn.claude is not None:
+            if turn.session in request.app.state.answering:
+                return _busy()
+            # claude_answer keeps its own one-at-a-time guard for direct callers;
+            # here the LiveTurn holds the session in `answering`, so it gets a
+            # set of its own rather than finding itself already there.
+            live = LiveTurn.begin(request, turn.session, claude_answer(cfg, store, turn, set()))
             out: dict[str, Any] = {}
-            async for event in claude_answer(cfg, store, turn, request.app.state.answering):
+            async for event in live.follow():
                 if event["type"] in ("done", "error"):
                     out = event
             if out.get("type") != "done":
-                return JSONResponse({k: v for k, v in out.items() if k != "type"},
-                                    status_code=409 if "still answering" in out.get("error", "") else 502)
+                return JSONResponse({k: v for k, v in out.items() if k != "type"}, status_code=502)
             return {**{k: v for k, v in out.items() if k != "type"}, "session": turn.session}
         try:
             r = await request.app.state.client.post("/api/v1/chat", json=turn.payload)
@@ -696,18 +819,22 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         `tool_status` before a tool runs, then `done` (the whole answer) or
         `error`. Nothing is renamed. The one line that is ours comes last:
         `{"type": "saved", "session": {...}}` once a session has the turn.
-        A claude turn speaks the same lines (claude_voice translates)."""
+        A claude turn speaks the same lines (claude_voice translates).
+
+        With a session the turn is a LiveTurn: it runs on its own and this
+        response only follows it. Close the window or open another chat and
+        the answer still comes and is still kept; GET /api/sessions/{sid}/live
+        picks it up again. One turn per chat at a time: 409 while it runs."""
         store: SessionStore = request.app.state.sessions
         turn = plan_turn(cfg, store, await _json(request), request.app.state.screen)
         if isinstance(turn, JSONResponse):
             return turn
+        if turn.session and turn.session in request.app.state.answering:
+            return _busy()
         if turn.claude is not None:
-            async def spoken():
-                async for event in claude_answer(cfg, store, turn, request.app.state.answering,
-                                                 request.app.state.permits):
-                    yield json.dumps(event) + "\n"
-            return StreamingResponse(spoken(), media_type="application/x-ndjson",
-                                     headers={"Cache-Control": "no-cache"})
+            # A set of its own: see /api/chat.
+            source = claude_answer(cfg, store, turn, set(), request.app.state.permits)
+            return _ndjson(LiveTurn.begin(request, turn.session, source).follow())
         client: httpx.AsyncClient = request.app.state.client
         try:
             r = await client.send(client.build_request("POST", "/api/v1/chat/stream", json=turn.payload),
@@ -718,35 +845,10 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             content = await r.aread()
             await r.aclose()
             return _relay(r, content)
-
-        async def lines():
-            tools: list[str] = []
-            try:
-                async for line in r.aiter_lines():
-                    if not line.strip():
-                        continue
-                    yield line + "\n"
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    if event.get("type") == "tool_status" and event.get("tool"):
-                        tools.append(event["tool"])
-                    elif event.get("type") == "done" and turn.session:
-                        kept, found = await bring_back(cfg, store, turn, event.get("response") or "")
-                        saved = store.record(turn.session, turn.prompt, kept,
-                                             turn.receipt(event, tools), keep=turn.keep,
-                                             files=turn.files, answer_files=found)
-                        if saved is not None:
-                            yield json.dumps({"type": "saved", "session": summary(saved)}) + "\n"
-            except httpx.HTTPError as ex:
-                yield json.dumps({"type": "error", "error": "lodestar stopped mid-answer",
-                                  "detail": f"{type(ex).__name__}: {ex}"}) + "\n"
-            finally:
-                await r.aclose()
-
-        return StreamingResponse(lines(), media_type="application/x-ndjson",
-                                 headers={"Cache-Control": "no-cache"})
+        source = lodestar_answer(cfg, store, turn, r)
+        if not turn.session:
+            return _ndjson(source)       # nothing is kept, so there is nothing to come back to
+        return _ndjson(LiveTurn.begin(request, turn.session, source).follow())
 
     @app.get("/api/models")
     async def models(request: Request):
@@ -771,7 +873,10 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
 
     @app.get("/api/sessions")
     async def sessions_list(request: Request):
-        return {"sessions": request.app.state.sessions.list()}
+        """Each with `answering`: a turn is running in it right now (follow
+        it at /api/sessions/{sid}/live)."""
+        answering = request.app.state.answering
+        return {"sessions": [{**s, "answering": s["id"] in answering} for s in request.app.state.sessions.list()]}
 
     @app.post("/api/sessions")
     async def sessions_create(request: Request):
@@ -790,7 +895,19 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
     @app.get("/api/sessions/{sid}")
     async def sessions_get(request: Request, sid: str):
         s = request.app.state.sessions.get(sid)
-        return s if s is not None else JSONResponse({"error": "no such session"}, status_code=404)
+        if s is None:
+            return JSONResponse({"error": "no such session"}, status_code=404)
+        return {**s, "answering": sid in request.app.state.answering}
+
+    @app.get("/api/sessions/{sid}/live")
+    async def sessions_live(request: Request, sid: str):
+        """The turn running in this chat, from its first event to its end,
+        as /api/chat/stream would have shown it - for a window that opened
+        (or came back) while the answer was coming. 404 when nothing is."""
+        live = request.app.state.live.get(sid)
+        if live is None:
+            return JSONResponse({"error": "nothing is answering in this chat"}, status_code=404)
+        return _ndjson(live.follow())
 
     @app.patch("/api/sessions/{sid}")
     async def sessions_update(request: Request, sid: str):
@@ -888,6 +1005,9 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
                     except BadPref as ex:
                         log.warning("could not keep %r as always-allowed: %s", rule, ex)
                 fut.set_result({"behavior": "allow"})
+            # Into the turn's own stream too: a window that follows the turn
+            # later sees the ask AND that it was answered, not a card waiting.
+            await desk.events.put({"type": "permission_answered", "id": body["id"], "answer": body["answer"], "rule": rule})
             return {"ok": True, "answer": body["answer"], "rule": rule}
         return JSONResponse({"error": "nothing is waiting on that"}, status_code=404)
 
@@ -968,6 +1088,137 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
     # ── Rewind, fork, take one out ──────────────────────────────────────
     # Not while Claude is answering: the turn would land on a thread that
     # moved under it.
+
+    # ── pictures: the request panel (seren_symposium.pictures) ────────────
+    # Lodestar plans and draws; Symposium asks, shows and keeps. Every one of
+    # these is a thin relay with the bearer attached, except draw, which also
+    # puts the picture into the chat.
+
+    @app.get("/api/pictures/options")
+    async def pictures_options(request: Request, model: str = ""):
+        """What can be drawn: the models (how each wants to be prompted),
+        the nodes; with ?model=, the LoRAs that fit it."""
+        client = request.app.state.client
+        try:
+            if model:
+                r = await client.get("/api/v1/comfy/compatible", params={"model": model}, timeout=150)
+            else:
+                r = await client.get("/api/v1/comfy/catalog", timeout=150)
+        except Exception as ex:  # noqa: BLE001
+            return _unreachable(cfg, ex)
+        if r.status_code != 200:
+            return _relay(r, r.content)
+        return r.json() if model else pictures.shape_options(r.json())
+
+    @app.post("/api/pictures/translate")
+    async def pictures_translate(request: Request):
+        """Words -> a prompt in the chosen model's style, drafted by whoever
+        answers the chat: {text, guide, session? | folder?}. A Claude chat
+        asks Claude (one shot); a local chat asks its own model, which
+        Lodestar routes to the node that model lives on."""
+        body = await _json(request)
+        if not isinstance(body, dict) or not str(body.get("text") or "").strip():
+            return JSONResponse({"error": "say what you want drawn"}, status_code=400)
+        store: SessionStore = request.app.state.sessions
+        s = store.get(str(body.get("session") or "")) if body.get("session") else None
+        settings = (s or {}).get("settings") or {}
+        preset = cfg.folder((s or {}).get("folder") or str(body.get("folder") or ""))
+        voice = settings.get("voice") or (preset.voice if preset else "") or "lodestar"
+        use_claude = voice == "claude" and claude_voice.available(cfg.claude)
+        local_model = "" if use_claude else (settings.get("model_override") or (preset.model if preset else "") or "")
+        claude_model = settings.get("model_override") if use_claude and preset and settings.get("voice") == "claude" else ""
+        out = await pictures.translate(request.app.state.client, str(body["text"]).strip(), str(body.get("guide") or ""),
+                                       model_override=str(local_model or ""), claude=cfg.claude if use_claude else None,
+                                       claude_model=str(claude_model or "") if use_claude else "")
+        return JSONResponse({**out, "voice": "claude" if use_claude else "lodestar"},
+                            status_code=200 if out.get("ok") else 502)
+
+    @app.post("/api/pictures/plan")
+    async def pictures_plan(request: Request):
+        """What would be drawn, and where, without drawing: Lodestar's plan."""
+        body = await _json(request)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "a JSON body"}, status_code=400)
+        try:
+            r = await request.app.state.client.post("/api/v1/image/plan", json=body, timeout=150)
+        except Exception as ex:  # noqa: BLE001
+            return _unreachable(cfg, ex)
+        if r.status_code != 200:
+            return _relay(r, r.content)
+        return r.json()
+
+    @app.post("/api/pictures/draw")
+    async def pictures_draw(request: Request):
+        """Draw it, and keep it in the chat. {session, asked, why, request:
+        {prompt, negative?, model?, loras?, width?, height?, seed?, count?} or
+        {workflow, node}}. Without a session the pictures come back base64
+        and are kept nowhere."""
+        body = await _json(request)
+        if not isinstance(body, dict) or not isinstance(body.get("request"), dict):
+            return JSONResponse({"error": "a JSON body with a request"}, status_code=400)
+        store: SessionStore = request.app.state.sessions
+        sid = str(body.get("session") or "")
+        if sid and store.get(sid) is None:
+            return JSONResponse({"error": f"no session '{sid}'"}, status_code=404)
+        req = {**body["request"], "holder": "symposium", "save_as": "symposium"}
+        try:
+            r = await request.app.state.client.post("/api/v1/image", json=req, timeout=pictures.DRAW_TIMEOUT)
+        except Exception as ex:  # noqa: BLE001
+            return _unreachable(cfg, ex)
+        if r.status_code != 200:
+            return _relay(r, r.content)
+        out = r.json()
+        asked = str(body.get("asked") or req.get("prompt") or "").strip()
+        why = str(body.get("why") or "").strip()
+        if not sid:
+            return {k: v for k, v in out.items()}
+        kept = await asyncio.to_thread(pictures.keep_drawn, store, sid, asked, why, out)
+        if kept is None:
+            return JSONResponse({"error": "the node finished but sent no picture back", **{k: v for k, v in out.items() if k != "images"}},
+                                status_code=502)
+        return {"ok": True, "session": sid, "files": kept["files"], "answer": kept["answer"], "meta": kept["meta"],
+                **{k: v for k, v in out.items() if k not in ("images", "ok")}}
+
+    @app.get("/api/pictures/gallery")
+    async def pictures_gallery(request: Request):
+        try:
+            r = await request.app.state.client.get("/api/v1/gallery", timeout=60)
+        except Exception as ex:  # noqa: BLE001
+            return _unreachable(cfg, ex)
+        return r.json() if r.status_code == 200 else _relay(r, r.content)
+
+    @app.get("/api/pictures/gallery/{node}/{day}")
+    async def pictures_gallery_day(request: Request, node: str, day: str):
+        try:
+            r = await request.app.state.client.get(f"/api/v1/gallery/{node}/{day}", timeout=60)
+        except Exception as ex:  # noqa: BLE001
+            return _unreachable(cfg, ex)
+        return r.json() if r.status_code == 200 else _relay(r, r.content)
+
+    @app.get("/api/pictures/gallery/{node}/{day}/{name}")
+    async def pictures_gallery_file(request: Request, node: str, day: str, name: str):
+        """One gallery picture at full size, streamed through."""
+        client = request.app.state.client
+        try:
+            r = await client.send(client.build_request("GET", f"/api/v1/gallery/{node}/{day}/{name}", timeout=300),
+                                  stream=True)
+        except Exception as ex:  # noqa: BLE001
+            return _unreachable(cfg, ex)
+        if r.status_code != 200:
+            body = await r.aread()
+            await r.aclose()
+            return _relay(r, body)
+
+        async def stream_body():
+            try:
+                async for chunk in r.aiter_bytes():
+                    yield chunk
+            finally:
+                await r.aclose()
+        return StreamingResponse(stream_body(), media_type=r.headers.get("content-type") or "application/octet-stream",
+                                 headers={"X-Content-Type-Options": "nosniff",
+                                          "Content-Security-Policy": "sandbox; default-src 'none'; img-src data:",
+                                          "Cache-Control": "private, max-age=3600"})
 
     async def _change(request: Request, sid: str, act, needs_body: bool = True):
         if sid in request.app.state.answering:
