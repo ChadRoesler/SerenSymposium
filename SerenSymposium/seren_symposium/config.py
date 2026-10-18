@@ -249,10 +249,26 @@ class ScreenConfig(BaseModel):
     jpeg_quality: int = 80
 
 
+class EarsConfig(BaseModel):
+    """Push-to-talk: the microphone recorded here (sounddevice), the clip
+    kept beside the chat, its words from whisper through Lodestar's `hear`."""
+    enabled: bool = True
+    # Which input: a case-insensitive part of its name ("USB Microphone", "Stereo
+    # Mix"). Blank = the OS default input. The panel lists what there is.
+    device: str = ""
+    # Whisper's language hint; blank lets it guess (a .en model ignores it).
+    language: str = "en"
+    # A clip stops growing here and says it was cut.
+    max_seconds: float = 120.0
+    # How long hearing may take, the wake of whisper included.
+    timeout_seconds: float = 150.0
+
+
 class SymposiumConfig(BaseModel):
     lodestar: LodestarClientConfig = Field(default_factory=LodestarClientConfig)
     files: FilesConfig = Field(default_factory=FilesConfig)
     screen: ScreenConfig = Field(default_factory=ScreenConfig)
+    ears: EarsConfig = Field(default_factory=EarsConfig)
     viewers: ServiceViewers = Field(default_factory=ServiceViewers)
     ui: UiConfig = Field(default_factory=UiConfig)
     updates: UpdatesConfig = Field(default_factory=UpdatesConfig)

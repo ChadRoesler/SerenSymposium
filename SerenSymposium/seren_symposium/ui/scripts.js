@@ -66,7 +66,7 @@ async function boot() {
   CFG = await (await fetch("/api/config")).json();
   await adoptOldProjects();
   folder = (CFG.folders[0] || {}).name || "";
-  drawVoices(); await refresh(); drawLog(); drawTray(); screenInit();
+  drawVoices(); await refresh(); drawLog(); drawTray(); screenInit(); earsInit();
   poll(); setInterval(poll, 15000);
   show(local("symposium.tab", "chat"));
 }
@@ -132,7 +132,9 @@ function drawSide() {
       const here = current && s.id === current.id;
       return `<div class="sess" draggable="true" data-s="${esc(s.id)}" data-folder="${esc(name)}" aria-current="${here}"
                    title="${esc(s.title || "untitled")} · ${s.count} messages">${icon(here ? "kylix-full" : "kylix")}<span>${esc(s.title || "untitled")}</span>`
-           + (ANSWERING.has(s.id) ? `<i class="live-dot" title="an answer is coming"></i>` : "") + `</div>`;
+           + (ANSWERING.has(s.id) ? `<i class="live-dot" title="an answer is coming"></i>` : "")
+           + (s.sources?.length ? `<i class="fed-dot" title="a plugin speaks in this chat: ${esc(s.sources.join(", "))}"></i>` : "")
+           + `</div>`;
     }) : [];
     return `<div class="folder" data-folder="${esc(name)}"><span class="name" data-fold="${esc(name)}" title="${open ? "fold" : "unfold"}">`
          + `${icon(open ? "krater-full" : "krater")}<span>${esc(name || "chats")}</span></span>`
@@ -332,7 +334,8 @@ function drawLog() {
 
 // Who said it: you, the chat's Claude by name, or the local model that answered.
 function whoName(m) {
-  if (m.role === "user") return CFG.you || "you";
+  // Fed in by a plugin (the game table): the plugin's name, never yours.
+  if (m.role === "user") return m.source ? (m.by || m.source) : (CFG.you || "you");
   const meta = m.meta || {};
   if (CFG.claude?.name && String(meta.node).toLowerCase() === CFG.claude.name.toLowerCase()) return CFG.claude.name;
   if (meta.voice === "picture") return `🖼 ${String(meta.model?.name || meta.model || "a picture").replace(/\.safetensors$/i, "")}`;
@@ -358,19 +361,24 @@ function receipt(meta) {
 // to here" and "try another way from here" are what an edit is really for.
 function bubble(m, i, count, opts = {}) {
   const d = document.createElement("div");
-  const mine = m.role === "user";
-  d.className = "msg" + (mine ? " me" : "") + (opts.cls ? " " + opts.cls : "");
+  // A prompt fed in by a plugin (the game table) is marked by the server and
+  // drawn as the plugin's: on the left, dashed, tagged. It never wears your
+  // bubble, so what you said and what a plugin said can always be told apart.
+  const asked = m.role === "user", fed = asked && !!m.source, mine = asked && !fed;
+  d.className = "msg" + (mine ? " me" : "") + (fed ? " fed" : "") + (opts.cls ? " " + opts.cls : "");
   d.dataset.i = i;
-  d.innerHTML = `<div class="who">${esc(opts.who || whoName(m))}</div>`;
-  const [think, words] = mine ? ["", m.content] : splitThink(m.content);
+  d.innerHTML = `<div class="who">${esc(opts.who || whoName(m))}`
+              + (fed ? `<span class="fed-tag" title="fed into the chat by ${esc(m.source)} - not typed by you">plugin</span>` : "")
+              + `</div>`;
+  const [think, words] = asked ? ["", m.content] : splitThink(m.content);
   const steps = [...(think ? [{ kind: "thinking", text: think }] : []), ...(m.meta?.steps || [])];
   if (steps.length) d.append(stepsEl(steps));
   d.append(renderMd(words, current?.id));
-  const atts = attachmentsEl(m.files, current?.id, mine ? "" : m.content);
+  const atts = attachmentsEl(m.files, current?.id, asked ? "" : m.content);
   if (atts) d.append(atts);
   if (!opts.bare) {
     const meta = document.createElement("div"); meta.className = "meta";
-    const line = mine ? "" : receipt(m.meta);
+    const line = asked ? "" : receipt(m.meta);
     if (line) meta.append(Object.assign(document.createElement("span"), { className: "receipt", textContent: line }));
     meta.append(actionsEl(m, i, count));
     d.append(meta);
@@ -423,7 +431,7 @@ function stepsEl(steps, liveNow = false, el = null) {
 function actionsEl(m, i, count) {
   const acts = document.createElement("span"); acts.className = "acts";
   const last = i === count - 1, b = [];
-  if (m.role === "user") b.push(["edit", "edit: go back to this message and change it"]);
+  if (m.role === "user" && !m.source) b.push(["edit", "edit: go back to this message and change it"]);
   if (m.role === "assistant" && last) b.push(["retry", "ask again"]);
   if (m.role === "assistant" && !last) b.push(["rewind", "rewind to here: what comes after goes"]);
   b.push(["copy", "copy this message"], ["fork", "fork: a new chat from here"], ["trash", "delete this message"]);
@@ -549,6 +557,8 @@ function attachmentsEl(files, sid, shownIn = "") {
       + `<span>screen · ${esc(f.source || "shared")}</span></button>`
     : isImage(f.type)
     ? `<img src="${esc(fileUrl(sid, f.name))}" alt="${esc(f.orig || f.name)}" title="${esc(f.orig || f.name)}" loading="lazy">`
+    : (f.type || "").startsWith("audio/")
+    ? `<audio class="clip" controls preload="none" src="${esc(fileUrl(sid, f.name))}" title="${esc(f.orig || f.name)}"></audio>`
     : `<a class="chip" href="${esc(fileUrl(sid, f.name))}" target="_blank" rel="noopener">${icon("file")}`
       + `<span>${esc(f.orig || f.name)}</span><small>${size(f.size || 0)}</small></a>`).join("");
   return box;
@@ -579,6 +589,19 @@ async function poll() {
   }
   if (tab === "settings") drawAbout();
   if (tab === "backend") drawPings();
+  // Chats made or grown behind this window's back (the game table speaking
+  // into one) show up without a reload; the open chat is re-read when it grew.
+  try {
+    const seen = (await call("GET", "/api/sessions")).sessions;
+    const key = list => JSON.stringify(list.map(s => [s.id, s.updated, s.folder, s.title, s.answering]));
+    if (key(seen) !== key(SESSIONS)) {
+      SESSIONS = seen;
+      for (const s of SESSIONS) s.answering ? ANSWERING.add(s.id) : ANSWERING.delete(s.id);
+      drawSide(); lockComposer();
+      const open = current && SESSIONS.find(s => s.id === current.id);
+      if (open && open.updated !== current.updated && !ANSWERING.has(current.id) && !FOLLOWER) await openSession(current.id);
+    }
+  } catch {}
 }
 
 // ── The tray: files waiting to go ───────────────────────────────────────
@@ -948,7 +971,7 @@ function drawFiles() {
            + ` title="${esc(label)} · ${esc(whoName(m))} · ${esc(when(m.at))} · ${size(f.size || 0)}">${thumb}<span>${esc(label)}</span></a>`;
     }
     return `<a class="file" href="${esc(url)}" target="_blank" rel="noopener" data-image="${isImage(f.type) ? 1 : ""}">`
-         + `<span><div class="by${m.role === "user" ? " me" : ""}">${esc(whoName(m))}:</div>`
+         + `<span><div class="by${m.role === "user" && !m.source ? " me" : ""}">${esc(whoName(m))}:</div>`
          + `<div class="path" title="${esc(path)}">${esc(label)}</div>`
          + `<div class="when">${esc(when(m.at))} · ${size(f.size || 0)}</div></span>${thumb}</a>`;
   }).join("");
@@ -1601,3 +1624,100 @@ picEl("loras").addEventListener("change", e => {
   const chip = e.target.closest(".lora"), m = picModel();
   if (chip && m && chip.classList.contains("on")) { (PIC.loras[m.name] = PIC.loras[m.name] || {})[chip.dataset.lora] = Number(e.target.value); savePic(); }
 });
+
+// ── Ears: push-to-talk ──────────────────────────────────────────────────
+// The microphone is recorded in Python (sounddevice), like the screen; on
+// release the clip is kept in the chat and goes to whisper through Lodestar.
+// The words land in the composer for you to send or fix; the clip sits in
+// the tray and rides with the message, so what was said is not only what
+// whisper made of it.
+const EARS = Object.assign({ attach: true, device: null },
+                           local("symposium.ears", {}),
+                           { live: false, by: "", since: 0, timer: null, last: "" });
+const saveEars = () => keep("symposium.ears", { attach: EARS.attach, device: EARS.device });
+const earsOk = () => !!(CFG.ears?.enabled && CFG.ears?.available);
+
+function earsInit() {
+  const e = CFG.ears || {};
+  $("#ears-attach").checked = EARS.attach;
+  $("#ears-note").textContent = !e.enabled ? "Ears are off (ears.enabled in the yaml)."
+    : !e.available ? "Needs sounddevice on this machine: pip install \"seren-symposium[ears]\"." : "";
+  drawEarsDevices(e.devices || []);
+  $("#ears-btn").disabled = !earsOk();
+  $("#p-ears").querySelectorAll("select, input, button").forEach(el => { el.disabled = !earsOk(); });
+  drawEarsState();
+}
+
+// The saved choice by name (an index moves when something is plugged in),
+// else what the yaml names, else the default input.
+function drawEarsDevices(list) {
+  const sel = $("#ears-device");
+  sel.innerHTML = list.map(d => `<option value="${d.index}">${esc(d.name)}${d.default ? " · default" : ""}</option>`).join("")
+    || `<option value="">no input found</option>`;
+  const want = EARS.device && list.find(d => d.name === EARS.device);
+  const yaml = CFG.ears?.device && list.find(d => d.name.toLowerCase().includes(CFG.ears.device.toLowerCase()));
+  const pick = want || yaml || list.find(d => d.default) || list[0];
+  if (pick) sel.value = String(pick.index);
+}
+const earsDevice = () => { const v = $("#ears-device").value; return v === "" ? undefined : Number(v); };
+
+function drawEarsState() {
+  const b = $("#ears-btn");
+  b.classList.toggle("live", EARS.live);
+  b.textContent = EARS.live ? `● listening ${Math.round((Date.now() - EARS.since) / 1000)}s` : "🎙 hold to talk";
+  $("#ears-state").textContent = EARS.live ? "● listening" : "";
+  $("#ears-caption").textContent = EARS.live ? "release to hear it - Esc drops it" : EARS.last;
+}
+
+async function earsStart(by) {
+  if (EARS.live || !earsOk() || chatBusy()) return;
+  try {
+    // A chat exists before the clip so it has somewhere to be kept.
+    if (!current) { current = await call("POST", "/api/sessions", { folder }); await refresh(); }
+    await call("POST", "/api/ears/start", { device: earsDevice() });
+    EARS.live = true; EARS.by = by; EARS.since = Date.now();
+    EARS.timer = setInterval(drawEarsState, 500);
+    $("#ears-note").textContent = "";
+    drawEarsState();
+  } catch (ex) { $("#ears-note").textContent = ex.message; }
+}
+
+async function earsStop(drop = false) {
+  if (!EARS.live) return;
+  clearInterval(EARS.timer); EARS.timer = null; EARS.live = false; drawEarsState();
+  if (drop) {
+    try { await call("POST", "/api/ears/cancel"); } catch {}
+    EARS.last = "dropped"; drawEarsState(); return;
+  }
+  $("#ears-caption").textContent = "hearing…";
+  try {
+    const out = await call("POST", "/api/ears/stop", { session: current?.id, keep: EARS.attach });
+    if (out.text) {
+      const box = $("#input"), sep = box.value && !/\s$/.test(box.value) ? " " : "";
+      box.value += sep + out.text; box.focus();
+    }
+    if (out.file && current) {
+      PENDING.push({ id: uid(), name: out.file.orig, size: out.file.size, type: out.file.type, stored: out.file });
+      drawTray();
+    }
+    const short = s => s.length > 90 ? s.slice(0, 89) + "…" : s;
+    EARS.last = out.error ? `${out.file ? "kept the clip, but" : "but"}: ${out.error}`
+      : out.text ? `heard: ${short(out.text)}` : `heard nothing (${out.seconds}s)`;
+  } catch (ex) { EARS.last = ex.message; }
+  drawEarsState();
+}
+
+$("#ears-btn").addEventListener("pointerdown", e => { e.preventDefault(); e.currentTarget.setPointerCapture(e.pointerId); earsStart("mouse"); });
+$("#ears-btn").addEventListener("pointerup", () => { if (EARS.by === "mouse") earsStop(); });
+$("#ears-btn").addEventListener("pointercancel", () => { if (EARS.by === "mouse") earsStop(true); });
+// Ctrl+Space, held, anywhere in the window: the same from the keyboard.
+document.addEventListener("keydown", e => {
+  if (e.code === "Space" && e.ctrlKey && !e.repeat) { e.preventDefault(); earsStart("key"); }
+  else if (e.key === "Escape" && EARS.live) earsStop(true);
+});
+document.addEventListener("keyup", e => { if (e.code === "Space" && EARS.live && EARS.by === "key") earsStop(); });
+$("#ears-attach").onchange = () => { EARS.attach = $("#ears-attach").checked; saveEars(); };
+$("#ears-device").onchange = () => { EARS.device = $("#ears-device").selectedOptions[0]?.textContent.replace(/ · default$/, "") || null; saveEars(); };
+$("#ears-devices").onclick = async () => {
+  try { drawEarsDevices((await call("GET", "/api/ears")).devices || []); } catch (ex) { $("#ears-note").textContent = ex.message; }
+};

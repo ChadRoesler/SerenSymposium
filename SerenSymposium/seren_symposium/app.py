@@ -71,7 +71,7 @@ from seren_meninges import get_version
 from seren_meninges.viewer import render_from_dir
 
 from . import __version__ as _fallback_version
-from . import attachments, carabiner, claude_voice, pictures, screen
+from . import attachments, carabiner, claude_voice, ears, pictures, screen
 from .config import SymposiumConfig, load_config
 from .prefs import Invalid as BadPref
 from .prefs import Prefs
@@ -182,6 +182,11 @@ class Turn:
         self.claude = claude
         self.files = files or []
         self.started = time.monotonic()
+        # Who fed the prompt when it was not the person: set by the server
+        # side that did (a game feed, say), never from a request body. The
+        # shell draws such a message as its source's, never as the person's.
+        self.source: Optional[str] = None
+        self.by: str = ""
 
     def receipt(self, reply: dict[str, Any], tools: Optional[list[str]] = None,
                 steps: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
@@ -256,6 +261,13 @@ def _named_files(store: SessionStore, sid: str, raw: Any) -> "list[dict[str, Any
             entry["screen"] = True
             if isinstance(f.get("source"), str):
                 entry["source"] = f["source"][:200]
+        # A clip from the microphone stays one, with how long it is.
+        if isinstance(f, dict) and f.get("ears") is True:
+            entry["ears"] = True
+            if isinstance(f.get("seconds"), (int, float)) and not isinstance(f.get("seconds"), bool):
+                entry["seconds"] = float(f["seconds"])
+            if isinstance(f.get("device"), str):
+                entry["device"] = f["device"][:120]
         out.append(entry)
     return out
 
@@ -410,7 +422,7 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                 saved = store.record(turn.session, turn.prompt, event["response"],
                                      turn.receipt(event, heard.tools, heard.kept_steps()), keep=turn.keep,
                                      claude_session=heard.session_id, files=turn.files,
-                                     answer_files=found)
+                                     answer_files=found, source=turn.source, by=turn.by)
                 if saved is not None:
                     yield {"type": "saved", "session": summary(saved)}
     finally:
@@ -459,7 +471,7 @@ async def lodestar_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
             elif event.get("type") == "done" and turn.session:
                 kept, found = await bring_back(cfg, store, turn, event.get("response") or "")
                 saved = store.record(turn.session, turn.prompt, kept, turn.receipt(event, tools), keep=turn.keep,
-                                     files=turn.files, answer_files=found)
+                                     files=turn.files, answer_files=found, source=turn.source, by=turn.by)
                 if saved is not None:
                     yield {"type": "saved", "session": summary(saved)}
     except httpx.HTTPError as ex:
@@ -497,7 +509,13 @@ class LiveTurn:
     def begin(cls, request: Request, session: str, source) -> "LiveTurn":
         """Start `source` (an async iterator of events) running on its own,
         registered for the session. The caller checked nobody else is."""
-        state = request.app.state
+        return cls.start(request.app.state, session, source)
+
+    @classmethod
+    def start(cls, state, session: str, source) -> "LiveTurn":
+        """The same, from the app's state rather than a request: for a turn
+        nobody asked for over HTTP (something on this desk speaking into a
+        chat on its own - such a turn is marked with its source, see Turn)."""
         turn = cls(session, state.answering, state.live)
         state.answering.add(session)
         state.live[session] = turn
@@ -608,6 +626,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         app.state.answering = set()     # sessions with a turn running (either voice)
         app.state.live = {}             # session id -> LiveTurn, while it runs
         app.state.screen = None         # the newest screen-share frame (screen.Frame)
+        app.state.ears = ears.Recorder(cfg.ears.max_seconds)   # the microphone, one clip at a time
         # trust_env=False for a loopback head, ON PURPOSE.
         #
         # httpx reads HTTP_PROXY/HTTPS_PROXY from the environment by default.
@@ -695,6 +714,9 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             "files": {"max_mb": cfg.files.max_mb, "fetch_images": cfg.files.fetch_images},
             "screen": {"enabled": cfg.screen.enabled, "available": screen.available(),
                        "monitors": screen.monitors() if cfg.screen.enabled else []},
+            "ears": {"enabled": cfg.ears.enabled, "available": ears.available(), "device": cfg.ears.device,
+                     "language": cfg.ears.language, "max_seconds": cfg.ears.max_seconds,
+                     "devices": ears.devices() if cfg.ears.enabled else []},
             "confirm_destructive": cfg.ui.confirm_destructive,
             "updates": await updates_payload(
                 getattr(request.app.state, "updates", None),
@@ -809,7 +831,8 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         if turn.session:
             payload["response"], found = await bring_back(cfg, store, turn, payload.get("response") or "")
             store.record(turn.session, turn.prompt, payload["response"],
-                         turn.receipt(payload), keep=turn.keep, files=turn.files, answer_files=found)
+                         turn.receipt(payload), keep=turn.keep, files=turn.files, answer_files=found,
+                         source=turn.source, by=turn.by)
             payload["session"] = turn.session
         return JSONResponse(payload)
 
@@ -1289,5 +1312,96 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             return JSONResponse({"error": "no frame yet"}, status_code=404)
         return Response(frame.jpeg, media_type="image/jpeg",
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+    # ── ears: push-to-talk (seren_symposium.ears) ─────────────────────────
+    # The microphone is recorded here; the clip is kept beside the chat and
+    # its words come from whisper through Lodestar (POST /api/v1/hear), the
+    # one place Symposium talks to.
+
+    def _ears_off() -> Optional[JSONResponse]:
+        if not cfg.ears.enabled:
+            return JSONResponse({"error": "ears are off (ears.enabled)"}, status_code=409)
+        if not ears.available():
+            return JSONResponse({"error": "no sounddevice on this machine",
+                                 "hint": "pip install \"seren-symposium[ears]\""}, status_code=409)
+        return None
+
+    @app.get("/api/ears")
+    async def ears_state(request: Request):
+        """What there is to listen with, and whether it is listening now."""
+        listing = await asyncio.to_thread(ears.devices) if cfg.ears.enabled else []
+        return {"enabled": cfg.ears.enabled, "available": ears.available(), "device": cfg.ears.device,
+                "devices": listing, **request.app.state.ears.state()}
+
+    @app.post("/api/ears/start")
+    async def ears_start(request: Request):
+        """{device?: index} - open the input (the yaml's, else the default)."""
+        if (off := _ears_off()) is not None:
+            return off
+        body = await _json(request)
+        body = body if isinstance(body, dict) else {}
+        device = body.get("device")
+        if device is not None and (isinstance(device, bool) or not isinstance(device, int)):
+            return JSONResponse({"error": "device is a number"}, status_code=400)
+        if device is None:
+            device = await asyncio.to_thread(ears.pick, cfg.ears.device)
+        try:
+            return await asyncio.to_thread(request.app.state.ears.start, device)
+        except RuntimeError as ex:
+            return JSONResponse({"error": str(ex)}, status_code=409)
+
+    @app.post("/api/ears/stop")
+    async def ears_stop(request: Request):
+        """{session, keep?: true, transcribe?: true} - close the input. The
+        clip is kept in the chat as a file marked `ears` (when `keep`), and
+        its words come back as `text`; a Lodestar that could not hear it
+        still leaves the clip, with `error` saying why."""
+        rec = request.app.state.ears
+        if not rec.recording:
+            return JSONResponse({"error": "not listening"}, status_code=409)
+        body = await _json(request)
+        body = body if isinstance(body, dict) else {}
+        clip = await asyncio.to_thread(rec.stop)
+        out: dict[str, Any] = {"seconds": clip.seconds, "device": clip.device, "clipped": clip.clipped, "text": ""}
+        if body.get("keep", True):
+            store: SessionStore = request.app.state.sessions
+            sid = body.get("session")
+            entry = store.add_file(sid, time.strftime("ears-%Y%m%d-%H%M%S.wav", time.localtime(clip.at)),
+                                   clip.wav, "audio/wav") if isinstance(sid, str) else None
+            if entry is None:
+                return JSONResponse({"error": "no such session", "hint": "the clip needs a chat to be kept in",
+                                     **out}, status_code=404)
+            entry.update(ears=True, seconds=clip.seconds, device=clip.device)
+            out["file"] = entry
+        if not body.get("transcribe", True):
+            return out
+        if clip.seconds < 0.3:
+            out["error"] = "too short to hear"
+            return out
+        try:
+            r = await request.app.state.client.post(
+                "/api/v1/hear", files={"file": ("clip.wav", clip.wav, "audio/wav")},
+                data={"language": cfg.ears.language, "holder": "symposium"}, timeout=cfg.ears.timeout_seconds)
+            try:
+                heard = r.json()
+            except ValueError:
+                heard = {}
+            if r.status_code == 200 and isinstance(heard, dict) and heard.get("ok"):
+                out["text"] = str(heard.get("text") or "").strip()
+                out["node"] = heard.get("node")
+            else:
+                said = heard if isinstance(heard, dict) else {}
+                out["error"] = said.get("error") or f"lodestar answered {r.status_code}"
+                if r.status_code == 401:
+                    out.update(_annotate_401({}))
+        except httpx.HTTPError as ex:
+            out["error"] = f"lodestar unreachable: {type(ex).__name__}"
+        return out
+
+    @app.post("/api/ears/cancel")
+    async def ears_cancel(request: Request):
+        """Close the input and keep nothing."""
+        await asyncio.to_thread(request.app.state.ears.cancel)
+        return {"ok": True, "recording": False}
 
     return app

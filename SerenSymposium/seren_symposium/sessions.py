@@ -99,6 +99,12 @@ def clean_messages(raw: Any) -> list[dict[str, Any]]:
         kept = {"role": m["role"], "content": m["content"], "at": m.get("at") or _now()}
         if isinstance(m.get("meta"), dict):
             kept["meta"] = m["meta"]
+        # A message that did not come from the person: who fed it (the game
+        # table, say) stays on it, so it is never drawn as theirs.
+        if isinstance(m.get("source"), str) and m["source"]:
+            kept["source"] = m["source"][:40]
+            if isinstance(m.get("by"), str) and m["by"]:
+                kept["by"] = m["by"][:80]
         files = [f for f in m.get("files") or [] if isinstance(f, dict) and isinstance(f.get("name"), str)]
         if files:
             kept["files"] = files
@@ -126,7 +132,9 @@ def _now() -> float:
 
 def summary(s: dict[str, Any]) -> dict[str, Any]:
     return {"id": s["id"], "folder": s["folder"], "title": s["title"],
-            "created": s["created"], "updated": s["updated"], "count": len(s["messages"])}
+            "created": s["created"], "updated": s["updated"], "count": len(s["messages"]),
+            # what has spoken into this chat besides the person (["table"]), for the badge
+            "sources": list(s.get("sources") or [])}
 
 
 class SessionStore:
@@ -324,12 +332,15 @@ class SessionStore:
     def record(self, sid: str, prompt: str, answer: str, meta: dict[str, Any],
                keep: Optional[int] = None, claude_session: Optional[str] = None,
                files: Optional[list[dict[str, Any]]] = None,
-               answer_files: Optional[list[dict[str, Any]]] = None) -> Optional[dict[str, Any]]:
+               answer_files: Optional[list[dict[str, Any]]] = None,
+               source: Optional[str] = None, by: str = "") -> Optional[dict[str, Any]]:
         """A turn that came back. keep cuts the thread first (a retry
         replaces the exchange it retried). A session with no title is named
         after its first prompt. claude_session: Claude answered, in that CLI
         session, and has now seen the whole thread. files: what the prompt
-        carried; answer_files: what the answer brought back."""
+        carried; answer_files: what the answer brought back. source: the
+        prompt was not the person's but fed in (the game table: "table"),
+        shown under `by`; the chat remembers every source that spoke in it."""
         s = self.get(sid)
         if s is None:
             return None
@@ -340,6 +351,10 @@ class SessionStore:
         asked: dict[str, Any] = {"role": "user", "content": prompt, "at": now}
         if files:
             asked["files"] = files
+        if source:
+            asked["source"] = source[:40]
+            asked["by"] = (by or source)[:80]
+            s["sources"] = sorted(set(s.get("sources") or []) | {source[:40]})
         said: dict[str, Any] = {"role": "assistant", "content": answer, "at": now, "meta": meta}
         if answer_files:
             said["files"] = answer_files

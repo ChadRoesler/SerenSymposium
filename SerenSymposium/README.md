@@ -122,6 +122,8 @@ Nothing is shared by looking: the preview is only ever on your side until you se
 
 Whoever answers sees a turn, not a feed — the frame that came with the message — so stills are everything an answer can use, at a fraction of video's bytes. They're taken by Symposium in Python (`mss`, scaled by Pillow to `screen.max_width`), not by the webview, so there's no permission prompt per frame. Both come with the `[desktop]` extra, or `[screen]` on its own; without them the panel says what to install. `screen.enabled: false` turns it off.
 
+**Ears** are push-to-talk. Hold **🎙 hold to talk** under the composer (or Ctrl+Space anywhere in the window), say it, let go. Two things come back: the words, put in the composer for you to send or fix, and the clip itself, which sits in the tray and rides with the message like any other file — so whoever answers has what you said, not only what whisper made of it, and a clip in a chat plays back there. The **Ears** panel picks the input (`ears.device` names one; the OS default otherwise) and whether the clip goes along or only its words. The microphone is recorded by Symposium in Python (`sounddevice`), like the screen, so there is no browser permission prompt and every input the OS has is on the list — on Windows that includes "Stereo Mix", which is what the desktop is playing. The words come from whisper through Lodestar (`POST /api/v1/hear`), which wakes it on a node that has it and lets go after; Symposium never talks to the node itself. Comes with `[desktop]`, or `[ears]` on its own. `ears.enabled: false` turns it off.
+
 ---
 
 ## Install

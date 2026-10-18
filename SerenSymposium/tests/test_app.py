@@ -123,6 +123,10 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                "/api/permit", "/api/permit/answer",
                # -> this desktop's screen, taken here
                "/api/screen", "/api/screen/latest", "/api/screen/sources",
+               # -> this desktop's microphone, recorded here; the words come
+               #    from whisper THROUGH Lodestar (POST /api/v1/hear), never
+               #    from the node that runs it
+               "/api/ears", "/api/ears/start", "/api/ears/stop", "/api/ears/cancel",
                # -> Lodestar, through app.state.client: the picture panel asks it
                #    to translate (its chat), plan and draw, and reads its gallery;
                #    what is kept lands beside the chat (seren_symposium.pictures)

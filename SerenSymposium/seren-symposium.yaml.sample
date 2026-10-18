@@ -107,6 +107,13 @@ screen:                     # stills of this desktop (needs the [desktop] or [sc
   max_width: 1600
   jpeg_quality: 80
 
+ears:                       # push-to-talk (needs the [desktop] or [ears] extra)
+  enabled: true
+  device: ""                # part of an input's name ("USB Microphone", "Stereo Mix"); blank = the default
+  language: "en"            # whisper's hint; blank lets it guess
+  max_seconds: 120          # a clip stops growing here
+  timeout_seconds: 150      # hearing, the wake of whisper included
+
 updates:
   enabled: true
   check_interval_hours: 6
