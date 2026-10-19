@@ -146,6 +146,8 @@ button.chip { font: inherit; font-size: 12.5px; cursor: zoom-in; }
 .acts button { background: none; border: 0; padding: 3px 4px; border-radius: 5px; color: var(--text-dim); display: flex; }
 .acts button:hover { color: var(--accent); background: var(--surface-2); }
 .acts button.danger:hover { color: var(--danger); }
+.acts button.busy { color: var(--accent); opacity: .7; animation: say-pulse 1s ease-in-out infinite; }
+@keyframes say-pulse { 0%, 100% { opacity: .9; } 50% { opacity: .35; } }
 
 /* the tray: attached files waiting to go */
 .tray { margin: 0 16px; padding: 7px 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;

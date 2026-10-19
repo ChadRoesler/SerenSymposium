@@ -434,6 +434,7 @@ function actionsEl(m, i, count) {
   if (m.role === "user" && !m.source) b.push(["edit", "edit: go back to this message and change it"]);
   if (m.role === "assistant" && last) b.push(["retry", "ask again"]);
   if (m.role === "assistant" && !last) b.push(["rewind", "rewind to here: what comes after goes"]);
+  if (m.role === "assistant" && CFG.speech?.enabled) b.push(["say", "say it: hear this answer in Wren's voice"]);
   b.push(["copy", "copy this message"], ["fork", "fork: a new chat from here"], ["trash", "delete this message"]);
   acts.innerHTML = b.map(([n, t]) =>
     `<button type="button" data-act="${n}" data-i="${i}" title="${esc(t)}"${n === "trash" ? ' class="danger"' : ""}>${icon(n)}</button>`).join("");
@@ -479,6 +480,27 @@ async function act(what, i) {
     if (!sure("Delete this message? This can't be undone.")) return;
     current = await call("DELETE", `/api/sessions/${current.id}/messages/${i}`);
     await refresh(); drawLog();
+  } else if (what === "say") {
+    await sayAloud(i);
+  }
+}
+
+// ── Say it: an answer in Wren's voice ───────────────────────────────────
+// The words go to Lodestar's speaker through Symposium; the clip comes back
+// as a file on that answer (marked `said`) and plays at once. The button
+// shows it is working, since the speaker may be waking.
+async function sayAloud(i) {
+  const btn = $(`#log [data-act="say"][data-i="${i}"]`);
+  if (btn) { btn.disabled = true; btn.classList.add("busy"); btn.title = "saying it…"; }
+  try {
+    const out = await call("POST", "/api/say", { session: current.id, index: i });
+    current = await call("GET", `/api/sessions/${current.id}`);
+    drawLog();
+    const clip = [...$("#log").querySelectorAll(".msg")][i]?.querySelector(`audio.clip[src$="/${out.file.name}"]`);
+    if (clip) { clip.scrollIntoView({ block: "nearest" }); clip.play().catch(() => {}); }
+    if (out.cut && btn) btn.title = `said the first part: the answer is longer than ${CFG.speech?.max_chars || 4000} characters`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.classList.remove("busy"); }
   }
 }
 

@@ -54,6 +54,7 @@ import base64
 import binascii
 import json
 import logging
+import re
 import secrets
 import time
 import uuid
@@ -241,6 +242,30 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
     }
 
 
+_FENCE = re.compile(r"```.*?```", re.S)
+_THINK = re.compile(r"^\s*<think>[\s\S]*?(</think>|$)")
+
+
+def spoken_text(content: str, max_chars: int) -> tuple[str, bool]:
+    """What of an answer is said: no <think>, no code fences (the code is
+    for the eye), markdown marks dropped, cut at a sentence past max_chars."""
+    text = _THINK.sub("", content or "")
+    text = _FENCE.sub(" ", text)
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"^\s{0,3}(#{1,6}\s+|[-*+]\s+|\d+\.\s+|>\s?)", "", text, flags=re.M)
+    text = re.sub(r"[*_]{1,3}(\S[^*_]*?)[*_]{1,3}", r"\1", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = "\n".join(line.strip() for line in text.split("\n") if line.strip())
+    cut = False
+    if len(text) > max_chars:
+        head = text[:max_chars]
+        stop = max(head.rfind(". "), head.rfind("! "), head.rfind("? "), head.rfind("\n"))
+        text, cut = (head[:stop + 1] if stop > max_chars // 2 else head).strip(), True
+    return text, cut
+
+
 def _named_files(store: SessionStore, sid: str, raw: Any) -> "list[dict[str, Any]] | str":
     """The files a message names, checked against what is on disk: the
     entries, or why not. Size and type are read from the file, not trusted."""
@@ -261,6 +286,13 @@ def _named_files(store: SessionStore, sid: str, raw: Any) -> "list[dict[str, Any
             entry["screen"] = True
             if isinstance(f.get("source"), str):
                 entry["source"] = f["source"][:200]
+        # An answer said aloud stays one, with the voice and how long.
+        if isinstance(f, dict) and f.get("said") is True:
+            entry["said"] = True
+            if isinstance(f.get("seconds"), (int, float)) and not isinstance(f.get("seconds"), bool):
+                entry["seconds"] = float(f["seconds"])
+            if isinstance(f.get("voice"), str):
+                entry["voice"] = f["voice"][:64]
         # A clip from the microphone stays one, with how long it is.
         if isinstance(f, dict) and f.get("ears") is True:
             entry["ears"] = True
@@ -717,6 +749,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             "ears": {"enabled": cfg.ears.enabled, "available": ears.available(), "device": cfg.ears.device,
                      "language": cfg.ears.language, "max_seconds": cfg.ears.max_seconds,
                      "devices": ears.devices() if cfg.ears.enabled else []},
+            "speech": {"enabled": cfg.speech.enabled, "voice": cfg.speech.voice, "max_chars": cfg.speech.max_chars},
             "confirm_destructive": cfg.ui.confirm_destructive,
             "updates": await updates_payload(
                 getattr(request.app.state, "updates", None),
@@ -1403,5 +1436,63 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         """Close the input and keep nothing."""
         await asyncio.to_thread(request.app.state.ears.cancel)
         return {"ok": True, "recording": False}
+
+    # ── speech: an answer said aloud ───────────────────────────────────────
+    # The words of one answer go to Lodestar's speaker (`POST /api/v1/speak`:
+    # the chosen voice on a node, woken and let go like whisper) and the clip
+    # comes back to sit with that answer as a file marked `said`, playable in
+    # the chat. Symposium never talks to the node itself.
+
+    @app.post("/api/say")
+    async def say(request: Request):
+        """{session, index} - say that answer aloud. Answers with the file
+        the clip became (marked `said`, with the voice and how long) and
+        `cut` when the answer was longer than speech.max_chars."""
+        if not cfg.speech.enabled:
+            return JSONResponse({"error": "speech is off (speech.enabled)"}, status_code=409)
+        body = await _json(request)
+        body = body if isinstance(body, dict) else {}
+        store: SessionStore = request.app.state.sessions
+        sid, index = body.get("session"), body.get("index")
+        s = store.get(sid) if isinstance(sid, str) else None
+        if s is None:
+            return JSONResponse({"error": "no such session"}, status_code=404)
+        if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(s["messages"]):
+            return JSONResponse({"error": f"no message {index!r}"}, status_code=404)
+        m = s["messages"][index]
+        if m.get("role") != "assistant":
+            return JSONResponse({"error": "only an answer is said aloud"}, status_code=400)
+        text, cut = spoken_text(m.get("content") or "", cfg.speech.max_chars)
+        if not text:
+            return JSONResponse({"error": "nothing to say in that answer"}, status_code=400)
+        try:
+            r = await request.app.state.client.post(
+                "/api/v1/speak", json={"text": text, "voice": cfg.speech.voice or "wren", "holder": "symposium"},
+                timeout=cfg.speech.timeout_seconds)
+        except httpx.HTTPError as ex:
+            return JSONResponse({"error": f"lodestar unreachable: {type(ex).__name__}"}, status_code=502)
+        if r.status_code != 200 or not r.content.startswith(b"RIFF"):
+            try:
+                said = r.json()
+            except ValueError:
+                said = {}
+            said = said if isinstance(said, dict) else {}
+            out = {"error": said.get("error") or f"lodestar answered {r.status_code}"}
+            if said.get("detail"):
+                out["detail"] = said["detail"]
+            if r.status_code == 401:
+                out.update(_annotate_401({}))
+            return JSONResponse(out, status_code=502 if r.status_code not in (503, 401) else r.status_code)
+        voice = r.headers.get("x-seren-voice") or cfg.speech.voice or "wren"
+        try:
+            seconds = float(r.headers.get("x-seren-clip-seconds") or 0)
+        except ValueError:
+            seconds = 0.0
+        entry = store.add_file(sid, time.strftime("said-%Y%m%d-%H%M%S.wav"), r.content, "audio/wav")
+        if entry is None:
+            return JSONResponse({"error": "no such session"}, status_code=404)
+        entry.update(said=True, voice=voice, seconds=seconds)
+        store.attach_file(sid, index, entry)
+        return {"file": entry, "cut": cut, "node": r.headers.get("x-seren-node"), "voice": voice, "seconds": seconds}
 
     return app

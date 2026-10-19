@@ -102,6 +102,7 @@ def for_claude(entries: list[dict[str, Any]], folder: Path) -> str:
     for e in entries:
         what = (f"a screen share of {e.get('source') or 'the desktop'}" if e.get("screen")
                 else f"a recording from the microphone, {float(e.get('seconds') or 0):.0f}s" if e.get("ears")
+                else f"this answer said aloud in {e.get('voice') or 'the'} voice, {float(e.get('seconds') or 0):.0f}s" if e.get("said")
                 else (e.get("orig") or e["name"]))
         lines.append(f"- {folder / e['name']}  ({what}, {e.get('type')}, "
                      f"{size_label(int(e.get('size') or 0))})")
@@ -125,6 +126,7 @@ def for_local(entries: list[dict[str, Any]], store: SessionStore, sid: str, budg
         else:
             kind = ("a screen share" if e.get("screen")
                     else "a recording from the microphone" if e.get("ears")
+                    else "the answer said aloud" if e.get("said")
                     else "an image" if (e.get("type") or "").startswith("image/") else "a file")
             parts.append(f"[attached {kind}: {label} - this model is not shown its contents]")
     return "\n\n".join(parts)

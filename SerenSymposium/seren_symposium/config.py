@@ -264,8 +264,22 @@ class EarsConfig(BaseModel):
     timeout_seconds: float = 150.0
 
 
+class SpeechConfig(BaseModel):
+    """Hearing an answer aloud: the words go to Lodestar's speaker (the
+    chosen voice on a node, cloned for every sentence) and the clip comes
+    back and sits with the answer, playable there."""
+    enabled: bool = True
+    # A voice the speaker has. Blank = the speaker's default (wren).
+    voice: str = ""
+    # How long saying it may take, the wake of the speaker included.
+    timeout_seconds: float = 240.0
+    # Longer answers are said up to here (cut at a sentence) and say so.
+    max_chars: int = 4000
+
+
 class SymposiumConfig(BaseModel):
     lodestar: LodestarClientConfig = Field(default_factory=LodestarClientConfig)
+    speech: SpeechConfig = Field(default_factory=SpeechConfig)
     files: FilesConfig = Field(default_factory=FilesConfig)
     screen: ScreenConfig = Field(default_factory=ScreenConfig)
     ears: EarsConfig = Field(default_factory=EarsConfig)

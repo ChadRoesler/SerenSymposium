@@ -295,6 +295,19 @@ class SessionStore:
         self._write(s)
         return s
 
+    def attach_file(self, sid: str, index: int, entry: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """A stored file joins message `index` (an answer said aloud joins
+        the answer). None when there is no such session."""
+        s = self.get(sid)
+        if s is None:
+            return None
+        if not 0 <= index < len(s["messages"]):
+            raise Invalid(f"no message {index}")
+        s["messages"][index].setdefault("files", []).append(entry)
+        s["updated"] = _now()
+        self._write(s)
+        return s
+
     def drop_message(self, sid: str, index: int) -> Optional[dict[str, Any]]:
         """Take one message out, leaving the rest where they were."""
         s = self.get(sid)
