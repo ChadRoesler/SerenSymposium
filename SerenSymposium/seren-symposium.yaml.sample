@@ -107,7 +107,7 @@ screen:                     # stills of this desktop (needs the [desktop] or [sc
   max_width: 1600
   jpeg_quality: 80
 
-speech:                     # "say it" on an answer: Wren's voice from Lodestar's speaker
+speech:                     # "say it" on an answer: the assistant's voice from Lodestar's speaker
   enabled: true
   voice: ""                 # a voice the speaker has; blank = its default (wren)
   timeout_seconds: 240      # saying it, the wake of the speaker included

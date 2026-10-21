@@ -1,5 +1,5 @@
 """
-Say it: an answer said aloud in Wren's voice THROUGH Lodestar's speaker,
+Say it: an answer said aloud in the assistant's voice THROUGH Lodestar's speaker,
 the clip kept on that answer.
 
 Lodestar is a MockTransport. Pinned:
@@ -55,7 +55,7 @@ def config(**speech_kw) -> SymposiumConfig:
     return cfg
 
 
-def chat_with_an_answer(tc, tmp_path, answer="Hi. **It's Wren.** Here is `code`.\n\n```py\nprint(1)\n```\n\nDone."):
+def chat_with_an_answer(tc, tmp_path, answer="Hi. **It's me.** Here is `code`.\n\n```py\nprint(1)\n```\n\nDone."):
     from seren_symposium.sessions import SessionStore
     sid = tc.post("/api/sessions", json={"folder": ""}).json()["id"]
     SessionStore(tmp_path / "sessions").record(sid, "hello?", answer, {})
@@ -79,7 +79,7 @@ def test_say_sends_the_answer_and_the_clip_sits_on_it(make_client, tmp_path):
     (sent,) = seen
     assert sent["path"] == "/api/v1/speak" and sent["auth"] == "Bearer sym-token"
     import json
-    assert json.loads(sent["body"]) == {"text": "Hi. It's Wren. Here is code.\nDone.", "voice": "wren", "holder": "symposium"}
+    assert json.loads(sent["body"]) == {"text": "Hi. It's me. Here is code.\nDone.", "voice": "wren", "holder": "symposium"}
 
     # on the answer, in the chat, served back as something that plays
     s = tc.get(f"/api/sessions/{sid}").json()

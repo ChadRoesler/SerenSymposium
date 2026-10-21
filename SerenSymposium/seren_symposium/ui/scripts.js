@@ -434,7 +434,7 @@ function actionsEl(m, i, count) {
   if (m.role === "user" && !m.source) b.push(["edit", "edit: go back to this message and change it"]);
   if (m.role === "assistant" && last) b.push(["retry", "ask again"]);
   if (m.role === "assistant" && !last) b.push(["rewind", "rewind to here: what comes after goes"]);
-  if (m.role === "assistant" && CFG.speech?.enabled) b.push(["say", "say it: hear this answer in Wren's voice"]);
+  if (m.role === "assistant" && CFG.speech?.enabled) b.push(["say", "say it: hear this answer in the assistant's voice"]);
   b.push(["copy", "copy this message"], ["fork", "fork: a new chat from here"], ["trash", "delete this message"]);
   acts.innerHTML = b.map(([n, t]) =>
     `<button type="button" data-act="${n}" data-i="${i}" title="${esc(t)}"${n === "trash" ? ' class="danger"' : ""}>${icon(n)}</button>`).join("");
@@ -485,7 +485,7 @@ async function act(what, i) {
   }
 }
 
-// ── Say it: an answer in Wren's voice ───────────────────────────────────
+// ── Say it: an answer in the assistant's voice ───────────────────────────────────
 // The words go to Lodestar's speaker through Symposium; the clip comes back
 // as a file on that answer (marked `said`) and plays at once. The button
 // shows it is working, since the speaker may be waking.

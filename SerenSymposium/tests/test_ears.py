@@ -77,7 +77,7 @@ def mic(monkeypatch):
     return box
 
 
-def lodestar(tc, text=" Hello, Wren.", status=200):
+def lodestar(tc, text=" Hello there.", status=200):
     """A Lodestar whose /api/v1/hear is scripted; returns what it was sent."""
     seen = []
 
@@ -125,7 +125,7 @@ def test_hold_say_release_the_clip_is_kept_and_the_words_come_back(make_client, 
     mic["stream"].feed(1.5)
 
     out = tc.post("/api/ears/stop", json={"session": sid}).json()
-    assert out["text"] == "Hello, Wren." and out["node"] == "jetson" and "error" not in out
+    assert out["text"] == "Hello there." and out["node"] == "jetson" and "error" not in out
     assert out["seconds"] == 1.5 and out["device"] == "USB Microphone" and out["clipped"] is False
     assert mic["stream"].stopped and mic["stream"].closed
     f = out["file"]
@@ -196,7 +196,7 @@ def test_keep_false_keeps_nothing_too_short_is_not_sent_and_cancel_drops_it(make
     tc.post("/api/ears/start", json={})
     mic["stream"].feed(1)
     out = tc.post("/api/ears/stop", json={"session": sid, "keep": False}).json()
-    assert "file" not in out and out["text"] == "Hello, Wren." and len(seen) == 1
+    assert "file" not in out and out["text"] == "Hello there." and len(seen) == 1
     assert not list((tmp_path / "sessions").glob(f"{sid}.files/*"))
 
     tc.post("/api/ears/start", json={})

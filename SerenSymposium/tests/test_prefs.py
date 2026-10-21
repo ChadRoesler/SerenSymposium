@@ -29,17 +29,17 @@ def test_the_yaml_shows_through_until_the_window_changes_it(make_client, tmp_pat
     assert (c["you"], c["claude"]["name"]) == ("you", "wren")
     assert not (tmp_path / "symposium-prefs.json").exists(), "nothing changed, nothing written"
 
-    r = tc.patch("/api/prefs", json={"you": " Chad ", "claude_name": "Wren"})
-    assert r.json() == {"you": "Chad", "claude_name": "Wren", "confirm_destructive": True}
+    r = tc.patch("/api/prefs", json={"you": " Alex ", "claude_name": "Sam"})
+    assert r.json() == {"you": "Alex", "claude_name": "Sam", "confirm_destructive": True}
     assert json.loads((tmp_path / "symposium-prefs.json").read_text(encoding="utf-8")) == \
-        {"you": "Chad", "claude_name": "Wren"}
+        {"you": "Alex", "claude_name": "Sam"}
 
 
 def test_a_reinstall_does_not_undo_what_the_window_set(make_client, tmp_path):
-    make_client(config(tmp_path)).patch("/api/prefs", json={"claude_name": "Wren", "confirm_destructive": False})
+    make_client(config(tmp_path)).patch("/api/prefs", json={"claude_name": "Sam", "confirm_destructive": False})
     # The reinstall: a fresh yaml, the old name in it, the app started again.
     c = make_client(config(tmp_path)).get("/api/config").json()
-    assert c["claude"]["name"] == "Wren" and c["confirm_destructive"] is False
+    assert c["claude"]["name"] == "Sam" and c["confirm_destructive"] is False
 
 
 def test_bad_app_settings_are_refused(make_client, tmp_path):

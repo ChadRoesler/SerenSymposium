@@ -17,9 +17,9 @@ FAKE = str(Path(__file__).with_name("fake_claude.py"))
 
 
 def test_import_keeps_who_fed_a_message():
-    kept = clean_messages([{"role": "user", "content": "x", "source": "table", "by": "Wren's eyes"},
+    kept = clean_messages([{"role": "user", "content": "x", "source": "table", "by": "the table's eyes"},
                            {"role": "user", "content": "y", "by": "nope"}])
-    assert kept[0]["source"] == "table" and kept[0]["by"] == "Wren's eyes"
+    assert kept[0]["source"] == "table" and kept[0]["by"] == "the table's eyes"
     assert "by" not in kept[1] and "source" not in kept[1]
 
 
@@ -43,13 +43,13 @@ def test_a_fed_turn_is_marked_and_a_request_body_cannot_fake_it(make_client):
     async def fed():
         store = app.state.sessions
         turn = plan_turn(cfg, store, {"session": sid, "prompt": "a fight begins"}, None)
-        turn.source, turn.by = "table", "Wren's eyes"
+        turn.source, turn.by = "table", "the table's eyes"
         LiveTurn.start(app.state, sid, claude_answer(cfg, store, turn, set(), app.state.permits))
 
     client.portal.call(fed)
     s = wait_for(2)
     asked, said = s["messages"][0], s["messages"][1]
-    assert asked["role"] == "user" and asked["source"] == "table" and asked["by"] == "Wren's eyes"
+    assert asked["role"] == "user" and asked["source"] == "table" and asked["by"] == "the table's eyes"
     assert said["role"] == "assistant" and "source" not in said
     mine = next(x for x in client.get("/api/sessions").json()["sessions"] if x["id"] == sid)
     assert mine["sources"] == ["table"]
