@@ -64,6 +64,9 @@
     <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
       <path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 4v4.5h-4.5"/>
     </symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3 3 7.5l9 4.5 9-4.5z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 16.5 9 4.5 9-4.5"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -75,8 +78,10 @@
     <div class="titlebar" id="titlebar" hidden>
       <input class="title" id="title" placeholder="untitled" maxlength="120" readonly>
       <button class="ghost" id="rename">Edit Name</button>
+      <button type="button" class="ghost proj-chip" id="chat-project"></button>
       <span class="grow"></span>
       <button class="ghost" id="copy-all" title="the whole chat, as text">Copy all</button>
+      <button class="ghost icon" id="chat-stack" title="what this chat's model is given: the whole prompt stack"><svg class="i"><use href="#i-layers"/></svg></button>
       <button class="ghost icon" id="chat-gear" title="this chat's settings"><svg class="i"><use href="#i-gear"/></svg></button>
       <button class="ghost danger" id="del">Delete</button>
     </div>
@@ -224,12 +229,7 @@
       <dl class="facts" id="c-facts"></dl>
       <div class="form c-form">
         <label for="c-mode">permission mode</label>
-        <select id="c-mode">
-          <option value="">the CLI's own default</option>
-          <option value="default">default - asks before anything that changes things</option>
-          <option value="acceptEdits">acceptEdits - edits files without asking</option>
-          <option value="plan">plan - looks, never touches</option>
-        </select>
+        <select id="c-mode"></select>
         <span></span><label class="check"><input type="checkbox" id="c-ask"> ask me here when Claude wants a tool that is not on its list</label>
         <label>allowed without asking</label>
         <div class="rules"><span class="chips" id="c-tools"></span>
@@ -237,7 +237,11 @@
         <label>folders it may work in</label>
         <div class="rules"><span class="chips" id="c-dirs"></span>
           <input id="c-dir-add" placeholder="add a full path - Enter" autocomplete="off"></div>
-        <p class="note">An <b>Always</b> answer in a chat lands on this list. Kept with your chats, not in the yaml.</p>
+        <p class="note">These are every chat's. Claude's permissions stack, each layer more particular than the one
+          before: the CLI's own settings, then the carabiner's (a <code>session:</code> block in its claude.yaml), then
+          these, then a project's, then a chat's. The most particular mode wins; the allow lists add up, unless a
+          project or a chat says not to inherit. An <b>Always</b> answered for every chat lands on this list (for this
+          chat or this project, it is kept there). Kept with your chats, not in the yaml.</p>
       </div>
     </div>
     <div class="card">
@@ -251,6 +255,7 @@
     </div>
   </div>
   <datalist id="models"></datalist>
+  <datalist id="claude-models"></datalist>
 </section>
 
 <!-- ── One chat's settings (⚙ in the chat's title bar) ─────────────────── -->
@@ -261,18 +266,56 @@
     <label for="s-move">project</label><select id="s-move"></select>
     <label for="s-voice">voice</label><select id="s-voice"></select>
     <label for="s-system_prompt">system prompt</label><textarea id="s-system_prompt"></textarea>
+    <span></span><label class="check"><input type="checkbox" id="s-system_inherit"> after its project's prompt (unticked: this one only)</label>
     <label for="s-model_override">model</label><input id="s-model_override" list="models">
+    <label for="s-permission_mode" class="claude-only">permission mode</label><select id="s-permission_mode" class="claude-only"></select>
+    <label for="s-allowed_tools" class="claude-only">allowed without asking</label><textarea id="s-allowed_tools" class="claude-only rules-box" placeholder="one per line: Read, Bash(git:*), mcp__wren-workbench__*"></textarea>
+    <span class="claude-only"></span><label class="check claude-only"><input type="checkbox" id="s-tools_inherit"> also what its project, every chat and the carabiner allow</label>
+    <span class="claude-only"></span><p class="note claude-only" id="s-perms"></p>
     <label for="s-temperature">temperature</label><input id="s-temperature" type="number" step="0.05" min="0" max="2">
     <label for="s-max_tokens">max tokens</label><input id="s-max_tokens" type="number" step="64" min="1">
     <label for="s-repeat_penalty">repeat penalty</label><input id="s-repeat_penalty" type="number" step="0.05" min="0">
     <span></span>
     <div class="row-buttons">
+      <button type="button" class="ghost" id="s-stack">the whole prompt stack</button>
       <button type="button" class="ghost" id="export">export as JSON</button>
       <button type="button" class="ghost" id="import">import a chat…</button>
     </div>
-    <p class="note">Blank means the project's value (shown greyed). Saved as you leave each field.
+    <p class="note" id="s-note">Blank means the project's value (shown greyed). Saved as you leave each field.
       Temperature, max tokens and repeat penalty are for local models; Claude keeps its own.</p>
   </div>
+</dialog>
+
+<!-- ── What a chat's model is given, layer by layer (the layers in its title bar) ── -->
+<dialog class="sheet wide" id="stack-sheet">
+  <form method="dialog" class="sheet-head"><h3 id="st-title">What the model is given</h3>
+    <button type="button" class="ghost icon" id="st-refresh" title="look again"><svg class="i"><use href="#i-refresh"/></svg></button>
+    <button class="ghost" title="close">✕</button></form>
+  <div id="st-body"></div>
+</dialog>
+
+<!-- ── A project's settings, from the chat (the project chip in its title bar) ── -->
+<dialog class="sheet" id="project-sheet">
+  <form method="dialog" class="sheet-head"><h3 id="ps-title">Project</h3><button class="ghost" title="close">✕</button></form>
+  <div id="ps-body"></div>
+  <p class="note">A project's settings are where its chats start; a chat can change any of them for itself (⚙ in its title bar).</p>
+</dialog>
+
+<!-- ── A new project: named, set up, and a chat open in it, in one go ── -->
+<dialog class="sheet" id="new-project">
+  <form method="dialog" class="sheet-head"><h3>New project</h3><button class="ghost" title="close">✕</button></form>
+  <form class="form" id="np-form">
+    <label for="np-name">name</label><input id="np-name" maxlength="120" autocomplete="off">
+    <label for="np-voice">voice</label><select id="np-voice"></select>
+    <label for="np-model">model</label><input id="np-model" list="models">
+    <label for="np-system_prompt">system prompt</label><textarea id="np-system_prompt"></textarea>
+    <label for="np-temperature" class="np-local">temperature</label><input id="np-temperature" class="np-local" type="number" step="0.05" min="0" max="2" placeholder="default">
+    <label for="np-max_tokens" class="np-local">max tokens</label><input id="np-max_tokens" class="np-local" type="number" step="64" min="1" placeholder="default">
+    <label for="np-repeat_penalty" class="np-local">repeat penalty</label><input id="np-repeat_penalty" class="np-local" type="number" step="0.05" min="0" placeholder="default">
+    <span></span><p class="note" id="np-note">Filled in from the defaults for new projects (Settings, Projects).</p>
+    <span></span><p class="note" id="np-error" hidden></p>
+    <span></span><div class="row-buttons"><button class="primary" id="np-create">Create and start a chat</button></div>
+  </form>
 </dialog>
 
 <!-- ── Backend ──────────────────────────────────────────────────────── -->

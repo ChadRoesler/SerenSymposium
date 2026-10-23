@@ -59,6 +59,12 @@ class FolderPreset(BaseModel):
     # Which memory tags sessions here should read. Empty = no filter.
     # NOT WIRED YET: nothing reads it.
     memory_tags: list[str] = Field(default_factory=list)
+    # The claude voice's permissions for chats here (seren_symposium.permissions):
+    # a mode ("" = every chat's), what it may use without asking, and whether
+    # what every chat and the carabiner allow counts here too.
+    permission_mode: str = ""
+    allowed_tools: list[str] = Field(default_factory=list)
+    tools_inherit: bool = True
 
 
 class LodestarClientConfig(BaseModel):
@@ -101,6 +107,33 @@ class LodestarClientConfig(BaseModel):
         )
 
 
+class PrefaceConfig(BaseModel):
+    """Where the PREFACE comes from: the page Margin keeps (seren_margin.bookmark,
+    GET /preface), read to the model as its system prompt IN PLACE of the
+    CLI's own. 21 Oct 2026: the CLI's default prompt is several thousand
+    words of someone else's instructions - a house style, "the user is not
+    watching", a memory contract for files nobody here reads. With a preface
+    the model's own page replaces it; the folder's system prompt and the
+    framing are appended to that page instead. Blank url and file = no
+    preface: the CLI keeps its prompt and the rest is appended, as before.
+    A url that does not answer is the same as no preface, so a down Margin
+    costs the page, never the turn."""
+    url: str = ""                    # Margin's base url, e.g. http://nuc:7251
+    bearer_token: str = ""
+    bearer_token_env: str = ""
+    bearer_token_keyring: str = ""
+    file: str = ""                   # or a file on this box; wins over url
+    timeout_seconds: float = 5.0
+    cache_seconds: float = 60.0      # how long a fetched page (or a failure) is kept
+
+    def resolve_bearer(self) -> str:
+        return resolve_token(
+            inline=self.bearer_token or None,
+            keyring_ref=self.bearer_token_keyring or None,
+            env_var=self.bearer_token_env or None,
+        )
+
+
 class ClaudeConfig(BaseModel):
     """The claude voice: chats where Claude answers, through the `claude` CLI
     on this machine (seren_symposium.claude_voice has the why).
@@ -119,6 +152,12 @@ class ClaudeConfig(BaseModel):
     cwd: str = ""
     # Model when neither the folder nor the chat names one. Blank = the CLI's.
     model: str = ""
+    # What the model field suggests when a chat or project answers with this
+    # voice (any name the CLI's --model takes still goes): the aliases for the
+    # latest of each, then exact ids. Local models are Lodestar's list.
+    models: list[str] = Field(default_factory=lambda: [
+        "opus", "sonnet", "haiku",
+        "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"])
     # --permission-mode and --allowedTools. With -p nobody is there to answer
     # a permission prompt, so a tool that would ask is refused instead; list
     # the ones this voice may use (e.g. "mcp__workbench__*").
@@ -126,6 +165,15 @@ class ClaudeConfig(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
     # Folders Claude may read and work in besides its cwd (--add-dir).
     add_dirs: list[str] = Field(default_factory=list)
+    # Only these MCP servers, by the names they have in Claude Code's user
+    # config (~/.claude.json), are loaded for a turn (--strict-mcp-config):
+    # the account's other connectors stay out of the model's tool list.
+    # Empty = every server the CLI knows. A name the file lacks turns the
+    # strictness off for that turn (with a warning) rather than lose a tool.
+    mcp_servers: list[str] = Field(default_factory=list)
+    claude_json: str = ""            # that file; blank = ~/.claude.json
+    # The page read to the model as its system prompt (PrefaceConfig).
+    preface: PrefaceConfig = Field(default_factory=PrefaceConfig)
     # A tool that is not on the list is asked about IN THE WINDOW - Allow
     # once, Always, Deny - instead of refused (seren_symposium.permit).
     ask: bool = True
@@ -152,7 +200,9 @@ class ClaudeConfig(BaseModel):
         "you can open it. To show an image, write it as Markdown: ![caption](https://...) for "
         "one on the web (Symposium saves it into the chat), or save a file into that folder - "
         "an SVG you draw, notes, code - and write ![caption](files/<filename>) for a picture or "
-        "[name](files/<filename>) for anything else.")
+        "[name](files/<filename>) for anything else. A person is reading this live and can answer "
+        "a question through the permission window. If the session started without your bookmark, "
+        "fetch it through your tools before answering.")
 
 
 class ServiceViewers(BaseModel):

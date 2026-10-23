@@ -14,6 +14,8 @@ the list, start the --permission-prompt-tool from --mcp-config, ask it over
 stdio, and answer "asked: allow" or "asked: deny" with what came back.
 FAKE_CLAUDE_WAIT=path: after thinking, wait (up to 20s) until that file exists
 before answering - a turn a test can hold open, then let finish.
+FAKE_CLAUDE_SAY_FIRST=words: say them (a text block) before the first tool, as
+Claude does when it says what it is about to look at.
 """
 import base64
 import json
@@ -69,7 +71,14 @@ def main():
     mode = os.environ.get("FAKE_CLAUDE", "ok")
 
     out({"type": "system", "subtype": "init", "session_id": sid, "model": "fake-model",
-         "permissionMode": "default", "mcp_servers": []})
+         "permissionMode": "default", "cwd": os.getcwd(), "claude_code_version": "9.9.9",
+         "apiKeySource": "none", "uuid": "not-for-keeping",
+         "tools": ["Task", "Bash", "Read", "ToolSearch", "mcp__workbench__get_time", "mcp__workbench__recall",
+                   "mcp__claude_ai_Gmail__search"],
+         "mcp_servers": [{"name": "workbench", "status": "connected", "source": "user"},
+                         {"name": "claude.ai Gmail", "status": "needs-auth", "source": "claudeai"}],
+         "skills": ["dataviz"], "agents": ["Explore"], "slash_commands": ["dataviz", "review"], "plugins": [],
+         "memory_paths": {"auto": os.environ.get("FAKE_CLAUDE_MEMORY", "")}})
     if mode == "die":
         print("boom: the fake fell over", file=sys.stderr, flush=True)
         sys.exit(2)
@@ -79,6 +88,10 @@ def main():
         sys.exit(1)
 
     event({"type": "message_start", "message": {}})
+    if first := os.environ.get("FAKE_CLAUDE_SAY_FIRST"):
+        event({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+        event({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": first}})
+        event({"type": "content_block_stop", "index": 0})
     for name in ("ToolSearch", "mcp__workbench__get_time"):
         tid = "toolu_" + uuid.uuid4().hex[:12]
         event({"type": "content_block_start", "index": 0,

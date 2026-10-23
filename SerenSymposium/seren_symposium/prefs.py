@@ -20,6 +20,9 @@ laid over the yaml when Symposium starts:
                             answer adds to it),
     claude.add_dirs         and the folders it may work in besides its own
     folders                 the projects, and each one's defaults
+    project_defaults        what a new project starts with (22 Oct 2026):
+                            any setting a project carries; one the new
+                            project's request leaves out comes from here
 
 SPARSE: only what was changed here is kept. Until then the yaml's value
 shows through - so a name still set by Starwright is Starwright's until you
@@ -41,20 +44,23 @@ from typing import Any, Optional
 from pydantic import ValidationError
 
 from .config import FolderPreset, SymposiumConfig
+from .permissions import WINDOW_MODES, clean_rules
 
 log = logging.getLogger(__name__)
 
 FILE_NAME = "symposium-prefs.json"
 MAX_NAME = 120
 # The settings a project carries, and how a value for each is checked.
-PROJECT_FIELDS = ("voice", "system_prompt", "model", "temperature", "max_tokens", "repeat_penalty")
+PROJECT_FIELDS = ("voice", "system_prompt", "model", "temperature", "max_tokens", "repeat_penalty",
+                  "permission_mode", "allowed_tools", "tools_inherit")
 APP_FIELDS = {"you": ("ui", "you"), "claude_name": ("claude", "name"),
               "confirm_destructive": ("ui", "confirm_destructive"),
               "claude_mode": ("claude", "permission_mode"), "claude_ask": ("claude", "ask"),
               "claude_tools": ("claude", "allowed_tools"), "claude_dirs": ("claude", "add_dirs")}
 # Not bypassPermissions: a window that can switch every check off with one
 # click is not one to leave open. The yaml can still say it, on purpose.
-MODES = ("", "default", "acceptEdits", "plan")
+# (seren_symposium.permissions keeps the list for every layer.)
+MODES = WINDOW_MODES
 MAX_RULES = 200
 
 
@@ -78,6 +84,16 @@ def _preset(name: str, values: dict[str, Any]) -> FolderPreset:
         raise Invalid(f"not a project setting: {', '.join(sorted(unknown))}")
     if values.get("voice") not in (None, "", "lodestar", "claude"):
         raise Invalid("voice is lodestar or claude")
+    if values.get("permission_mode") not in (None, *WINDOW_MODES):
+        names = ", ".join(m or "(every chat's)" for m in WINDOW_MODES)
+        raise Invalid(f"permission_mode is one of: {names}")
+    if values.get("allowed_tools") is not None:
+        try:
+            values = {**values, "allowed_tools": clean_rules(values["allowed_tools"])}
+        except ValueError as ex:
+            raise Invalid(str(ex)) from None
+    if values.get("tools_inherit") is not None and not isinstance(values["tools_inherit"], bool):
+        raise Invalid("tools_inherit is true or false")
     try:
         # None means "no opinion" - the field's default.
         return FolderPreset(name=name, **{k: v for k, v in values.items() if v is not None})
@@ -137,8 +153,18 @@ class Prefs:
         self._write()
         self.apply()
 
+    def project_defaults(self) -> dict[str, Any]:
+        d = self.data.get("project_defaults")
+        return dict(d) if isinstance(d, dict) else {}
+
     @staticmethod
     def _check(key: str, value: Any) -> Any:
+        if key == "project_defaults":
+            if not isinstance(value, dict):
+                raise Invalid("project_defaults is an object of project settings")
+            given = {k: v for k, v in value.items() if v is not None and v != ""}
+            _preset("defaults", given)                  # the same checks a project's settings get
+            return given
         if key not in APP_FIELDS:
             raise Invalid(f"{key} is not set from the window")
         if key in ("confirm_destructive", "claude_ask"):
@@ -185,7 +211,11 @@ class Prefs:
         name = _clean_name(body.get("name"))
         if self._find(name) is not None:
             raise Invalid(f"there is already a project called {name}")
-        preset = _preset(name, {k: v for k, v in body.items() if k != "name"})
+        # The defaults fill what the request leaves out; what it sends, even
+        # blank, is its own (a blank sent on purpose is no opinion).
+        given = {k: v for k, v in body.items() if k != "name"}
+        values = {**{k: v for k, v in self.project_defaults().items() if k not in given}, **given}
+        preset = _preset(name, {k: (None if v == "" else v) for k, v in values.items()})
         self._owned().append(preset.model_dump())
         self._write()
         self.apply()

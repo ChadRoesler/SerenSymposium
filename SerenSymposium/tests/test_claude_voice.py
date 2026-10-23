@@ -201,7 +201,7 @@ def test_voice_is_a_setting_with_two_values(client):
 
 def test_the_shell_is_told_whether_claude_is_here(make_client):
     on = make_client(config()).get("/api/config").json()["claude"]
-    assert on == {"name": "claude", "available": True}
+    assert (on["name"], on["available"]) == ("claude", True) and on["models"], "and the models it takes"
     cfg = config()
     cfg.claude.enabled = False
     assert make_client(cfg).get("/api/config").json()["claude"]["available"] is False
@@ -216,6 +216,81 @@ def test_the_command_is_the_configs_and_the_prompt_never_an_argument():
     assert flag(argv, "--permission-mode") == "default"
     assert flag(argv, "--allowedTools") == "mcp__workbench__*"
     assert flag(claude_voice.argv(cfg, resume="r1", new_id="x", model="opus"), "--model") == "opus"
+
+
+def test_a_preface_replaces_the_clis_own_prompt(make_client, runs, tmp_path):
+    """21 Oct 2026: with a preface (Margin's page, here a file) the system
+    prompt is the model's own page, the chat's prompt and the framing, and it
+    REPLACES the CLI's default; without one the same text is appended."""
+    page = tmp_path / "preface.md"
+    page.write_text("You are the assistant. The user is here.", encoding="utf-8")
+    cfg = config(system_prompt="be brief")
+    cfg.claude.preface.file = str(page)
+    client = make_client(cfg)
+    sid = client.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    stream(client, {"session": sid, "prompt": "hi"})
+
+    (run,) = runs()
+    assert "--append-system-prompt" not in run["argv"]
+    system = flag(run["argv"], "--system-prompt")
+    assert system.startswith("You are the assistant. The user is here.\n\nbe brief\n\nYou are answering in Seren Symposium")
+    peek = client.get("/api/claude/system", params={"folder": "den"}).json()
+    assert peek["replace"] is True and peek["system"].startswith("You are the assistant.") and "be brief" in peek["system"]
+
+    page.unlink()                                   # the page gone: the CLI keeps its own prompt
+    assert client.get("/api/claude/system", params={"folder": "den"}).json()["replace"] is False
+
+
+def test_a_preface_from_margin_is_fetched_and_a_down_margin_costs_nothing(monkeypatch):
+    from seren_symposium import preface
+    from seren_symposium.config import PrefaceConfig
+    preface.forget()
+    seen = []
+
+    class _Resp:
+        def __init__(self, body): self.body = body
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return self.body
+
+    def fake_open(req, timeout):
+        seen.append((req.full_url, req.get_header("Authorization"), timeout))
+        if "down" in req.full_url:
+            raise OSError("connection refused")
+        return _Resp(b"You are the assistant.\n")
+    monkeypatch.setattr(preface.urllib.request, "urlopen", fake_open)
+
+    up = PrefaceConfig(url="http://margin:7251/", bearer_token="shh", timeout_seconds=2.5)
+    assert preface.text(up, now=0.0) == "You are the assistant."
+    assert seen == [("http://margin:7251/preface?format=text", "Bearer shh", 2.5)]
+    assert preface.text(up, now=30.0) == "You are the assistant." and len(seen) == 1     # cached a minute
+    assert preface.text(up, now=61.0) == "You are the assistant." and len(seen) == 2
+
+    down = PrefaceConfig(url="http://down:7251")
+    assert preface.text(down, now=0.0) == "" and preface.text(down, now=1.0) == "" and len(seen) == 3
+
+
+def test_only_the_named_mcp_servers_are_loaded(tmp_path):
+    known = {"mcpServers": {"wren-workbench": {"type": "http", "url": "http://nuc:7255/mcp"},
+                            "gmail": {"type": "http", "url": "https://example.invalid/mcp"}}}
+    cj = tmp_path / "claude.json"
+    cj.write_text(json.dumps(known), encoding="utf-8")
+    cfg = ClaudeConfig(mcp_servers=["wren-workbench"], claude_json=str(cj))
+
+    argv = claude_voice.argv(cfg, resume=None, new_id="abc", ask=True)
+    conf = json.loads(flag(argv, "--mcp-config"))["mcpServers"]
+    assert set(conf) == {"wren-workbench", "symposium"} and conf["wren-workbench"] == known["mcpServers"]["wren-workbench"]
+    assert "--strict-mcp-config" in argv and flag(argv, "--permission-prompt-tool") == "mcp__symposium__permit"
+
+    quiet = claude_voice.argv(cfg, resume=None, new_id="abc")        # no permit server: still only the named one
+    assert set(json.loads(flag(quiet, "--mcp-config"))["mcpServers"]) == {"wren-workbench"} and "--strict-mcp-config" in quiet
+
+    # a name the file lacks, or no file: every server loads, nothing is lost
+    lost = claude_voice.argv(ClaudeConfig(mcp_servers=["nope"], claude_json=str(cj)), resume=None, new_id="abc")
+    assert "--strict-mcp-config" not in lost and "--mcp-config" not in lost
+    gone = claude_voice.argv(ClaudeConfig(mcp_servers=["x"], claude_json=str(tmp_path / "none.json")), resume=None, new_id="abc")
+    assert "--strict-mcp-config" not in gone
+    assert "--mcp-config" not in claude_voice.argv(ClaudeConfig(), resume=None, new_id="abc")
 
 
 PNG_MAGIC = bytes.fromhex("89504e470d0a1a0a")
@@ -238,3 +313,48 @@ def test_a_picture_a_tool_sent_back_is_kept_in_the_chat(make_client, runs, monke
     assert got.status_code == 200 and got.content.startswith(PNG_MAGIC)
     step = next(s for s in answer["meta"]["steps"] if s.get("tool", "").endswith("make_image"))
     assert "023502-42-a-wren.png" in step["result"] and "base64" not in step["result"], "the bytes stay out of the receipt"
+
+
+# ── What it says between tools is the answer too (22 Oct 2026) ────────────
+
+def test_words_said_before_the_tools_are_kept_in_their_place(make_client, runs, monkeypatch):
+    monkeypatch.setenv("FAKE_CLAUDE_SAY_FIRST", "Let me look at the clock.")
+    client = make_client(config())
+    sid = client.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    events = stream(client, {"session": sid, "prompt": "what time is it"})
+
+    chunks = [e["content"] for e in events if e["type"] == "chunk"]
+    assert chunks[0] == "Let me look at the clock.", "streamed as it was said"
+    done = next(e for e in events if e["type"] == "done")
+    assert done["response"] == "Let me look at the clock.\n\nHello there", "the whole answer, not only the last piece"
+
+    msg = client.get(f"/api/sessions/{sid}").json()["messages"][1]
+    assert msg["content"] == "Let me look at the clock.\n\nHello there"
+    kinds = [s["kind"] for s in msg["meta"]["steps"]]
+    assert kinds == ["said", "tool", "thinking", "said"], "each piece where it was said"
+    assert msg["meta"]["steps"][0]["text"] == "Let me look at the clock."
+    assert msg["meta"]["steps"][-1]["text"] == "Hello there"
+
+
+def test_an_answer_said_only_at_the_end_keeps_the_usual_layout(make_client, runs):
+    client = make_client(config())
+    sid = client.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    stream(client, {"session": sid, "prompt": "hi"})
+    steps = client.get(f"/api/sessions/{sid}").json()["messages"][1]["meta"]["steps"]
+    assert "said" not in [s["kind"] for s in steps], "the answer is not kept twice"
+
+
+def test_the_pieces_go_through_bring_back_together_and_stay_apart():
+    heard = claude_voice.ClaudeTurn("s")
+    heard.say("Look: ![a wren](https://example.org/wren.png)")
+    heard.close_said()
+    heard.step({"kind": "tool", "id": "t1", "tool": "x", "summary": ""})
+    heard.say("There it is.")
+    assert heard.answer("There it is.") == "Look: ![a wren](https://example.org/wren.png)\n\nThere it is."
+    assert heard.answer("Something else entirely.").endswith("Something else entirely."), \
+        "a result missing from what streamed is not lost"
+
+
+def test_the_shell_is_told_the_models_claude_takes(make_client):
+    models = make_client(config()).get("/api/config").json()["claude"]["models"]
+    assert "opus" in models and "sonnet" in models and any(m.startswith("claude-") for m in models)

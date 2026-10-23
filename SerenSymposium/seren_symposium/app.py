@@ -72,8 +72,9 @@ from seren_meninges import get_version
 from seren_meninges.viewer import render_from_dir
 
 from . import __version__ as _fallback_version
-from . import attachments, carabiner, claude_voice, ears, pictures, screen
-from .config import SymposiumConfig, load_config
+from . import attachments, preface, carabiner, claude_voice, ears, pictures, screen, stack
+from . import permissions
+from .config import FolderPreset, SymposiumConfig, load_config
 from .prefs import Invalid as BadPref
 from .prefs import Prefs
 from .sessions import Invalid, SessionStore, file_entry, summary
@@ -154,7 +155,9 @@ def to_lodestar_payload(cfg: SymposiumConfig, body: dict[str, Any]) -> dict[str,
 
     if history := _trim_history(body.get("history"), cfg.lodestar.history_max_chars):
         out["history"] = history
-    if system_prompt := (body.get("system_prompt") or (preset.system_prompt if preset else "")):
+    # The prompts add up: the folder's, then the chat's (unless the chat says
+    # system_inherit false), seren_symposium.stack.own_prompt.
+    if system_prompt := stack.own_prompt(preset, body):
         out["system_prompt"] = system_prompt
     if model := (body.get("model_override") or (preset.model if preset else "")):
         out["model_override"] = model
@@ -229,17 +232,30 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
             for m in missed]
     model = layered.get("model_override") or (
         preset.model if preset and preset.voice == "claude" else "")
-    system = layered.get("system_prompt") or (preset.system_prompt if preset else "")
-    if cfg.claude.framing:
-        system = "\n\n".join(p for p in (system, cfg.claude.framing.replace("{files}", str(folder))) if p)
+    system, replace = claude_system(cfg, stack.own_prompt(preset, layered), str(folder))
+    # Permissions in layers: the CLI's own, the carabiner's, every chat's, the
+    # project's, this chat's (seren_symposium.permissions). The chat's own
+    # folder is always writable when save_files is on, whatever they say.
+    perms = permissions.effective(permissions.layers(cfg, preset, layered))
     return {
         "prompt": claude_voice.handover(_trim_history(told, cfg.claude.handover_max_chars),
                                         attachments.with_files(prompt, attachments.for_claude(files or [], folder)),
                                         resumed=bool(resume)),
-        "resume": resume, "model": model, "system_prompt": system,
+        "resume": resume, "model": model, "system_prompt": system, "system_replace": replace,
         "add_dirs": [str(folder)],
-        "allow": [claude_voice.folder_rule(str(folder))] if cfg.claude.save_files else [],
+        "allow": ([claude_voice.folder_rule(str(folder))] if cfg.claude.save_files else []) + perms["allow"],
+        "mode": perms["mode"],
     }
+
+
+def claude_system(cfg: SymposiumConfig, own: str, files: str) -> tuple[str, bool]:
+    """What the CLI is told in its system prompt, and whether that REPLACES
+    the CLI's own: the preface (Margin's page, seren_symposium.preface) when
+    there is one, then the chat's or folder's own prompt, then the framing.
+    Without a preface the same text is appended to the CLI's prompt."""
+    pre = preface.text(cfg.claude.preface)
+    framing = cfg.claude.framing.replace("{files}", files) if cfg.claude.framing else ""
+    return "\n\n".join(p for p in (pre, own, framing) if p), bool(pre)
 
 
 _FENCE = re.compile(r"```.*?```", re.S)
@@ -384,18 +400,48 @@ async def bring_back(cfg: SymposiumConfig, store: SessionStore, turn: Turn, answ
     return answer, found
 
 
+# Between the pieces of an answer while bring_back rewrites them as one text
+# (an image fetched, a saved file adopted): a line no rewrite touches, so the
+# pieces can be told apart again afterwards.
+_SAID_SEP = "\n\n<!-- symposium:said -->\n\n"
+
+
+async def bring_back_said(cfg: SymposiumConfig, store: SessionStore, turn: Turn, heard: "claude_voice.ClaudeTurn",
+                          answer: str, before: Optional[set[str]]) -> tuple[str, list[dict[str, Any]]]:
+    """bring_back for a claude answer said in pieces: the pieces go through it
+    as one text, then are split again, so each `said` step shows the same
+    words the kept answer has. Should the split not come back whole, the
+    answer is kept as one text and the pieces lose their places (the old
+    layout), never their words."""
+    said = heard.said()
+    if len(said) < 2:
+        return await bring_back(cfg, store, turn, answer, before)
+    kept, found = await bring_back(cfg, store, turn, _SAID_SEP.join(s["text"].strip() for s in said), before)
+    parts = kept.split(_SAID_SEP)
+    if len(parts) != len(said):
+        heard.steps = [s for s in heard.steps if s["kind"] != "said"]
+        return kept.replace(_SAID_SEP, "\n\n"), found
+    for s, text in zip(said, parts):
+        s["text"] = text
+    return "\n\n".join(parts), found
+
+
 class PermitDesk:
     """One claude turn's may-I questions: the CLI's permission tool asks
     (POST /api/permit), the ask goes into the turn's stream as a
     `permission` event, and waits here for your answer (/api/permit/answer)."""
 
-    def __init__(self, session: str):
+    def __init__(self, session: str, folder: str = "", allowed: Optional[list[str]] = None):
         self.session = session
+        self.folder = folder                            # its project, for an Always kept there
         self.ticket = secrets.token_urlsafe(24)
         self.events: asyncio.Queue = asyncio.Queue()
-        self.pending: dict[str, tuple[asyncio.Future, str]] = {}
+        self.pending: dict[str, tuple[asyncio.Future, list[str]]] = {}
         self.asked: dict[str, dict[str, Any]] = {}      # id -> the ask, for the turn's steps
         self.always: set[str] = set()
+        # The turn's allow list as worked out in layers: an ask a rule on it
+        # already covers is answered yes here (permissions.covers).
+        self.allowed: list[str] = list(allowed or [])
         self.turn: Optional[claude_voice.ClaudeTurn] = None
 
     def close(self, why: str) -> None:
@@ -425,11 +471,12 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
         yield {"type": "error", "error": "this chat is still answering the last message"}
         return
     busy.add(turn.session)
-    desk = PermitDesk(turn.session) if permits is not None and cfg.claude.ask else None
+    ask = turn.claude
+    desk = (PermitDesk(turn.session, (store.get(turn.session) or {}).get("folder") or "", ask.get("allow"))
+            if permits is not None and cfg.claude.ask else None)
     if desk is not None:
         permits[desk.ticket] = desk
     try:
-        ask = turn.claude
         heard = claude_voice.ClaudeTurn(ask["resume"] or str(uuid.uuid4()))
         if desk is not None:
             desk.turn = heard
@@ -439,10 +486,13 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
         spoken = claude_voice.events(cfg.claude, prompt=ask["prompt"], resume=ask["resume"],
                                      model=ask["model"], system_prompt=ask["system_prompt"],
                                      add_dirs=ask.get("add_dirs"), allow=ask.get("allow"), turn=heard,
-                                     permit={"url": _permit_url(cfg), "ticket": desk.ticket} if desk else None)
+                                     permit={"url": _permit_url(cfg), "ticket": desk.ticket} if desk else None,
+                                     replace=bool(ask.get("system_replace")),
+                                     mode=ask.get("mode"), own_tools="mode" not in ask)
         async for event in (_with_asks(spoken, desk) if desk else spoken):
             if event["type"] == "done":
-                event["response"], found = await bring_back(cfg, store, turn, event.get("response") or "", before)
+                event["response"], found = await bring_back_said(cfg, store, turn, heard,
+                                                                 event.get("response") or "", before)
                 # Pictures a tool sent back (make_image draws on another box):
                 # kept in the chat beside the answer, not left as a path there.
                 found += attachments.keep_tool_images(heard.images, store, turn.session,
@@ -454,7 +504,8 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                 saved = store.record(turn.session, turn.prompt, event["response"],
                                      turn.receipt(event, heard.tools, heard.kept_steps()), keep=turn.keep,
                                      claude_session=heard.session_id, files=turn.files,
-                                     answer_files=found, source=turn.source, by=turn.by)
+                                     answer_files=found, source=turn.source, by=turn.by,
+                                     claude_init=heard.init)
                 if saved is not None:
                     yield {"type": "saved", "session": summary(saved)}
     finally:
@@ -512,6 +563,15 @@ async def lodestar_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
         await r.aclose()
 
 
+def asked_of(turn: Turn) -> dict[str, Any]:
+    """What a window opened mid-answer draws above the answer: the prompt and
+    its files, whose they were (a plugin's feed is drawn as the plugin's), and
+    whether the turn is a retry - then there is no new question, and the
+    answer being replaced comes off the screen (22 Oct 2026)."""
+    return {"prompt": turn.prompt, "files": turn.files, "source": turn.source, "by": turn.by,
+            "retry": turn.keep is not None}
+
+
 class LiveTurn:
     """A turn in flight, kept apart from whoever is watching it.
 
@@ -529,8 +589,12 @@ class LiveTurn:
     session is in app.state.answering from start to finish: a second message
     into THAT chat is refused with 409, any other chat is free."""
 
-    def __init__(self, session: str, answering: set[str], live: dict[str, "LiveTurn"]):
+    def __init__(self, session: str, answering: set[str], live: dict[str, "LiveTurn"],
+                 asked: Optional[dict[str, Any]] = None):
         self.session = session
+        # The question the turn is answering, for a window that opens the chat
+        # while it runs: the session file has neither until the answer is in.
+        self.asked = asked
         self.events: list[dict[str, Any]] = []
         self.finished = asyncio.Event()
         self.changed = asyncio.Condition()
@@ -538,17 +602,18 @@ class LiveTurn:
         self.task: Optional[asyncio.Task] = None
 
     @classmethod
-    def begin(cls, request: Request, session: str, source) -> "LiveTurn":
+    def begin(cls, request: Request, session: str, source,
+              asked: Optional[dict[str, Any]] = None) -> "LiveTurn":
         """Start `source` (an async iterator of events) running on its own,
         registered for the session. The caller checked nobody else is."""
-        return cls.start(request.app.state, session, source)
+        return cls.start(request.app.state, session, source, asked)
 
     @classmethod
-    def start(cls, state, session: str, source) -> "LiveTurn":
+    def start(cls, state, session: str, source, asked: Optional[dict[str, Any]] = None) -> "LiveTurn":
         """The same, from the app's state rather than a request: for a turn
         nobody asked for over HTTP (something on this desk speaking into a
         chat on its own - such a turn is marked with its source, see Turn)."""
-        turn = cls(session, state.answering, state.live)
+        turn = cls(session, state.answering, state.live, asked)
         state.answering.add(session)
         state.live[session] = turn
         turn.task = asyncio.create_task(turn._run(source))
@@ -740,7 +805,9 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             "viewers": cfg.viewers.shown(),
             "folders": [f.model_dump() for f in cfg.folders],
             "sessions_dir": str(cfg.sessions_dir()),
-            "claude": {"name": cfg.claude.name, "available": claude_voice.available(cfg.claude)},
+            "claude": {"name": cfg.claude.name, "available": claude_voice.available(cfg.claude),
+                       "models": cfg.claude.models},
+            "project_defaults": prefs.project_defaults(),
             "you": cfg.ui.you,
             "prefs_file": str(prefs.path),
             "files": {"max_mb": cfg.files.max_mb, "fetch_images": cfg.files.fetch_images},
@@ -846,7 +913,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             # claude_answer keeps its own one-at-a-time guard for direct callers;
             # here the LiveTurn holds the session in `answering`, so it gets a
             # set of its own rather than finding itself already there.
-            live = LiveTurn.begin(request, turn.session, claude_answer(cfg, store, turn, set()))
+            live = LiveTurn.begin(request, turn.session, claude_answer(cfg, store, turn, set()), asked_of(turn))
             out: dict[str, Any] = {}
             async for event in live.follow():
                 if event["type"] in ("done", "error"):
@@ -890,7 +957,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         if turn.claude is not None:
             # A set of its own: see /api/chat.
             source = claude_answer(cfg, store, turn, set(), request.app.state.permits)
-            return _ndjson(LiveTurn.begin(request, turn.session, source).follow())
+            return _ndjson(LiveTurn.begin(request, turn.session, source, asked_of(turn)).follow())
         client: httpx.AsyncClient = request.app.state.client
         try:
             r = await client.send(client.build_request("POST", "/api/v1/chat/stream", json=turn.payload),
@@ -904,7 +971,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         source = lodestar_answer(cfg, store, turn, r)
         if not turn.session:
             return _ndjson(source)       # nothing is kept, so there is nothing to come back to
-        return _ndjson(LiveTurn.begin(request, turn.session, source).follow())
+        return _ndjson(LiveTurn.begin(request, turn.session, source, asked_of(turn)).follow())
 
     @app.get("/api/models")
     async def models(request: Request):
@@ -953,7 +1020,11 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         s = request.app.state.sessions.get(sid)
         if s is None:
             return JSONResponse({"error": "no such session"}, status_code=404)
-        return {**s, "answering": sid in request.app.state.answering}
+        live = request.app.state.live.get(sid)
+        # claude_init is the prompt stack's (GET /api/stack), not the chat's.
+        return {**{k: v for k, v in s.items() if k != "claude_init"},
+                "answering": sid in request.app.state.answering,
+                "pending": live.asked if live is not None else None}
 
     @app.get("/api/sessions/{sid}/live")
     async def sessions_live(request: Request, sid: str):
@@ -995,22 +1066,45 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
 
     @app.patch("/api/prefs")
     async def prefs_change(request: Request):
-        """{you?, claude_name?, confirm_destructive?}"""
+        """{you?, claude_name?, confirm_destructive?, project_defaults?}"""
+        body = await _json(request)
         try:
-            prefs.set_app(await _json(request))
+            prefs.set_app(body)
         except BadPref as ex:
             return JSONResponse({"error": str(ex)}, status_code=400)
-        return {"you": cfg.ui.you, "claude_name": cfg.claude.name,
-                "confirm_destructive": cfg.ui.confirm_destructive}
+        out = {"you": cfg.ui.you, "claude_name": cfg.claude.name,
+               "confirm_destructive": cfg.ui.confirm_destructive}
+        if isinstance(body, dict) and "project_defaults" in body:
+            out["project_defaults"] = prefs.project_defaults()
+        return out
 
     @app.get("/api/claude")
-    async def claude_settings(request: Request):
+    async def claude_settings(request: Request, session: str = "", folder: str = "", settings: str = ""):
         """The claude voice's settings as they stand, and the carabiner on
-        this box (never its tokens)."""
+        this box (never its tokens). With `session` (or `folder` and a JSON
+        `settings` for a chat not made yet), also what a turn there would run
+        with: its permissions worked out in layers, and where each came from."""
         c = cfg.claude
-        return {"available": claude_voice.available(c), "name": c.name, "cwd": c.cwd,
-                "mode": c.permission_mode, "ask": c.ask, "tools": c.allowed_tools, "dirs": c.add_dirs,
-                "carabiner": await asyncio.to_thread(carabiner.describe, c)}
+        out = {"available": claude_voice.available(c), "name": c.name, "cwd": c.cwd,
+               "mode": c.permission_mode, "ask": c.ask, "tools": c.allowed_tools, "dirs": c.add_dirs,
+               "modes": list(permissions.WINDOW_MODES),
+               "carabiner": await asyncio.to_thread(carabiner.describe, c),
+               "carabiner_session": await asyncio.to_thread(permissions.carabiner_session, cfg)}
+        if session or folder or settings:
+            own: dict[str, Any] = {}
+            if session:
+                s = request.app.state.sessions.get(session)
+                if s is None:
+                    return JSONResponse({"error": "no such session"}, status_code=404)
+                folder, own = s["folder"], s["settings"]
+            elif settings:
+                try:
+                    own = json.loads(settings)
+                except ValueError:
+                    return JSONResponse({"error": "settings is JSON"}, status_code=400)
+                own = own if isinstance(own, dict) else {}
+            out["effective"] = await asyncio.to_thread(permissions.for_chat, cfg, folder, own)
+        return out
 
     # ── May I? The claude voice's permission asks ───────────────────────
     # Not a door for anyone to open: an ask needs the ticket of a turn that
@@ -1024,14 +1118,17 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         if desk is None:
             return {"behavior": "deny", "message": "No turn is waiting on that - refused."}
         tool, tool_input = str(body.get("tool_name") or "a tool"), body.get("input") or {}
-        rule = claude_voice.suggest_rule(tool, tool_input)
-        if rule in desk.always or tool in desk.always:
+        rules = claude_voice.suggest_rules(tool, tool_input)
+        if any(permissions.covers(r, tool, tool_input) for r in [*desk.always, *desk.allowed]):
             return {"behavior": "allow"}
         pid = uuid.uuid4().hex[:12]
         fut = asyncio.get_running_loop().create_future()
-        desk.pending[pid] = (fut, rule)
-        desk.asked[pid] = {"tool": tool, "summary": claude_voice.summarize(tool, tool_input), "rule": rule}
-        await desk.events.put({"type": "permission", "id": pid, **desk.asked[pid]})
+        desk.pending[pid] = (fut, rules)
+        desk.asked[pid] = {"tool": tool, "summary": claude_voice.summarize(tool, tool_input), "rule": rules[0]}
+        # Always comes in widths (narrowest first) and scopes: this chat, its
+        # project when it has one, every chat (22 Oct 2026).
+        scopes = ["chat", *(["project"] if desk.folder else []), "all"]
+        await desk.events.put({"type": "permission", "id": pid, **desk.asked[pid], "rules": rules, "scopes": scopes})
         try:
             return await asyncio.wait_for(fut, timeout=cfg.claude.timeout_seconds)
         except asyncio.TimeoutError:
@@ -1041,35 +1138,152 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
 
     @app.post("/api/permit/answer")
     async def permit_answer(request: Request):
-        """{id, answer: once | always | deny}"""
+        """{id, answer: once | always | deny, rule?, scope?: chat | project | all} -
+        an Always names one of the widths it was offered (else the narrowest)
+        and where it is kept: this chat, its project, or every chat (the
+        default, as before)."""
         body = await _json(request)
         if not isinstance(body, dict) or body.get("answer") not in ("once", "always", "deny"):
             return JSONResponse({"error": "send {id, answer: once | always | deny}"}, status_code=400)
+        scope = body.get("scope") or "all"
+        if scope not in ("chat", "project", "all"):
+            return JSONResponse({"error": "scope is chat, project or all"}, status_code=400)
         for desk in list(request.app.state.permits.values()):
-            fut, rule = desk.pending.get(body.get("id"), (None, ""))
+            fut, rules = desk.pending.get(body.get("id"), (None, []))
             if fut is None or fut.done():
                 continue
+            rule = body.get("rule") if body.get("rule") in rules else rules[0]
+            if scope == "project" and not desk.folder:
+                scope = "chat"
             if desk.turn is not None:
-                desk.turn.step({"kind": "asked", **desk.asked.get(body["id"], {}), "answer": body["answer"]})
+                desk.turn.step({"kind": "asked", **desk.asked.get(body["id"], {}), "answer": body["answer"],
+                                **({"rule": rule, "scope": scope} if body["answer"] == "always" else {})})
             if body["answer"] == "deny":
                 fut.set_result({"behavior": "deny", "message": f"{cfg.ui.you} said no, in the window."})
             else:
                 if body["answer"] == "always":
                     desk.always.add(rule)
                     try:
-                        prefs.allow_tool(rule)
-                    except BadPref as ex:
-                        log.warning("could not keep %r as always-allowed: %s", rule, ex)
+                        keep_always(prefs, cfg, request.app.state.sessions, desk, rule, scope)
+                    except (BadPref, Invalid) as ex:
+                        log.warning("could not keep %r as always-allowed (%s): %s", rule, scope, ex)
                 fut.set_result({"behavior": "allow"})
             # Into the turn's own stream too: a window that follows the turn
             # later sees the ask AND that it was answered, not a card waiting.
-            await desk.events.put({"type": "permission_answered", "id": body["id"], "answer": body["answer"], "rule": rule})
-            return {"ok": True, "answer": body["answer"], "rule": rule}
+            await desk.events.put({"type": "permission_answered", "id": body["id"], "answer": body["answer"],
+                                   "rule": rule, "scope": scope})
+            return {"ok": True, "answer": body["answer"], "rule": rule, "scope": scope}
         return JSONResponse({"error": "nothing is waiting on that"}, status_code=404)
+
+    @app.get("/api/claude/system")
+    async def claude_system_peek(folder: str = ""):
+        """What the claude voice would be told in a chat of this folder, as
+        the CLI receives it: the preface when there is one, the folder's own
+        prompt, the framing. `replace` says whether that is the whole system
+        prompt or an addition to the CLI's own. The settings tab shows it,
+        so nobody has to guess what reaches the model."""
+        preset = cfg.folder(folder)
+        system, replace = claude_system(cfg, stack.own_prompt(preset, {}), "<the chat's folder>")
+        return {"folder": folder, "replace": replace, "system": system, "chars": len(system)}
+
+    @app.get("/api/stack")
+    async def prompt_stack(request: Request, session: str = "", folder: str = "", settings: str = ""):
+        """What a chat's model is given, layer by layer (seren_symposium.stack):
+        for `session`, or for `folder` and a JSON `settings` (a chat not made
+        yet, or a project's own view with none). Read only: files on this
+        box, Margin's preface as a turn reads it, and for a local model
+        Lodestar's own /chat/inspect."""
+        store = request.app.state.sessions
+        s: Optional[dict[str, Any]] = None
+        own: dict[str, Any] = {}
+        if session:
+            s = store.get(session)
+            if s is None:
+                return JSONResponse({"error": "no such session"}, status_code=404)
+            folder, own = s["folder"], s["settings"]
+        elif settings:
+            try:
+                own = json.loads(settings)
+            except ValueError:
+                return JSONResponse({"error": "settings is JSON"}, status_code=400)
+            own = own if isinstance(own, dict) else {}
+        preset = cfg.folder(folder)
+        voice = own.get("voice") or (preset.voice if preset else "") or "lodestar"
+        messages = (s or {}).get("messages") or []
+        if voice == "claude":
+            out = await asyncio.to_thread(_claude_stack, store, s, folder, preset, own, messages)
+        else:
+            out = await _local_stack(request.app.state.client, folder, preset, own, messages)
+        return {"voice": voice, "folder": folder, "session": session or None, "layers": out,
+                **stack.summarize(out)}
+
+    def _claude_stack(store: SessionStore, s: Optional[dict[str, Any]], folder: str,
+                      preset: Optional[FolderPreset], own: dict[str, Any],
+                      messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        init, init_from = (s or {}).get("claude_init") or {}, "this chat's last answer"
+        if not init:
+            # Before a chat's first answer: the newest another chat here kept,
+            # else any chat's - the CLI loads much the same whoever asks.
+            near = None
+            for row in store.list()[:60]:
+                other = store.get(row["id"]) or {}
+                if other.get("claude_init"):
+                    if other.get("folder") == folder:
+                        near = other
+                        break
+                    near = near or other
+            if near is not None:
+                init, init_from = near["claude_init"], f"another chat ({near.get('title') or 'untitled'})"
+        pre = preface.text(cfg.claude.preface)
+        files_dir = str(store.files_dir(s["id"])) if s else "<the chat's folder>"
+        framing = cfg.claude.framing.replace("{files}", files_dir) if cfg.claude.framing else ""
+        known = (s or {}).get("claude") or {}
+        resumes = bool(known.get("session")) and known.get("seen", 0) <= len(messages)
+        handed = messages[known.get("seen", 0):] if resumes else messages
+        chars = sum(len(m.get("content") or "") for m in handed)
+        turn = {"where": "Claude Code keeps its own copy of the conversation",
+                "state": "on" if handed or resumes else "empty",
+                "resumes": resumes, "handed": len(handed),
+                "chars": min(chars, cfg.claude.handover_max_chars),
+                "note": ((f"The next turn resumes the CLI's conversation"
+                          + (f" and hands it the {len(handed)} message(s) another voice answered since." if handed
+                             else "; nothing is handed over.")) if resumes
+                         else (f"The next turn starts a new CLI conversation and is handed the chat so far "
+                               f"({len(handed)} message(s), up to claude.handover_max_chars)." if handed
+                               else "The next turn starts a new CLI conversation."))}
+        perms = permissions.effective(permissions.layers(cfg, preset, own))
+        return stack.claude_stack(cfg, preset, folder, own, preface=pre, framing=framing,
+                                  init=init, init_from=init_from if init else "", perms=perms, turn=turn)
+
+    async def _local_stack(client: httpx.AsyncClient, folder: str, preset: Optional[FolderPreset],
+                           own: dict[str, Any], messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        payload = to_lodestar_payload(cfg, {**own, "folder": folder, "prompt": ""})
+        inspect, why = None, ""
+        try:
+            r = await client.post("/api/v1/chat/inspect", timeout=15,
+                                  json={k: v for k, v in payload.items() if k in ("system_prompt", "prompt")})
+            if r.status_code == 200:
+                inspect = r.json()
+            else:
+                why = f"HTTP {r.status_code}" + (": this Lodestar has no /chat/inspect" if r.status_code == 404 else "")
+        except (httpx.HTTPError, ValueError) as ex:
+            why = f"{type(ex).__name__}: {ex}"
+        kept = _trim_history(messages, cfg.lodestar.history_max_chars)
+        chars = sum(len(m.get("content") or "") for m in kept)
+        history = {"where": "sent whole on every turn", "chars": chars, "messages": len(kept),
+                   "of": len(messages), "state": "on" if kept else "empty",
+                   "note": (f"The last {len(kept)} of {len(messages)} message(s), up to "
+                            f"lodestar.history_max_chars ({cfg.lodestar.history_max_chars})." if messages
+                            else "Nothing yet.")}
+        sampling = {k: payload.get(k) for k in ("model_override", "temperature", "max_tokens", "repeat_penalty")}
+        return stack.local_stack(cfg, preset, folder, own, inspect=inspect, inspect_error=why,
+                                 history=history, sampling=sampling)
 
     @app.post("/api/projects")
     async def projects_add(request: Request):
-        """{name, voice?, system_prompt?, model?, temperature?, max_tokens?, repeat_penalty?}"""
+        """{name, voice?, system_prompt?, model?, temperature?, max_tokens?, repeat_penalty?} -
+        a setting left out takes the new-project defaults; one sent as null
+        or blank means no opinion."""
         try:
             preset = prefs.add_project(await _json(request))
         except BadPref as ex:
@@ -1496,3 +1710,21 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         return {"file": entry, "cut": cut, "node": r.headers.get("x-seren-node"), "voice": voice, "seconds": seconds}
 
     return app
+
+
+def keep_always(prefs: Prefs, cfg: SymposiumConfig, store: SessionStore, desk: PermitDesk,
+                rule: str, scope: str) -> None:
+    """An Always, kept where it was asked to be: the chat's own list, its
+    project's, or every chat's (Settings > Claude)."""
+    if scope == "chat":
+        s = store.get(desk.session)
+        tools = list((s or {}).get("settings", {}).get("allowed_tools") or [])
+        if s is not None and rule not in tools:
+            store.update(desk.session, {"settings": {"allowed_tools": tools + [rule]}})
+    elif scope == "project" and desk.folder:
+        preset = cfg.folder(desk.folder)
+        tools = list(preset.allowed_tools) if preset else []
+        if rule not in tools:
+            prefs.change_project(desk.folder, {"allowed_tools": tools + [rule]})
+    else:
+        prefs.allow_tool(rule)

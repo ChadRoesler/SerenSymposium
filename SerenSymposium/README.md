@@ -49,8 +49,12 @@ Four layers, split by *how often you touch a thing* rather than by what it is:
 |---|---|---|
 | per-install | lodestar url, ui port, confirm_destructive | `seren-symposium.yaml` |
 | per-folder | voice, system prompt, model, temperature, max tokens, repeat penalty, memory tags | folder preset |
-| per-session | overrides of the above | the session's **settings** |
+| per-session | overrides of the above | the session's **settings** (⚙ in its title bar, a new chat's too: set before the first message, they go with it) |
 | per-message | the message | the composer |
+
+**System prompts add up** rather than override: a chat's own prompt is added after its project's. Untick *after its project's prompt* in the chat's settings and it has only its own.
+
+**The prompt stack** (the layers button in a chat's title bar, or *the whole prompt stack* in its settings) shows what that chat's model is actually given, layer by layer, with sizes (characters, and tokens at about four to one, est.). It's there to find what's quietly eating the context, like tools nobody uses or a memory file that grew. For a Claude chat that's the CLI's own prompt (built in, so it can't be read; a preface replaces it), the project's prompt, the chat's and the framing; then what the CLI reads itself as it starts (CLAUDE.md up from its working folder, the user's, the auto-memory index) and whether a session-start hook adds more; then every tool the CLI said it loaded on the chat's last turn, grouped by MCP server with each server's status, plus its skills, agents, commands and plugins; then the permissions and whether the next turn resumes. Before a chat's first answer, the tools are another chat's. For a local model it's what Lodestar would send, asked of Lodestar itself (`/api/v1/chat/inspect`): its tool descriptions in front of the project's and the chat's prompts, then the history and the sampling settings. A project has one too, from its settings: what its chats start with.
 
 ---
 
@@ -91,9 +95,11 @@ A chat's first Claude turn starts a CLI conversation; every later turn **resumes
 
 What runs is the yaml's (`claude:` — the program, its working directory, the tools it may use without asking); a request supplies only the prompt, on stdin. One Claude turn at a time per chat — two would both resume the same conversation. The stream is translated into Lodestar's shape (`chunk`, `tool_status`, `done`, `error`), so the shell reads one stream whoever is answering; the receipt names the Claude model and the voice's `name`.
 
-**Asked, not refused.** `-p` has nobody at a terminal to answer "may I?", so a tool not on `allowed_tools` used to be refused outright. With `claude.ask` (on by default) the CLI is given a permission tool of Symposium's own instead (`--permission-prompt-tool`): `seren_symposium.permit`, a small stdio MCP server the CLI starts for the turn. It asks Symposium over loopback, the ask shows in the chat — the command, the file, the address — and waits on **Allow once**, **Always**, or **Deny**. *Always* is no wider than the thing asked about — the folder a file is in, the first word of a command, a web site — and lands on the voice's list for every turn after. Where to ask and the turn's one-time ticket ride in the CLI's environment, never its command line, and an ask without a running turn's ticket is refused.
+**Asked, not refused.** `-p` has nobody at a terminal to answer "may I?", so a tool not on `allowed_tools` used to be refused outright. With `claude.ask` (on by default) the CLI is given a permission tool of Symposium's own instead (`--permission-prompt-tool`): `seren_symposium.permit`, a small stdio MCP server the CLI starts for the turn. It asks Symposium over loopback, the ask shows in the chat — the command, the file, the address — and waits on **Allow once**, **Always**, or **Deny**. *Always* offers widths, narrowest first — the folder a file is in or every read, the first word of a command or the whole shell, one MCP tool or every tool on its server — and where to keep it: **this chat**, **this project**, or **every chat**. When the CLI asks about something a rule kept here already covers (it spells some differently), the window answers yes without bothering you; a rule it can't read plainly is never taken to cover anything. Where to ask and the turn's one-time ticket ride in the CLI's environment, never its command line, and an ask without a running turn's ticket is refused.
 
-**How it got there.** Above an answer, folded away: Claude's thinking, each tool it used with what it was given and what came back, and each time it asked you — live while it works, kept in the answer's receipt after. A local model's `<think>…</think>` folds the same way.
+**Permissions in layers**, each more particular than the one before: the **CLI's own settings** (the base; Symposium only ever adds to them), the **carabiner's** `session:` block (the box's defaults for a session of this harness — see SerenCarabiners), **every chat** (Settings → Claude, over the yaml's `claude.permission_mode` and `allowed_tools`), the **project**, and the **chat** (its ⚙). The mode is the most particular one set — a chat's, else its project's, and so on down; none set and the CLI decides. What may run without asking gathers from the chat upward, until a layer has *also what … allows* unticked: a red-team chat that should ask about everything says so in its own settings, whatever its project or the box allow. The chat sheet shows the result — which mode, from where, and how many rules each layer gave. The window offers every mode the CLI has but `bypassPermissions`, which only the yaml or the carabiner can say, on purpose.
+
+**How it got there.** Folded away in the answer: Claude's thinking, each tool it used with what it was given and what came back, and each time it asked you — live while it works, kept in the answer's receipt after. A local model's `<think>…</think>` folds the same way. What Claude *says* before and between its tools ("let me look in that folder") is the answer too: each piece is shown where it was said, with the steps between pieces folded in their own place, and the kept answer is every piece, not only the last (the CLI's own result is only the text after the last tool). While an answer comes, a line under it says what it is doing and for how long, and the window's title carries a dot.
 
 **Settings → Claude** shows the voice's permission mode, whether it asks, what it may use without asking and the folders it may work in besides its own — and, beside them, the **carabiner** clipped on this box (SerenCarabiners' `claude.yaml`, found through `claude.carabiner`, `KBH_CONFIG`, `<cwd>/kbh` or `~/.seren/kbh`): where its sessions work and which services it routes to. Read for show only; its tokens never leave the file.
 
@@ -220,7 +226,8 @@ claude:                  # the claude voice - see Voices
   name: "claude"
   command: ["claude"]
   cwd: ""
-  allowed_tools: []
+  permission_mode: ""    # every chat's; a project or chat can set its own
+  allowed_tools: []      # every chat's; a project or chat adds to it
   add_dirs: []           # folders it may work in besides cwd
   ask: true              # ask in the window about a tool not on the list
   carabiner: ""          # its claude.yaml, for Settings; blank looks for it
@@ -256,9 +263,10 @@ Three of these reach Lodestar; the session and screen routes touch only this mac
 | PATCH | `/api/prefs` | what the window sets: `you`, `claude_name`, `confirm_destructive`, `claude_mode`, `claude_ask`, `claude_tools`, `claude_dirs` |
 | POST, PATCH | `/api/projects` | make a project; change one's settings or rename it (`{name, set?, rename?}` — its chats move along) |
 | POST | `/api/projects/remove` | `{name}` — the project goes; its chats stay, out of any project |
-| GET | `/api/claude` | the claude voice's settings and the carabiner on this box (never its tokens) |
+| GET | `/api/claude` | the claude voice's settings, the modes, the carabiner on this box and its `session:` block (never its tokens); with `session`, or `folder` and `settings`, what a chat runs with and where each part came from |
+| GET | `/api/stack` | what a chat's model is given, layer by layer — `session`, or `folder` and a JSON `settings` (a chat not made yet; a project's own with none) |
 | POST | `/api/permit` | the claude voice's permission tool asking — needs the running turn's ticket |
-| POST | `/api/permit/answer` | `{id, answer: once \| always \| deny}` |
+| POST | `/api/permit/answer` | `{id, answer: once \| always \| deny, rule?, scope?: chat \| project \| all}` — an Always names one of the widths offered (else the narrowest) and where it's kept |
 | GET, POST | `/api/sessions` | every session, newest first; POST makes one (with `messages`, an import) |
 | GET, PATCH, DELETE | `/api/sessions/{id}` | one session whole (the export); rename, move, settings; delete (with its files) |
 | POST | `/api/sessions/{id}/files` | attach a file: `{name, data}`, data base64 — JSON like every POST, so no other page's form can |
@@ -271,7 +279,7 @@ Three of these reach Lodestar; the session and screen routes touch only this mac
 | GET | `/vendor/...` | the Markdown renderer and highlighter we ship |
 | GET | `/health` | ours, plus whether Lodestar answers |
 
-A chat body with `"session": id` takes its thread and settings from that session and writes the answer back to it; `"retry": true` asks its last prompt again; `"files"` names attachments already in the chat; `"screen": true` adds the newest screen-share still. Nothing moves under an answer: rewind, fork, delete and dropping a message wait (409) while Claude is answering in that chat. Without `session`, it's the stateless shape: send your own `history`. The stream is Lodestar's NDJSON unchanged — `chunk`, `tool_status`, `done`, `error` — plus one line of Symposium's own at the end, `{"type": "saved", "session": {...}}`, once the session has the turn. A Claude turn adds its steps (`thinking`, `tool_call`, `tool_result`) and its asks (`permission`, `{id, tool, summary, rule}`).
+A chat body with `"session": id` takes its thread and settings from that session and writes the answer back to it; `"retry": true` asks its last prompt again; `"files"` names attachments already in the chat; `"screen": true` adds the newest screen-share still. Nothing moves under an answer: rewind, fork, delete and dropping a message wait (409) while Claude is answering in that chat. Without `session`, it's the stateless shape: send your own `history`. The stream is Lodestar's NDJSON unchanged — `chunk`, `tool_status`, `done`, `error` — plus one line of Symposium's own at the end, `{"type": "saved", "session": {...}}`, once the session has the turn. A Claude turn adds its steps (`thinking`, `tool_call`, `tool_result`) and its asks (`permission`, `{id, tool, summary, rule, rules, scopes}`: the widths Always may take and where it may be kept).
 
 `/health` reports the two halves separately and on purpose. Symposium's own health is trivially `ok`; the useful half is the cluster head, and it never fails the request to tell you about it. The UI draws it as a dot, not a paragraph.
 
@@ -319,7 +327,7 @@ Symposium posts to Lodestar's `POST /api/v1/chat`, whose body is flat — it has
 
 …and which answers with `{ response, model, node, tool_rounds, usage }`.
 
-The folder preset is flattened into that shape **in Python**, not in the shell's JavaScript, which is what makes the layer precedence — folder default, then session settings — assertable in pytest. The response is passed back to the UI verbatim: Lodestar's field names are the contract, and renaming them in the proxy would only create a second thing to keep in sync.
+The folder preset is flattened into that shape **in Python**, not in the shell's JavaScript, which is what makes the layer precedence — folder default, then session settings, the two system prompts joined — assertable in pytest. The response is passed back to the UI verbatim: Lodestar's field names are the contract, and renaming them in the proxy would only create a second thing to keep in sync.
 
 Conversation history lives in the session file and rides along on each request, trimmed from the oldest end to `lodestar.history_max_chars` (Lodestar trims only tool output, so bounding ordinary conversation is the client's job). Only `role` and `content` go on the wire; timestamps and receipts stay home. Lodestar is stateless per call and keeps none of it.
 

@@ -6,9 +6,15 @@ Conversations, kept. One JSON file per session in the sessions dir
 (SymposiumConfig.sessions_dir):
 
     {"id", "folder", "title", "created", "updated",
-     "settings": {voice, system_prompt, model_override, temperature, max_tokens, repeat_penalty},
+     "settings": {voice, system_prompt, system_inherit, model_override, temperature, max_tokens,
+                  repeat_penalty, permission_mode, allowed_tools, tools_inherit},
      "messages": [{"role", "content", "at", "meta"?, "files"?}, ...],
-     "claude"?: {"session", "seen"}}
+     "claude"?: {"session", "seen"},
+     "claude_init"?: {...}}
+
+`claude_init` is what the claude CLI said it loaded on the chat's last turn
+(claude_voice.digest_init, and when): its tools, MCP servers, skills and the
+rest, for the prompt stack (seren_symposium.stack).
 
 A message's `files` are what was attached to it - [{"name", "orig", "type",
 "size"}] - and they live beside the session, in <id>.files/. A file is never
@@ -48,10 +54,17 @@ from typing import Any, Optional
 SETTINGS = {
     "voice": str,
     "system_prompt": str,
+    # false: this chat's prompt only, its project's left out (22 Oct 2026:
+    # the prompts add up, project then chat, unless a chat says not to)
+    "system_inherit": bool,
     "model_override": str,
     "temperature": (int, float),
     "max_tokens": int,
     "repeat_penalty": (int, float),
+    # the claude voice's permissions for this chat (seren_symposium.permissions)
+    "permission_mode": str,
+    "allowed_tools": list,
+    "tools_inherit": bool,
 }
 ROLES = ("user", "assistant")
 VOICES = ("lodestar", "claude")
@@ -79,8 +92,26 @@ def clean_settings(raw: Any) -> dict[str, Any]:
             raise Invalid(f"unknown setting {key!r}")
         if value is None or value == "":
             continue
+        if key in ("tools_inherit", "system_inherit"):
+            if not isinstance(value, bool):
+                raise Invalid(f"{key} is true or false")
+            out[key] = value
+            continue
+        if key == "allowed_tools":
+            from .permissions import clean_rules
+            try:
+                rules = clean_rules(value)
+            except ValueError as ex:
+                raise Invalid(str(ex)) from None
+            if rules:
+                out[key] = rules
+            continue
         if isinstance(value, bool) or not isinstance(value, SETTINGS[key]):
             raise Invalid(f"{key} has the wrong type")
+        if key == "permission_mode":
+            from .permissions import WINDOW_MODES
+            if value not in WINDOW_MODES:
+                raise Invalid(f"permission_mode is one of {', '.join(m for m in WINDOW_MODES if m)}")
         if key == "voice" and value not in VOICES:
             raise Invalid(f"voice is one of {', '.join(VOICES)}")
         out[key] = value
@@ -346,7 +377,8 @@ class SessionStore:
                keep: Optional[int] = None, claude_session: Optional[str] = None,
                files: Optional[list[dict[str, Any]]] = None,
                answer_files: Optional[list[dict[str, Any]]] = None,
-               source: Optional[str] = None, by: str = "") -> Optional[dict[str, Any]]:
+               source: Optional[str] = None, by: str = "",
+               claude_init: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
         """A turn that came back. keep cuts the thread first (a retry
         replaces the exchange it retried). A session with no title is named
         after its first prompt. claude_session: Claude answered, in that CLI
@@ -376,6 +408,8 @@ class SessionStore:
             s["title"] = " ".join(prompt.split())[:48]
         if claude_session:
             s["claude"] = {"session": claude_session, "seen": len(s["messages"])}
+        if claude_init:
+            s["claude_init"] = {**claude_init, "at": now}
         s["updated"] = now
         self._write(s)
         return s

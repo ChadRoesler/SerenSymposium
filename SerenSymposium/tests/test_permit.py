@@ -153,3 +153,58 @@ def test_the_tool_without_symposium_refuses(monkeypatch):
     assert out["result"]["tools"][0]["name"] == "permit"
     assert permit.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
     assert permit.handle({"jsonrpc": "2.0", "id": 2, "method": "nope"})["error"]["code"] == -32601
+
+
+# ── Always, kept where it was asked to be (22 Oct 2026) ───────────────────
+
+MCP_ASK = {"tool_name": "mcp__wren-workbench__recall", "input": {"query": "the eval"}}
+
+
+def _chat_turn(c, sid, answer=None, scope=None, rule_index=0):
+    """One streamed turn in chat `sid`; an ask is answered `answer` (and, for
+    Always, kept in `scope` at the width `rule_index`). An ask with no answer
+    to give fails the test."""
+    seen = []
+    with c.stream("POST", "/api/chat/stream", json={"session": sid, "prompt": "go"}) as r:
+        for line in r.iter_lines():
+            if not line.strip():
+                continue
+            ev = json.loads(line)
+            seen.append(ev)
+            if ev["type"] == "permission":
+                assert answer, f"asked when it should not have: {ev}"
+                body = {"id": ev["id"], "answer": answer}
+                if scope:
+                    body.update(scope=scope, rule=ev["rules"][rule_index])
+                got = c.post("/api/permit/answer", json=body)
+                assert got.status_code == 200, got.text
+    return seen
+
+
+def test_always_in_a_chat_or_a_project_is_kept_there_and_answers_the_next_ask(live, monkeypatch):
+    base, tmp = live
+    monkeypatch.setenv("FAKE_CLAUDE_ASK", json.dumps(MCP_ASK))
+    with httpx.Client(base_url=base, timeout=60) as c:
+        sid = c.post("/api/sessions", json={"folder": "den"}).json()["id"]
+        seen = _chat_turn(c, sid, "always", "chat", rule_index=1)
+        ask = next(e for e in seen if e["type"] == "permission")
+        assert ask["rules"] == ["mcp__wren-workbench__recall", "mcp__wren-workbench__*"]
+        assert ask["scopes"] == ["chat", "project", "all"]
+        assert c.get(f"/api/sessions/{sid}").json()["settings"]["allowed_tools"] == ["mcp__wren-workbench__*"]
+        assert not (tmp / "symposium-prefs.json").exists(), "a chat's Always is not every chat's"
+
+        # the fake asks every turn; in this chat the rule now answers it, no card
+        again = _chat_turn(c, sid)
+        assert next(e for e in again if e["type"] == "done")["response"] == "asked: allow"
+
+        # another chat in the project still asks; Always for the project keeps it there
+        other = c.post("/api/sessions", json={"folder": "den"}).json()["id"]
+        seen = _chat_turn(c, other, "always", "project")
+        assert [e for e in seen if e["type"] == "permission"]
+        kept = json.loads((tmp / "symposium-prefs.json").read_text(encoding="utf-8"))
+        den = next(p for p in kept["projects"] if p["name"] == "den")
+        assert den["allowed_tools"] == ["mcp__wren-workbench__recall"] and "claude_tools" not in kept
+        third = c.post("/api/sessions", json={"folder": "den"}).json()["id"]
+        assert next(e for e in _chat_turn(c, third) if e["type"] == "done")["response"] == "asked: allow", \
+            "a new chat in the project is covered by the project's rule"
+        assert c.post("/api/permit/answer", json={"id": "x", "answer": "always", "scope": "galaxy"}).status_code == 400

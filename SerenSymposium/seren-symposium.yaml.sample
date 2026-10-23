@@ -89,12 +89,25 @@ claude:
   permission_mode: ""       # -p can't ask at a terminal, so...
   ask: true                 # ...a tool not listed below is asked about IN THE WINDOW (Allow once / Always / Deny)
   allowed_tools: []         # what it may use without asking, e.g. ["mcp__workbench__*"]
+  # Both are EVERY CHAT's: the carabiner's session: block sits under them, a
+  # project's and a chat's own over them (the most particular mode wins; the
+  # allow lists add up unless a project or chat says not to inherit).
   add_dirs: []              # folders it may work in besides cwd
   carabiner: ""             # the Claude Code carabiner's claude.yaml, shown in Settings; blank looks for it
   timeout_seconds: 900
   save_files: true          # may write into the chat's own folder - a drawing, notes - and only there
   handover_max_chars: 100000  # how much of the chat a NEW claude conversation is handed
   # framing: "..."          # what each turn is told about the window ({files} = the chat's folder)
+  mcp_servers: []           # only these MCP servers (names from ~/.claude.json) are loaded, e.g. ["wren-workbench"];
+                            # empty = every server the CLI knows, the account's connectors included
+  # The preface: Margin's page (GET /preface) read to the model as its system
+  # prompt IN PLACE of the CLI's own; the folder's prompt and the framing are
+  # appended to it. Blank = the CLI keeps its prompt. A Margin that does not
+  # answer costs the page, never the turn.
+  preface:
+    url: ""                 # Margin's base url, e.g. http://nuc:7251
+    bearer_token: ""        # or bearer_token_env / bearer_token_keyring
+    file: ""                # or a file on this box (wins over url)
 
 # ── Files and screen share ─────────────────────────────────────────────
 files:

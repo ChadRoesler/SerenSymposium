@@ -228,3 +228,35 @@ def test_the_shell_follows_a_live_turn_and_only_locks_that_chat():
     assert "ANSWERING.has(current.id)" in script, "locked per chat, not one switch for the window"
     assert "if (current.answering) followLive(id);" in script
     assert "let busy" not in script and "busy = true" not in script, "the one global lock is gone"
+
+
+def test_a_chat_opened_mid_answer_says_what_it_is_answering(make_client, tmp_path, monkeypatch):
+    """The session file has the question only once the answer is in; until
+    then GET /api/sessions/{id} carries it as `pending`, so a window that opens
+    the chat mid-answer can draw it (22 Oct 2026)."""
+    gate = tmp_path / "let-it-finish"
+    monkeypatch.setenv("FAKE_CLAUDE_WAIT", str(gate))
+    tc = make_client(config())
+    sid = tc.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    assert tc.get(f"/api/sessions/{sid}").json()["pending"] is None, "nothing coming, nothing pending"
+
+    asker = _InThread(lambda: tc.post("/api/chat/stream", json={"session": sid, "prompt": "think about it"}))
+    asker.start()
+    assert _until(lambda: tc.get(f"/api/sessions/{sid}").json()["answering"])
+    pending = tc.get(f"/api/sessions/{sid}").json()["pending"]
+    assert pending["prompt"] == "think about it" and pending["retry"] is False and pending["source"] is None
+    gate.write_text("go")
+    asker.join(15)
+    s = tc.get(f"/api/sessions/{sid}").json()
+    assert s["pending"] is None and [m["content"] for m in s["messages"]] == ["think about it", "Hello there"]
+
+    # a retry asks no new question: it says so, and the window takes the old answer off
+    gate.unlink()
+    asker = _InThread(lambda: tc.post("/api/chat/stream", json={"session": sid, "retry": True}))
+    asker.start()
+    assert _until(lambda: tc.get(f"/api/sessions/{sid}").json()["answering"])
+    pending = tc.get(f"/api/sessions/{sid}").json()["pending"]
+    assert pending["retry"] is True and pending["prompt"] == "think about it"
+    gate.write_text("go")
+    asker.join(15)
+    assert len(tc.get(f"/api/sessions/{sid}").json()["messages"]) == 2, "the retry replaced the answer"

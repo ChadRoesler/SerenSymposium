@@ -29,6 +29,9 @@ let CFG = null, tab = "chat", folder = "", SESSIONS = [], current = null, drawin
 // Files waiting in the tray: {id, name, size, type, file?, url?, stored?} -
 // `stored` once it is on the server (an edit puts a message's files back).
 let PENDING = [];
+// A new chat's own settings and name, set (⚙) before its first message: kept
+// here, sent with that message, never an empty chat on the server meanwhile.
+let DRAFT = { settings: {}, title: "" };
 // Only this window remembers these - which projects are folded, the tab, the
 // screen-share choices. Projects themselves are kept by Symposium (prefs.py).
 const local = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
@@ -39,8 +42,12 @@ let FOLDED = new Set(local("symposium.folded", []));
 // other chat is open, and the answer keeps coming whether or not anyone is
 // looking at it (the server runs the turn; a window only follows it).
 let ANSWERING = new Set();
-// The one live stream this window is reading, if any: {sid, ctrl}.
+// The one live stream this window is reading, if any: {sid, ctrl, el, asked,
+// retry} - the answer's bubble and the question's, so a redraw of the chat
+// mid-answer puts both back instead of losing them.
 let FOLLOWER = null;
+// The question drawn for a turn found running when its chat was opened.
+let ASKED_EL = null;
 const PLACEHOLDER = $("#input").placeholder;
 const chatBusy = () => drawing || (current != null && ANSWERING.has(current.id));
 function lockComposer() {
@@ -112,11 +119,29 @@ async function adoptOldProjects() {
   CFG = await (await fetch("/api/config")).json();
 }
 
-async function newProject(name) {
-  await call("POST", "/api/projects", { name });
+async function newProject(body) {
+  await call("POST", "/api/projects", body);
   await reloadConfig();
-  stopFollowing(); FOLDED.delete(name); folder = name; current = null;
-  drawSide(); drawLog(); lockComposer(); if (tab === "settings") drawSettings();
+  FOLDED.delete(body.name); newChatIn(body.name);
+  if (tab === "settings") drawSettings();
+}
+
+// A new chat in `name`: nothing on the server until its first message, and
+// whatever is set for it before then (⚙) waits in DRAFT and goes with it.
+function newChatIn(name) {
+  stopFollowing(); folder = name; current = null; DRAFT = { settings: {}, title: "" };
+  drawSide(); drawLog(); lockComposer();
+}
+
+// The session a message lands in: the open chat's, or a new one made now,
+// carrying what was set for it while it was only a draft.
+async function ensureSession() {
+  if (!current) {
+    current = await call("POST", "/api/sessions", { folder, title: DRAFT.title || "", settings: DRAFT.settings });
+    DRAFT = { settings: {}, title: "" };
+    await refresh();
+  }
+  return current;
 }
 
 const presetFor = name => CFG.folders.find(f => f.name === name) || {};
@@ -125,7 +150,7 @@ function drawSide() {
   $("#side").innerHTML = folderNames().map(name => {
     const f = presetFor(name);
     const bits = [f.voice === "claude" ? voiceName("claude") : null, f.model,
-                  f.temperature != null ? `t=${f.temperature}` : null].filter(Boolean).join(" · ");
+                  f.voice !== "claude" && f.temperature != null ? `t=${f.temperature}` : null].filter(Boolean).join(" · ");
     const chats = SESSIONS.filter(s => s.folder === name);
     const open = !FOLDED.has(name) || (current && current.folder === name);
     const rows = open ? chats.map(s => {
@@ -150,20 +175,14 @@ $("#side").onclick = async e => {
   const row = e.target.closest("[data-s]");
   if (row) return openSession(row.dataset.s);
   const add = e.target.closest("[data-new]");
-  if (add) { stopFollowing(); folder = add.dataset.new; current = null; drawSide(); drawLog(); lockComposer(); $("#input").focus(); return; }
+  if (add) { newChatIn(add.dataset.new); $("#input").focus(); return; }
   const fold = e.target.closest("[data-fold]");
   if (fold) {
     const name = fold.dataset.fold;
     FOLDED.has(name) ? FOLDED.delete(name) : FOLDED.add(name);
     keep("symposium.folded", [...FOLDED]); return drawSide();
   }
-  if (e.target.closest("[data-project]")) {
-    const name = (prompt("Name the new project:") || "").trim();
-    if (!name) return;
-    if (folderNames().includes(name)) { folder = name; current = null; drawSide(); drawLog(); return; }
-    try { await newProject(name); $("#input").focus(); } catch (ex) { alert(ex.message); }
-    return;
-  }
+  if (e.target.closest("[data-project]")) return openNewProject();
   if (e.target.closest("[data-import]")) $("#importer").click();
 };
 
@@ -292,7 +311,7 @@ async function deleteChat(id) {
   const s = SESSIONS.find(x => x.id === id);
   if (!sure(`Delete "${s?.title || "untitled"}" and its files? This can't be undone.`)) return;
   try { await call("DELETE", `/api/sessions/${id}`); } catch (ex) { return alert(ex.message); }
-  if (current?.id === id) { current = null; drawLog(); }
+  if (current?.id === id) newChatIn(current.folder);
   await refresh();
 }
 
@@ -317,11 +336,12 @@ const toBottom = (force = false) => { if (force) pinned = true; if (pinned) $("#
 $("#log").addEventListener("load", e => { if (e.target.tagName === "IMG") toBottom(); }, true);
 
 function drawLog() {
-  $("#titlebar").hidden = !current;
+  $("#titlebar").hidden = false;
+  drawTitlebar();
   $("#log").innerHTML = "";
   drawFiles();
   if (!current) {
-    const v = presetFor(folder).voice === "claude" ? voiceName("claude") : "a local model";
+    const v = voiceOfChat() === "claude" ? voiceName("claude") : "a local model";
     $("#log").innerHTML = `<div class="blank">New chat in <b>${esc(folder || "chats")}</b>, answered by ${esc(v)}.<br>`
       + `It's kept once the first answer comes back.</div>`;
     return;
@@ -329,6 +349,22 @@ function drawLog() {
   if (document.activeElement !== $("#title")) { $("#title").value = current.title; setRenaming(false); }
   const msgs = current.messages;
   msgs.forEach((m, i) => $("#log").append(bubble(m, i, msgs.length)));
+  // A turn still coming in this chat: the question it is answering, then the
+  // answer as far as it has got, whether this window sent it or came back to
+  // it (22 Oct 2026: opened mid-answer, the question was missing until the
+  // answer landed). A retry asks nothing new; the answer it replaces goes.
+  const following = FOLLOWER?.sid === current.id ? FOLLOWER : null;
+  const pending = following ? null : (current.answering ? current.pending : null);
+  ASKED_EL = null;
+  if ((following?.retry || pending?.retry) && msgs.at(-1)?.role === "assistant") $("#log").lastChild?.remove();
+  if (following) {
+    if (following.asked) $("#log").append(following.asked);
+    $("#log").append(following.el);
+  } else if (pending && !pending.retry) {
+    ASKED_EL = bubble({ role: "user", content: pending.prompt || "", files: pending.files || [],
+                        source: pending.source, by: pending.by }, -1, 0, { bare: true });
+    $("#log").append(ASKED_EL);
+  }
   toBottom(true);
 }
 
@@ -343,7 +379,8 @@ function whoName(m) {
 }
 
 function voiceOfChat() {
-  const v = current?.settings?.voice || presetFor(current ? current.folder : folder).voice || "lodestar";
+  const v = (current ? current.settings?.voice : DRAFT.settings.voice)
+         || presetFor(current ? current.folder : folder).voice || "lodestar";
   return v === "claude" && CFG.claude?.available ? "claude" : "lodestar";
 }
 
@@ -370,10 +407,15 @@ function bubble(m, i, count, opts = {}) {
   d.innerHTML = `<div class="who">${esc(opts.who || whoName(m))}`
               + (fed ? `<span class="fed-tag" title="fed into the chat by ${esc(m.source)} - not typed by you">plugin</span>` : "")
               + `</div>`;
-  const [think, words] = asked ? ["", m.content] : splitThink(m.content);
-  const steps = [...(think ? [{ kind: "thinking", text: think }] : []), ...(m.meta?.steps || [])];
-  if (steps.length) d.append(stepsEl(steps));
-  d.append(renderMd(words, current?.id));
+  if (!asked && (m.meta?.steps || []).some(s => s.kind === "said")) {
+    // Said in pieces (claude): the words in order, the steps folded between.
+    d.append(partsEl(m.meta.steps, current?.id));
+  } else {
+    const [think, words] = asked ? ["", m.content] : splitThink(m.content);
+    const steps = [...(think ? [{ kind: "thinking", text: think }] : []), ...(m.meta?.steps || [])];
+    if (steps.length) d.append(stepsEl(steps));
+    d.append(renderMd(words, current?.id));
+  }
   const atts = attachmentsEl(m.files, current?.id, asked ? "" : m.content);
   if (atts) d.append(atts);
   if (!opts.bare) {
@@ -401,7 +443,9 @@ function stepHtml(s) {
   if (s.kind === "thinking") return `<div class="step think">${esc(s.text)}</div>`;
   if (s.kind === "asked") {
     return `<div class="step asked">${icon("gear")}<span>asked to use <code>${esc(s.tool)}</code> `
-         + `<span class="sum">${esc(s.summary || "")}</span> - <b>${esc(ANSWERED[s.answer] || s.answer)}</b></span></div>`;
+         + `<span class="sum">${esc(s.summary || "")}</span> - <b>${esc(ANSWERED[s.answer] || s.answer)}</b>`
+         + (s.answer === "always" && s.scope ? ` (<code>${esc(s.rule || "")}</code> in ${esc(SCOPE_NAMES[s.scope] || s.scope)})` : "")
+         + `</span></div>`;
   }
   const mark = s.ok === undefined ? "…" : s.ok ? "✓" : "✗";
   return `<div class="step tool${s.ok === false ? " bad" : ""}"><span class="mark">${mark}</span>`
@@ -426,6 +470,29 @@ function stepsEl(steps, liveNow = false, el = null) {
   d.innerHTML = `<summary>${esc(stepsLine(steps, liveNow))}</summary><div class="step-list">${steps.map(stepHtml).join("")}</div>`;
   d.open = open;
   return d;
+}
+
+// An answer said in pieces (22 Oct 2026): each piece of its words where it was
+// said, and the thinking and tools between pieces folded in their own place,
+// instead of every step above and only the last words below. While it is
+// coming, the last group of steps says what is happening now. Folds keep
+// whether they are open across a redraw.
+function partsEl(parts, sid, liveNow = false, box = null) {
+  box = box || Object.assign(document.createElement("div"), { className: "parts" });
+  const old = box._groups || [], groups = [], kids = [];
+  let run = [];
+  const flush = last => {
+    if (!run.length) return;
+    const g = stepsEl(run, liveNow && last, old[groups.length] || null);
+    groups.push(g); kids.push(g); run = [];
+  };
+  for (const p of parts) {
+    if (p.kind === "said") { flush(false); kids.push(renderMd(p.text, sid)); } else run.push(p);
+  }
+  flush(true);
+  box._groups = groups;
+  box.replaceChildren(...kids);
+  return box;
 }
 
 function actionsEl(m, i, count) {
@@ -733,13 +800,8 @@ async function send(ask) {
   const given = { prompt: ask.prompt, pending: PENDING };
   // Only the newest answer can be retried, and nothing moves while one is coming.
   $("#log").querySelectorAll(".acts").forEach(b => b.remove());
-  let sid = null;
+  let sid = null, mine = null, live = null, sent = false;
   try {
-    // A session exists before its first message so the answer and the files
-    // have somewhere to land; one whose first turn fails is left empty.
-    if (!current) { current = await call("POST", "/api/sessions", { folder }); await refresh(); }
-    sid = current.id;
-    ANSWERING.add(sid); lockComposer(); drawSide();
     if (ask.retry) {
       // The answer being retried comes off the screen; it stays on disk until
       // its replacement is in.
@@ -747,22 +809,44 @@ async function send(ask) {
       if (current.messages.at(-1)?.role === "assistant") $("#log").lastChild?.remove();
       $("#log").querySelectorAll(".acts").forEach(b => b.remove());
     } else {
+      // Shown at once, before any round trip (22 Oct 2026: "it takes a bit to
+      // roll up"): your words, and the files on their way up by name.
+      $("#log").querySelector(".blank")?.remove();
+      mine = bubble({ role: "user", content: ask.prompt || "" }, -1, 0, { bare: true });
+      if (PENDING.length) mine.append(goingUp(PENDING));
+      $("#log").append(mine);
+      $("#input").value = "";
+    }
+    // ...and the answer starting, with a line saying what it is doing.
+    live = liveBubble();
+    $("#log").append(live.el); toBottom(true);
+    // A session exists before its first message so the answer and the files
+    // have somewhere to land; one whose first turn fails is left empty.
+    await ensureSession();
+    sid = current.id;
+    ANSWERING.add(sid); lockComposer(); drawSide(); drawTitlebar();
+    if (!ask.retry) {
       ask.files = await uploadPending(current.id);
       if (!ask.screen && screenRides()) ask.screen = true;
-      $("#log").querySelector(".blank")?.remove();
-      $("#log").append(bubble({ role: "user", content: ask.prompt || "", files: ask.files }, -1, 0, { bare: true }));
-      toBottom(true);
-      $("#input").value = ""; PENDING = []; drawTray();
+      if (ask.files.length) {
+        const full = bubble({ role: "user", content: ask.prompt || "", files: ask.files }, -1, 0, { bare: true });
+        mine.replaceWith(full); mine = full;
+      }
+      PENDING = []; drawTray();
     }
     // true: kept. false: it failed, so what you sent goes back in the
     // composer. null: you opened another chat meanwhile - the answer is still
     // coming over there, so nothing is given back and nothing is drawn here.
-    const kept = await stream({ session: sid, ...ask });
+    sent = true;
+    const kept = await stream({ session: sid, ...ask }, live, mine, !!ask.retry);
+    live = null;
     if (kept) {
       given.pending.forEach(p => p.url && URL.revokeObjectURL(p.url));
       if (ask.screen) { SCREEN.sentAt = SCREEN.at; drawTray(); drawCaption(); }
     } else if (kept === false) giveBack(ask, given);
   } catch (ex) {
+    if (live) { live.stop(); live.el.remove(); }
+    if (!sent && mine) mine.remove();               // nothing went: the composer gets it back
     if (sid) ANSWERING.delete(sid);
     if (!sid || current?.id === sid) {
       $("#log").append(bubble({ role: "assistant", content: [ex.message, ex.body?.detail, ex.body?.hint].filter(Boolean).join(" - ") },
@@ -789,7 +873,7 @@ function stopFollowing() {
 
 // Send, and follow the answer. true: kept; false: it failed; null: this window
 // stopped watching (another chat was opened) - the server keeps the turn going.
-async function stream(body) {
+async function stream(body, live = null, asked = null, retry = false) {
   const ctrl = new AbortController();
   const r = await fetch("/api/chat/stream", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: ctrl.signal });
@@ -797,7 +881,7 @@ async function stream(body) {
     const j = await r.json().catch(() => ({}));
     throw Object.assign(new Error(j.error || `HTTP ${r.status}`), { body: j });
   }
-  return follow(body.session, r, ctrl);
+  return follow(body.session, r, ctrl, live, asked, retry);
 }
 
 // An answer already coming in this chat - opened, or come back to, mid-answer:
@@ -808,23 +892,34 @@ async function followLive(sid) {
   try { r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/live`, { signal: ctrl.signal }); } catch { return null; }
   if (r.status === 404) { ANSWERING.delete(sid); lockComposer(); drawSide(); return null; }
   if (!r.ok) return null;
-  return follow(sid, r, ctrl);
+  return follow(sid, r, ctrl, null, ASKED_EL, !!current?.pending?.retry);
 }
 
 // Read a turn's events into a live bubble. The bubble belongs to the chat
 // `sid`; if you leave for another chat the follower is aborted (stopFollowing)
 // and nothing more is drawn or given back here - the turn itself goes on.
-async function follow(sid, r, ctrl) {
-  FOLLOWER = { sid, ctrl };
-  const live = bubble({ role: "assistant", content: "" }, -1, 0,
-                      { cls: "live", bare: true, who: voiceName(voiceOfChat()) });
-  $("#log").append(live);
+async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
+  const status = pre || liveBubble();
+  const live = status.el;
+  FOLLOWER = { sid, ctrl, el: live, asked, retry };
+  if (!live.isConnected) $("#log").append(live);
   let md = live.querySelector(".md");
   let raw = "", tool = null, fresh = false, queued = false;
   const steps = [];
   let stepsBox = null;
+  // Claude's answer comes in pieces with steps between them, and is drawn in
+  // that order rather than started over after every tool (22 Oct 2026: what
+  // it said between tools used to vanish). A local model's preamble still goes.
+  const interleave = voiceOfChat() === "claude";
+  const parts = [];
+  let partsBox = null;
   const paint = () => {
     queued = false;
+    if (interleave) {
+      partsBox = partsEl(parts, current?.id, true, partsBox);
+      if (!partsBox.isConnected) md.replaceWith(partsBox);
+      return toBottom();
+    }
     const [think, words] = splitThink(raw);
     const shown = think ? [{ kind: "thinking", text: think }, ...steps] : steps;
     if (shown.length) {
@@ -839,34 +934,50 @@ async function follow(sid, r, ctrl) {
   let buf = "", failed = null, kept = false;
   const handle = ev => {
     if (ev.type === "chunk") {
+      status.set("writing");
+      if (interleave) {
+        const last = parts.at(-1);
+        if (last?.kind === "said") last.text += ev.content; else parts.push({ kind: "said", text: ev.content });
+        return later();
+      }
       // After a tool runs, Lodestar starts the answer over: what came before
       // was the preamble to the call, not part of the reply.
       if (fresh) { raw = ""; fresh = false; }
       raw += ev.content;
       if (!queued) { queued = true; requestAnimationFrame(paint); }
     } else if (ev.type === "tool_status") {
+      status.set(`using ${toolName(ev.tool)}`);
+      if (interleave) return;
       tool = tool || live.insertBefore(Object.assign(document.createElement("div"), { className: "tool" }), md);
       tool.textContent = `calling ${ev.tool}…`; fresh = true;
     } else if (ev.type === "thinking") {
-      const last = steps.at(-1);
-      if (last?.kind === "thinking") last.text += ev.content; else steps.push({ kind: "thinking", text: ev.content });
+      status.set("thinking");
+      const into = interleave ? parts : steps, last = into.at(-1);
+      if (last?.kind === "thinking") last.text += ev.content; else into.push({ kind: "thinking", text: ev.content });
       later();
     } else if (ev.type === "tool_call") {
-      steps.push({ kind: "tool", id: ev.id, tool: ev.tool, summary: ev.summary }); later();
+      (interleave ? parts : steps).push({ kind: "tool", id: ev.id, tool: ev.tool, summary: ev.summary }); later();
     } else if (ev.type === "tool_result") {
-      const s = steps.find(x => x.id === ev.id);
+      const s = (interleave ? parts : steps).find(x => x.id === ev.id);
       if (s) { s.ok = ev.ok; s.result = ev.preview; later(); }
+      status.set("thinking");
     } else if (ev.type === "permission") {
-      live.insertBefore(permitCard(ev), md); toBottom(true);
+      status.set("waiting on you");
+      // Interleaved, the pieces are redrawn in their own box; the ask goes
+      // under them, by the status line, where the eye already is.
+      live.insertBefore(permitCard(ev), interleave ? status.line : md); toBottom(true);
     } else if (ev.type === "permission_answered") {
+      status.set("thinking");
       // Replayed to a window that came back: the ask, and that it was answered.
       const card = live.querySelector(`.permit[data-permit-id="${ev.id}"]`);
       if (card && !card.classList.contains("answered")) {
         card.classList.add("answered", ev.answer);
-        card.querySelector(".p-buttons").innerHTML = `<b>${esc(ANSWERED[ev.answer] || ev.answer)}</b>`;
+        card.querySelector(".p-buttons").innerHTML = answeredLine(ev);
+        card.querySelector(".p-always")?.remove();
       }
     } else if (ev.type === "done") {
-      raw = ev.response ?? raw; paint(); tool?.remove();
+      if (!interleave) raw = ev.response ?? raw;
+      paint(); tool?.remove(); status.set("keeping it");
     } else if (ev.type === "saved") {
       // The server has it. Redraw from the file - if this chat is still the
       // one on screen; otherwise the sidebar is enough.
@@ -895,17 +1006,72 @@ async function follow(sid, r, ctrl) {
   }
   if (FOLLOWER?.ctrl === ctrl) FOLLOWER = null;
   await Promise.all(pending);
+  status.stop();
   if (left) return kept ? true : null;
   if (!kept && !failed) failed = { error: "the answer stopped before it was kept" };
   if (failed) {
     // Shown, never kept: the session file only ever gets turns that came back.
     ANSWERING.delete(sid); lockComposer(); drawSide();
     live.classList.add("err"); live.classList.remove("live"); tool?.remove();
-    raw = [raw && `${raw}\n\n`, failed.error, failed.detail, failed.hint].filter(Boolean).join(" ");
+    const why = [failed.error, failed.detail, failed.hint].filter(Boolean).join(" ");
+    if (interleave) parts.push({ kind: "said", text: why });
+    else raw = [raw && `${raw}\n\n`, why].filter(Boolean).join(" ");
     paint();
   }
   return kept;
 }
+
+// The answer as it starts (22 Oct 2026): its bubble at once, and a line under
+// it saying what it is doing and for how long, until it is done - "something
+// more noticeable when you're responding" than the sidebar's dot. The
+// window's title says so too, for when Symposium is behind something else.
+const TITLE = document.title;
+let LIVE_COUNT = 0;
+const toolName = t => String(t || "a tool").split("__").pop();
+const goingUp = list => Object.assign(document.createElement("div"), {
+  className: "going-up", textContent: `sending ${list.map(p => p.name).join(", ")}` });
+
+function liveBubble() {
+  const el = bubble({ role: "assistant", content: "" }, -1, 0,
+                    { cls: "live", bare: true, who: voiceName(voiceOfChat()) });
+  const line = Object.assign(document.createElement("div"), { className: "live-status" });
+  line.innerHTML = `<span class="ls-dots"><i></i><i></i><i></i></span><span class="ls-what">thinking</span><span class="ls-time">0s</span>`;
+  el.append(line);
+  const t0 = Date.now();
+  const timer = setInterval(() => {
+    line.querySelector(".ls-time").textContent = `${Math.round((Date.now() - t0) / 1000)}s`;
+  }, 1000);
+  LIVE_COUNT++; document.title = `\u25CF ${TITLE}`;
+  let stopped = false;
+  return {
+    el, line,
+    set(what) { const w = line.querySelector(".ls-what"); if (w.textContent !== what) w.textContent = what; },
+    stop() {
+      if (stopped) return;
+      stopped = true; clearInterval(timer); line.remove();
+      if (--LIVE_COUNT <= 0) { LIVE_COUNT = 0; document.title = TITLE; }
+    },
+  };
+}
+
+// The claude CLI's permission modes as the window offers them (22 Oct 2026:
+// the CLI's list; bypassPermissions is the yaml's or the carabiner's to say,
+// never one click here). "default" is the older name of manual, shown only
+// where it is already set.
+const MODE_LABELS = {
+  manual: "manual - asks before anything that changes things",
+  acceptEdits: "acceptEdits - edits files without asking",
+  auto: "auto - a classifier decides what needs asking",
+  plan: "plan - looks, never touches",
+  dontAsk: "dontAsk - never asks; refuses what is not allowed",
+  default: "default - the older name for manual",
+};
+function modeOptions(blank, value) {
+  const keys = ["manual", "acceptEdits", "auto", "plan", "dontAsk", ...(value === "default" ? ["default"] : [])];
+  return `<option value="">${esc(blank)}</option>`
+    + keys.map(k => `<option value="${k}"${value === k ? " selected" : ""}>${esc(MODE_LABELS[k])}</option>`).join("");
+}
+const SCOPE_NAMES = { chat: "this chat", project: "this project", all: "every chat" };
 
 // May I? Claude wants a tool that is not on its list, and waits on you.
 function permitCard(ev) {
@@ -914,20 +1080,42 @@ function permitCard(ev) {
   card.innerHTML = `<div class="p-ask">${icon("gear")}<span><b>${esc(voiceName("claude"))}</b> wants to use <code>${esc(ev.tool)}</code></span></div>`
     + `<pre class="p-what">${esc(ev.summary)}</pre>`
     + `<div class="p-buttons"><button type="button" class="primary" data-permit="once">Allow once</button>`
-    + `<button type="button" class="ghost" data-permit="always" title="from now on, without asking">Always: <code>${esc(ev.rule)}</code></button>`
-    + `<button type="button" class="ghost danger" data-permit="deny">Deny</button></div>`;
+    + `<button type="button" class="ghost danger" data-permit="deny">Deny</button></div>`
+    + alwaysRow(ev);
   return card;
 }
+
+// Always, chosen in two parts (22 Oct 2026): how wide - this folder or every
+// read, this MCP tool or its whole server - and where it is kept: this chat,
+// this project, or every chat.
+function alwaysRow(ev) {
+  const rules = ev.rules?.length ? ev.rules : [ev.rule], scopes = ev.scopes || ["all"];
+  return `<div class="p-always"><span class="muted">Always allow</span>`
+    + (rules.length > 1
+      ? `<select class="p-rule" title="how wide">${rules.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join("")}</select>`
+      : `<code class="p-rule-one">${esc(rules[0])}</code>`)
+    + `<span class="muted">in</span>`
+    + scopes.map(s => `<button type="button" class="ghost" data-permit="always" data-scope="${s}" `
+        + `title="from now on, without asking, in ${esc(SCOPE_NAMES[s])}">${esc(SCOPE_NAMES[s])}</button>`).join("")
+    + `</div>`;
+}
+const answeredLine = r => `<b>${esc(ANSWERED[r.answer] || r.answer)}</b>`
+  + (r.answer === "always" && r.rule ? ` <span class="muted">- <code>${esc(r.rule)}</code> in ${esc(SCOPE_NAMES[r.scope] || "every chat")}</span>` : "");
 
 $("#log").addEventListener("click", async e => {
   const b = e.target.closest("[data-permit]"), card = b?.closest(".permit");
   if (!card) return;
-  card.querySelectorAll("button").forEach(x => { x.disabled = true; });
+  card.querySelectorAll("button, select").forEach(x => { x.disabled = true; });
+  const body = { id: card.dataset.permitId, answer: b.dataset.permit };
+  if (b.dataset.permit === "always") {
+    body.scope = b.dataset.scope;
+    body.rule = card.querySelector(".p-rule")?.value || card.querySelector(".p-rule-one")?.textContent;
+  }
   try {
-    const r = await call("POST", "/api/permit/answer", { id: card.dataset.permitId, answer: b.dataset.permit });
+    const r = await call("POST", "/api/permit/answer", body);
     card.classList.add("answered", b.dataset.permit);
-    card.querySelector(".p-buttons").innerHTML = `<b>${esc(ANSWERED[r.answer])}</b>`
-      + (r.answer === "always" ? ` <span class="muted">- <code>${esc(r.rule)}</code> is on the list now</span>` : "");
+    card.querySelector(".p-buttons").innerHTML = answeredLine(r);
+    card.querySelector(".p-always")?.remove();
   } catch (ex) {
     card.querySelector(".p-buttons").textContent = `could not answer: ${ex.message}`;
   }
@@ -954,10 +1142,31 @@ $("#title").addEventListener("keydown", e => {
   if (e.key === "Escape") { $("#title").value = current.title; setRenaming(false); }
 });
 
+// The bar over a chat, a new one included (22 Oct 2026: "the top bar is
+// empty"): its name, and which project, voice and model it answers with, the
+// project's settings one click away without leaving the chat.
+function drawTitlebar() {
+  const fresh = !current;
+  for (const id of ["#rename", "#copy-all", "#del"]) $(id).hidden = fresh;
+  if (fresh) { setRenaming(false); $("#title").value = DRAFT.title || ""; $("#title").placeholder = "new chat"; }
+  else $("#title").placeholder = "untitled";
+  const where = current ? current.folder : folder, preset = presetFor(where);
+  const model = (current ? current.settings?.model_override : DRAFT.settings.model_override) || preset.model || "";
+  const chip = $("#chat-project");
+  chip.innerHTML = `${icon(where ? "krater-full" : "krater")}<span>${esc(where || "no project")}</span>`
+                 + `<small>${esc(voiceName(voiceOfChat()))}${model ? ` · ${esc(String(model).replace(/\.gguf$/i, ""))}` : ""}</small>`;
+  chip.title = where ? `${where}: this project's settings` : "not in a project: this chat's own settings";
+}
+$("#chat-project").onclick = () => {
+  const where = current ? current.folder : folder;
+  if (where) return openProjectSheet(where);
+  drawChatSettings(); $("#chat-settings").showModal();
+};
+
 $("#del").onclick = async () => {
   if (!sure(`Delete "${current.title || "untitled"}" and its files? This can't be undone.`)) return;
   try { await call("DELETE", `/api/sessions/${current.id}`); } catch (ex) { return alert(ex.message); }
-  current = null; await refresh(); drawLog();
+  newChatIn(current.folder); await refresh();
 };
 
 // ── Files panel: everything this chat carried, newest first ─────────────
@@ -1186,6 +1395,7 @@ $("#screen-preview").addEventListener("click", e => { if (e.target.tagName === "
 
 function drawVoices() {
   const claude = CFG.claude || {};
+  $("#claude-models").innerHTML = (claude.models || []).map(m => `<option value="${esc(m)}">`).join("");
   $("#s-voice").innerHTML = `<option value="">project's</option>`
     + `<option value="lodestar">local model (lodestar)</option>`
     + `<option value="claude"${claude.available ? "" : " disabled"}>${esc(voiceName("claude"))}`
@@ -1202,26 +1412,99 @@ async function loadModels() {
   } catch { /* no model list is fine; the field still takes a name */ }
 }
 
-// One chat's settings: the sheet behind ⚙ in its title bar.
+// One chat's settings: the sheet behind ⚙ in its title bar. A new chat has
+// them too (22 Oct 2026): what is set before its first message waits in DRAFT
+// and goes with that message. Claude takes no temperature, max tokens or
+// repeat penalty, so for a chat it answers they are not shown, and the model
+// field suggests Claude's models instead of the local ones.
+const LOCAL_ONLY = ["temperature", "max_tokens", "repeat_penalty"];
+const CHAT_NOTE = "Blank means the project's value (shown greyed); the system prompt is added after the project's. "
+  + "Saved as you leave each field.";
 function drawChatSettings() {
-  if (!current) return $("#chat-settings").close();
   loadModels();
-  const preset = presetFor(current.folder);
-  $("#s-title").value = current.title;
+  const own = current ? current.settings : DRAFT.settings, where = current ? current.folder : folder;
+  const preset = presetFor(where);
+  $("#s-title").value = current ? current.title : DRAFT.title;
   $("#s-move").innerHTML = [...new Set([...folderNames(), ""])].map(n => `<option value="${esc(n)}">${esc(n || "no project")}</option>`).join("");
-  $("#s-move").value = current.folder;
+  $("#s-move").value = where;
   for (const k of SETTINGS) {
-    const el = $(`#s-${k}`), own = current.settings[k], inherited = preset[PRESET[k] || k];
-    el.value = own ?? "";
+    const el = $(`#s-${k}`), inherited = preset[PRESET[k] || k];
+    el.value = own[k] ?? "";
     el.placeholder = inherited != null && inherited !== "" ? String(inherited) : "default";
   }
   $("#s-voice").options[0].textContent = `project's (${voiceName(preset.voice || "lodestar")})`;
+  // The prompts add up (22 Oct 2026): its project's, then this chat's after it.
+  const inherit = own.system_inherit !== false, theirs = String(preset.system_prompt || "").trim();
+  $("#s-system_inherit").checked = inherit;
+  $("#s-system_prompt").placeholder = !theirs ? "none"
+    : inherit ? `added after its project's: ${theirs.slice(0, 90)}${theirs.length > 90 ? "…" : ""}`
+    : "this one only; its project's prompt is left out";
+  const claude = voiceOfChat() === "claude";
+  for (const k of LOCAL_ONLY) { $(`#s-${k}`).hidden = claude; $(`label[for="s-${k}"]`).hidden = claude; }
+  $("#s-model_override").setAttribute("list", claude ? "claude-models" : "models");
+  if (claude && !preset.model) $("#s-model_override").placeholder = "the CLI's default";
+  // Claude's permissions for this chat, over its project's, every chat's and
+  // the carabiner's, and what a turn here would run with (22 Oct 2026).
+  document.querySelectorAll("#set-chat-form .claude-only").forEach(el => { el.hidden = !claude; });
+  if (claude) {
+    $("#s-permission_mode").innerHTML = modeOptions("its project's, every chat's or the carabiner's", own.permission_mode || "");
+    $("#s-allowed_tools").value = (own.allowed_tools || []).join("\n");
+    $("#s-tools_inherit").checked = own.tools_inherit !== false;
+    drawEffective(where, own);
+  }
+  $("#s-note").textContent = CHAT_NOTE + (claude
+    ? " Claude takes no temperature, max tokens or repeat penalty; its model is an alias (opus, sonnet, haiku) or an exact id."
+    : " Temperature, max tokens and repeat penalty are for local models; Claude keeps its own.")
+    + (current ? "" : " This chat is kept, with these, once its first answer comes back.");
+  $("#export").hidden = !current;
 }
-$("#chat-gear").onclick = () => { if (!current) return; drawChatSettings(); $("#chat-settings").showModal(); };
+$("#chat-gear").onclick = () => { drawChatSettings(); $("#chat-settings").showModal(); };
+$("#chat-stack").onclick = () => openStack();
+$("#s-stack").onclick = () => { $("#chat-settings").close(); openStack(); };
 $("#chat-settings").addEventListener("click", e => { if (e.target === $("#chat-settings")) $("#chat-settings").close(); });
 
-$("#s-title").addEventListener("change", () => patch({ title: $("#s-title").value.trim() }).then(drawLog));
+// One setting of the open chat changed: kept in DRAFT before the chat exists,
+// patched onto it after.
+function setChatSetting(k, v) {
+  if (!current) {
+    if (v === null) delete DRAFT.settings[k]; else DRAFT.settings[k] = v;
+    drawChatSettings(); return drawLog();
+  }
+  patch({ settings: { [k]: v } }).then(() => { drawChatSettings(); drawTitlebar(); })
+    .catch(ex => { alert(ex.message); drawChatSettings(); });
+}
+$("#s-permission_mode").addEventListener("change", e => setChatSetting("permission_mode", e.target.value || null));
+$("#s-allowed_tools").addEventListener("change", e => {
+  const list = e.target.value.split(/\n+/).map(x => x.trim()).filter(Boolean);
+  setChatSetting("allowed_tools", list.length ? list : null);
+});
+$("#s-tools_inherit").addEventListener("change", e => setChatSetting("tools_inherit", e.target.checked ? null : false));
+$("#s-system_inherit").addEventListener("change", e => setChatSetting("system_inherit", e.target.checked ? null : false));
+
+// What a turn in this chat would run with, and where each part comes from.
+const LAYER_NAMES = { chat: "this chat", project: "its project", symposium: "every chat", carabiner: "the carabiner", cli: "the CLI's own" };
+async function drawEffective(where, own) {
+  const q = current ? `session=${encodeURIComponent(current.id)}`
+    : `folder=${encodeURIComponent(where)}&settings=${encodeURIComponent(JSON.stringify(own))}`;
+  try {
+    const e = (await call("GET", `/api/claude?${q}`)).effective;
+    const n = e.counts || {};
+    const parts = [["chat", "here"], ["project", "from its project"], ["symposium", "from every chat"], ["carabiner", "from the carabiner"]]
+      .filter(([k]) => n[k]).map(([k, w]) => `${n[k]} ${w}`);
+    $("#s-perms").textContent = (e.mode ? `Runs as ${e.mode} (from ${LAYER_NAMES[e.mode_from] || e.mode_from}). ` : "Runs in the CLI's own mode. ")
+      + `Allowed without asking: ${parts.join(", ") || "only what the CLI's own settings allow"}`
+      + (e.stopped_at ? `, nothing inherited past ${LAYER_NAMES[e.stopped_at]}` : "")
+      + ". The CLI's own settings always count too.";
+  } catch { $("#s-perms").textContent = ""; }
+}
+
+$("#s-title").addEventListener("change", () => {
+  const t = $("#s-title").value.trim();
+  if (!current) { DRAFT.title = t; return drawTitlebar(); }
+  patch({ title: t }).then(drawLog);
+});
 $("#s-move").addEventListener("change", async () => {
+  if (!current) { folder = $("#s-move").value; drawSide(); drawLog(); return drawChatSettings(); }
   await patch({ folder: $("#s-move").value });
   folder = current.folder; drawChatSettings(); drawLog();
 });
@@ -1233,7 +1516,7 @@ for (const k of SETTINGS) {
       v = k === "max_tokens" ? parseInt(v, 10) : parseFloat(v);
       if (Number.isNaN(v)) return drawChatSettings();
     }
-    patch({ settings: { [k]: v } }).catch(ex => { alert(ex.message); drawChatSettings(); });
+    setChatSetting(k, v);
   });
 }
 
@@ -1261,9 +1544,12 @@ async function drawClaude() {
     rows.push(["clipped at", k.path], ["its sessions work in", k.project || "-"]);
     for (const [name, url] of Object.entries(k.servers || {})) rows.push([`routes ${name}`, url]);
     if (k.bookmark) rows.push(["bookmark (Margin)", k.bookmark]);
+    const ks = CLAUDE.carabiner_session || {};
+    rows.push(["its permission mode", ks.permission_mode || "none (the CLI's own)"],
+              ["it allows", (ks.allowed_tools || []).join(", ") || "nothing more than the CLI"]);
   } else rows.push(["carabiner", "none clipped on this box"]);
   $("#c-facts").innerHTML = rows.map(([a, b]) => `<dt>${esc(a)}</dt><dd>${esc(b)}</dd>`).join("");
-  $("#c-mode").value = CLAUDE.mode || "";
+  $("#c-mode").innerHTML = modeOptions("the carabiner's, else the CLI's own", CLAUDE.mode || "");
   $("#c-ask").checked = !!CLAUDE.ask;
   const chips = (list, key) => list.map((v, i) =>
     `<span class="pending rule"><code>${esc(v)}</code><button type="button" data-unlist="${key}" data-i="${i}" title="take it off">×</button></span>`).join("")
@@ -1303,58 +1589,173 @@ for (const k of ["you", "claude_name", "confirm_destructive"]) {
   });
 }
 
-$("#p-add").onclick = async () => {
-  const name = (prompt("Name the new project:") || "").trim();
-  if (!name) return;
-  try { OPEN_PROJECT = name; await newProject(name); } catch (ex) { alert(ex.message); }
-};
+$("#p-add").onclick = () => openNewProject();
+
+// ── A new project, in one go (22 Oct 2026) ──────────────────────────────
+// "create a project, then go to the settings, edit the settings for the
+// project, then go in and type to chat blows": the dialog takes the name and
+// the settings, filled in from the defaults for new projects, and opens a
+// chat in it.
+function openNewProject() {
+  const d = CFG.project_defaults || {}, claude = CFG.claude || {};
+  $("#np-name").value = "";
+  $("#np-voice").innerHTML = `<option value="">local model (lodestar)</option>`
+    + `<option value="claude"${claude.available ? "" : " disabled"}>${esc(voiceName("claude"))}${claude.available ? "" : " (not on this machine)"}</option>`;
+  $("#np-voice").value = d.voice === "claude" && claude.available ? "claude" : "";
+  $("#np-model").value = d.model || "";
+  $("#np-system_prompt").value = d.system_prompt || "";
+  for (const k of LOCAL_ONLY) $(`#np-${k}`).value = d[k] ?? "";
+  $("#np-error").hidden = true;
+  npVoiceChanged();
+  loadModels();
+  $("#new-project").showModal(); $("#np-name").focus();
+}
+function npVoiceChanged() {
+  const claude = $("#np-voice").value === "claude";
+  document.querySelectorAll("#np-form .np-local").forEach(el => { el.hidden = claude; });
+  $("#np-model").setAttribute("list", claude ? "claude-models" : "models");
+  $("#np-model").placeholder = claude ? "the CLI's default" : "the default";
+}
+$("#np-voice").addEventListener("change", npVoiceChanged);
+$("#np-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const name = $("#np-name").value.trim(), err = $("#np-error");
+  const fail = text => { err.textContent = text; err.hidden = false; };
+  if (!name) return fail("A project needs a name.");
+  if (folderNames().includes(name)) return fail(`There is already a project called ${name}.`);
+  const claude = $("#np-voice").value === "claude";
+  // Everything the dialog shows is sent, blanks included: what you see is
+  // what the project gets (a blank is no opinion, not the default again).
+  const body = { name, voice: $("#np-voice").value, model: $("#np-model").value.trim(),
+                 system_prompt: $("#np-system_prompt").value.trim() };
+  for (const k of LOCAL_ONLY) {
+    const raw = $(`#np-${k}`).value.trim();
+    body[k] = claude || raw === "" ? null : (k === "max_tokens" ? parseInt(raw, 10) : parseFloat(raw));
+  }
+  try {
+    await newProject(body);
+  } catch (ex) { return fail(ex.message); }
+  $("#new-project").close();
+  show("chat"); $("#input").focus();
+});
 
 const PROJECT_KEYS = ["voice", "system_prompt", "model", "temperature", "max_tokens", "repeat_penalty"];
+const DEFAULTS_KEY = "\u0000defaults";
+
+// A project's settings as a form - the Settings tab's, the sheet a chat's
+// project chip opens, and (without a name) the defaults for new projects.
+// The three numbers go to a local model through Lodestar; the claude CLI sets
+// its own (21 Oct 2026), and its model field suggests Claude's models.
+function projectFields(f, { name = null } = {}) {
+  const val = k => esc(f[k] ?? ""), claude = f.voice === "claude";
+  return `<div class="form">`
+    + (name != null ? `<label>name</label><input data-k="name" value="${esc(name)}" maxlength="120">` : "")
+    + `<label>voice</label><select data-k="voice"><option value="">local model (lodestar)</option>`
+    + `<option value="claude"${claude ? " selected" : ""}${CFG.claude?.available ? "" : " disabled"}>${esc(voiceName("claude"))}</option></select>`
+    + `<label>system prompt</label><textarea data-k="system_prompt">${val("system_prompt")}</textarea>`
+    + (name != null ? `<span></span><p class="muted"><a href="#" data-peek="1">the whole prompt stack for chats here</a>; `
+        + `a chat's own prompt is added after this one.</p>` : "")
+    + `<label>model</label><input data-k="model" list="${claude ? "claude-models" : "models"}" value="${val("model")}" placeholder="${claude ? "the CLI's default" : "the default"}">`
+    + (claude
+      ? `<span></span><p class="muted">temperature, max tokens and repeat penalty are the local model's; the claude CLI sets its own.</p>`
+        // Claude's permissions for chats here, over every chat's and the carabiner's (22 Oct 2026).
+        + `<label>permission mode</label><select data-k="permission_mode">${modeOptions("every chat's", f.permission_mode || "")}</select>`
+        + `<label>allowed without asking</label><textarea data-k="allowed_tools" class="rules-box" `
+        + `placeholder="one per line: Read, Bash(git:*), mcp__wren-workbench__*">${esc((f.allowed_tools || []).join("\n"))}</textarea>`
+        + `<span></span><label class="check"><input type="checkbox" data-k="tools_inherit"${f.tools_inherit === false ? "" : " checked"}> `
+        + `also what every chat and the carabiner allow</label>`
+      : `<label>temperature</label><input data-k="temperature" type="number" step="0.05" min="0" max="2" value="${val("temperature")}" placeholder="default">`
+        + `<label>max tokens</label><input data-k="max_tokens" type="number" step="64" min="1" value="${val("max_tokens")}" placeholder="default">`
+        + `<label>repeat penalty</label><input data-k="repeat_penalty" type="number" step="0.05" min="0" value="${val("repeat_penalty")}" placeholder="default">`)
+    + (name != null ? `<span></span><div class="row-buttons"><button type="button" class="ghost danger" data-remove="1">delete project</button></div>` : "")
+    + `</div>`;
+}
+
 function drawProjects() {
-  const names = folderNames().filter(Boolean);
-  $("#set-projects").innerHTML = names.map(name => {
+  const names = folderNames().filter(Boolean), d = CFG.project_defaults || {};
+  const dLine = [d.voice ? voiceName(d.voice) : null, d.model, d.system_prompt ? "a system prompt" : null].filter(Boolean).join(" · ");
+  const defaults = `<details class="project defaults" data-defaults="1"${OPEN_PROJECT === DEFAULTS_KEY ? " open" : ""}>`
+    + `<summary>${icon("gear")}<span class="p-name">defaults for new projects</span><span class="p-sub">${esc(dLine || "none set")}</span></summary>`
+    + projectFields(d) + `</details>`;
+  $("#set-projects").innerHTML = defaults + (names.map(name => {
     const f = presetFor(name), count = SESSIONS.filter(s => s.folder === name).length;
-    const bits = [voiceName(f.voice || "lodestar"), f.model, f.temperature != null && `t=${f.temperature}`,
+    const bits = [voiceName(f.voice || "lodestar"), f.model, f.voice !== "claude" && f.temperature != null && `t=${f.temperature}`,
                   `${count} chat${count === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
-    const val = k => esc(f[k] ?? "");
     return `<details class="project" data-p="${esc(name)}"${OPEN_PROJECT === name ? " open" : ""}>`
       + `<summary>${icon("krater-full")}<span class="p-name">${esc(name)}</span><span class="p-sub">${esc(bits)}</span></summary>`
-      + `<div class="form">`
-      + `<label>name</label><input data-k="name" value="${esc(name)}" maxlength="120">`
-      + `<label>voice</label><select data-k="voice"><option value="">local model (lodestar)</option>`
-      + `<option value="claude"${f.voice === "claude" ? " selected" : ""}${CFG.claude?.available ? "" : " disabled"}>${esc(voiceName("claude"))}</option></select>`
-      + `<label>system prompt</label><textarea data-k="system_prompt">${val("system_prompt")}</textarea>`
-      + `<label>model</label><input data-k="model" list="models" value="${val("model")}" placeholder="the default">`
-      + `<label>temperature</label><input data-k="temperature" type="number" step="0.05" min="0" max="2" value="${val("temperature")}" placeholder="default">`
-      + `<label>max tokens</label><input data-k="max_tokens" type="number" step="64" min="1" value="${val("max_tokens")}" placeholder="default">`
-      + `<label>repeat penalty</label><input data-k="repeat_penalty" type="number" step="0.05" min="0" value="${val("repeat_penalty")}" placeholder="default">`
-      + `<span></span><div class="row-buttons"><button type="button" class="ghost danger" data-remove="1">delete project</button></div>`
-      + `</div></details>`;
-  }).join("") || `<p class="muted">No projects yet - chats can live without one.</p>`;
+      + projectFields(f, { name }) + `</details>`;
+  }).join("") || `<p class="muted">No projects yet - chats can live without one.</p>`);
 }
+
+// A field of a project form changed - a project's (data-p) or the defaults
+// (data-defaults) - wherever the form is. `after(renamedTo?)` redraws.
+async function projectFieldChanged(e, after) {
+  const el = e.target.closest("[data-k]"), holder = e.target.closest("[data-p], [data-defaults]");
+  if (!el || !holder) return;
+  const k = el.dataset.k, raw = String(el.value).trim();
+  let v = raw === "" ? null : raw;
+  if (el.type === "checkbox") v = el.checked;
+  else if (k === "allowed_tools") v = raw ? raw.split(/\n+/).map(x => x.trim()).filter(Boolean) : [];
+  else if (v !== null && NUMBER.has(k)) {
+    v = k === "max_tokens" ? parseInt(v, 10) : parseFloat(v);
+    if (Number.isNaN(v)) return after();
+  }
+  try {
+    if (holder.dataset.defaults) {
+      const d = { ...(CFG.project_defaults || {}) };
+      if (v === null || (Array.isArray(v) && !v.length)) delete d[k]; else d[k] = v;
+      await call("PATCH", "/api/prefs", { project_defaults: d });
+    } else {
+      const name = holder.dataset.p;
+      if (k === "name") {
+        if (raw && raw !== name) { await renameProject(name, raw); return after(raw); }
+        return after();
+      }
+      await call("PATCH", "/api/projects", { name, set: { [k]: v } });
+    }
+    await reloadConfig();
+  } catch (ex) { alert(ex.message); }
+  after();
+}
+
+function peekSystem(name) { return openStack(name); }
 
 $("#set-projects").addEventListener("toggle", e => {
   const d = e.target.closest?.("details.project");
-  if (d) OPEN_PROJECT = d.open ? d.dataset.p : (OPEN_PROJECT === d.dataset.p ? null : OPEN_PROJECT);
+  if (!d) return;
+  const key = d.dataset.defaults ? DEFAULTS_KEY : d.dataset.p;
+  OPEN_PROJECT = d.open ? key : (OPEN_PROJECT === key ? null : OPEN_PROJECT);
 }, true);
-$("#set-projects").addEventListener("change", async e => {
-  const el = e.target.closest("[data-k]"), d = e.target.closest("details.project");
-  if (!el || !d) return;
-  const name = d.dataset.p, k = el.dataset.k, raw = String(el.value).trim();
-  try {
-    if (k === "name") { if (raw && raw !== name) await renameProject(name, raw); else drawProjects(); return; }
-    let v = raw === "" ? null : raw;
-    if (v !== null && NUMBER.has(k)) {
-      v = k === "max_tokens" ? parseInt(v, 10) : parseFloat(v);
-      if (Number.isNaN(v)) return drawProjects();
-    }
-    await call("PATCH", "/api/projects", { name, set: { [k]: v } });
-    await reloadConfig(); drawProjects(); drawSide();
-  } catch (ex) { alert(ex.message); drawProjects(); }
-});
-$("#set-projects").addEventListener("click", e => {
-  const d = e.target.closest("details.project");
+$("#set-projects").addEventListener("change", e => projectFieldChanged(e, () => {
+  drawProjects(); drawSide(); drawTitlebar();
+}));
+$("#set-projects").addEventListener("click", async e => {
+  const d = e.target.closest("details.project[data-p]");
+  if (d && e.target.closest("[data-peek]")) { e.preventDefault(); return peekSystem(d.dataset.p); }
   if (d && e.target.closest("[data-remove]")) deleteProject(d.dataset.p);
+});
+
+// A project's settings from the chat: its chip in the title bar opens this.
+function openProjectSheet(name) { drawProjectSheet(name); $("#project-sheet").showModal(); }
+function drawProjectSheet(name) {
+  $("#ps-body").dataset.p = name;
+  $("#ps-title").textContent = `Project: ${name}`;
+  $("#ps-body").innerHTML = projectFields(presetFor(name), { name });
+}
+$("#ps-body").addEventListener("change", e => projectFieldChanged(e, renamed => {
+  const name = renamed || $("#ps-body").dataset.p;
+  if ($("#project-sheet").open && CFG.folders.some(f => f.name === name)) drawProjectSheet(name);
+  drawSide(); drawTitlebar(); if (!current) drawLog();
+  if (tab === "settings") drawSettings();
+}));
+$("#ps-body").addEventListener("click", async e => {
+  const name = $("#ps-body").dataset.p;
+  if (e.target.closest("[data-peek]")) { e.preventDefault(); return peekSystem(name); }
+  if (e.target.closest("[data-remove]")) {
+    $("#project-sheet").close();
+    await deleteProject(name);
+    if (!current) drawLog(); else drawTitlebar();
+  }
 });
 
 $("#export").onclick = () => {
@@ -1602,7 +2003,7 @@ async function picDraw() {
   drawing = true; lockComposer(); picEl("draw").disabled = true;
   $("#chat .pic").classList.add("busy"); picNote("drawing… this can take a minute or two");
   try {
-    if (!current) { current = await call("POST", "/api/sessions", { folder }); await refresh(); }
+    await ensureSession();
     const got = await call("POST", "/api/pictures/draw", { session: current.id, asked, why: asked, request: req });
     await openSession(current.id);
     picNote(`drawn on ${got.node} with ${got.model?.name || got.model || "?"} in ${got.seconds ?? "?"}s · seed ${got.seed}`);
@@ -1695,7 +2096,7 @@ async function earsStart(by) {
   if (EARS.live || !earsOk() || chatBusy()) return;
   try {
     // A chat exists before the clip so it has somewhere to be kept.
-    if (!current) { current = await call("POST", "/api/sessions", { folder }); await refresh(); }
+    await ensureSession();
     await call("POST", "/api/ears/start", { device: earsDevice() });
     EARS.live = true; EARS.by = by; EARS.since = Date.now();
     EARS.timer = setInterval(drawEarsState, 500);
@@ -1743,3 +2144,95 @@ $("#ears-device").onchange = () => { EARS.device = $("#ears-device").selectedOpt
 $("#ears-devices").onclick = async () => {
   try { drawEarsDevices((await call("GET", "/api/ears")).devices || []); } catch (ex) { $("#ears-note").textContent = ex.message; }
 };
+
+// ── What a chat's model is given, layer by layer ───────────────────────
+// Design note (22 Oct 2026): the whole system prompt stack, visible per chat,
+// so default tools and anything else nobody uses can be seen and cleared
+// rather than guessed at. The server works it
+// out (GET /api/stack, seren_symposium.stack): for a chat, a chat not made
+// yet (DRAFT), or a project's own (what its chats start with).
+let STACK_FOR = null;
+const STACK_GROUPS = { system: "The system prompt", loaded: "Read by the CLI as it starts",
+                       tools: "Tools and the rest", turn: "This turn" };
+const STACK_STATES = { replaced: "replaced", off: "left out", empty: "empty", unknown: "not known yet" };
+const stackChars = n => `${Number(n).toLocaleString()} chars ≈ ${Math.ceil(n / 4).toLocaleString()} tokens (est.)`;
+const chips = list => list?.length ? `<div class="st-chips">${list.map(x => `<span>${esc(x)}</span>`).join("")}</div>` : "";
+
+async function openStack(project) {
+  STACK_FOR = project != null ? project : null;
+  $("#st-body").innerHTML = `<p class="muted">Looking…</p>`;
+  if (!$("#stack-sheet").open) $("#stack-sheet").showModal();
+  await drawStack();
+}
+$("#st-refresh").onclick = () => drawStack();
+$("#stack-sheet").addEventListener("click", e => { if (e.target === $("#stack-sheet")) $("#stack-sheet").close(); });
+
+async function drawStack() {
+  const q = STACK_FOR != null ? `folder=${encodeURIComponent(STACK_FOR)}`
+    : current ? `session=${encodeURIComponent(current.id)}`
+    : `folder=${encodeURIComponent(folder)}&settings=${encodeURIComponent(JSON.stringify(DRAFT.settings))}`;
+  let st;
+  try { st = await call("GET", `/api/stack?${q}`); }
+  catch (ex) { $("#st-body").innerHTML = `<p class="muted">${esc(ex.message)}</p>`; return; }
+  $("#st-title").textContent = STACK_FOR != null ? `What chats in ${STACK_FOR} start with`
+    : `What ${current?.title ? `“${current.title}”` : "this chat"} is given`;
+  const sized = st.layers.filter(l => l.chars && !["off", "replaced", "unknown"].includes(l.state));
+  const bar = st.total_chars ? sized.map(l =>
+    `<span class="g-${l.group}" style="flex:${l.chars}" title="${esc(l.title)}: ${esc(stackChars(l.chars))}"></span>`).join("") : "";
+  let html = `<p class="st-total">${esc(voiceName(st.voice))}${st.folder ? ` · ${esc(st.folder)}` : ""} · `
+    + `${esc(stackChars(st.total_chars))} that can be counted here`
+    + (st.voice === "claude" ? "; Claude Code's own prompt and its tools' descriptions come on top." : ".") + `</p>`
+    + (bar ? `<div class="st-bar">${bar}</div>` : "");
+  for (const [g, title] of Object.entries(STACK_GROUPS)) {
+    const rows = st.layers.filter(l => l.group === g);
+    if (!rows.length) continue;
+    html += `<div class="st-group">${esc(title)}${st.chars?.[g] ? ` <small>${esc(stackChars(st.chars[g]))}</small>` : ""}</div>`
+      + rows.map(stackLayer).join("");
+  }
+  $("#st-body").innerHTML = html;
+}
+
+function stackLayer(l) {
+  let title = l.title, edit = l.edit, where = l.where;
+  if (STACK_FOR != null && l.key === "chat") { title = "Each chat's own"; edit = ""; where = "each chat's settings (⚙), after this project's"; }
+  const size = l.chars ? stackChars(l.chars) : l.count != null ? `${l.count}` : "";
+  const state = STACK_STATES[l.state] ? `<span class="st-state">${STACK_STATES[l.state]}</span>` : "";
+  const button = edit ? `<button type="button" class="ghost" data-edit="${edit}">edit</button>` : "";
+  return `<details class="st-layer ${esc(l.state)}" data-key="${esc(l.key)}"><summary><b>${esc(title)}</b>`
+    + `<span class="muted">${esc(where || "")}</span>${state}<span class="st-size">${esc(size)}</span>${button}</summary>`
+    + `<div class="st-in">${stackBody(l)}${l.note ? `<p class="note">${esc(l.note)}</p>` : ""}</div></details>`;
+}
+
+function stackBody(l) {
+  if (l.key === "tools" && l.servers) {
+    return `<p class="st-sub">The CLI's own (${l.builtin.length})</p>${chips(l.builtin)}`
+      + l.servers.map(s => `<details class="st-server"><summary>${esc(s.name)} · `
+        + `<span class="st-status ${esc(s.status)}">${esc(s.status || "?")}</span>`
+        + `${s.source ? ` · ${esc(s.source)}` : ""} · ${s.tools.length} tool${s.tools.length === 1 ? "" : "s"}</summary>`
+        + `${chips(s.tools)}</details>`).join("");
+  }
+  if (l.files) {
+    return l.files.map(f => `<details class="st-server"><summary>${esc(f.path)} · ${esc(f.kind)} · ${esc(stackChars(f.chars))}</summary>`
+      + `<pre class="st-text">${esc(f.text)}</pre></details>`).join("") || `<p class="muted">None found.</p>`;
+  }
+  if (l.key === "permissions") {
+    const n = l.counts || {};
+    const from = Object.entries(n).filter(([, v]) => v).map(([k, v]) => `${v} from ${LAYER_NAMES[k] || k}`).join(", ");
+    return `<p>${l.mode ? `Mode: <b>${esc(l.mode)}</b> (from ${esc(LAYER_NAMES[l.mode_from] || l.mode_from)})` : "Mode: the CLI's own"}`
+      + `${from ? `. Allowed without asking: ${esc(from)}` : ""}.</p>${chips(l.allow)}`;
+  }
+  if (l.key === "sampling") {
+    return `<dl class="facts">${Object.entries(l.values || {}).map(([k, v]) =>
+      `<dt>${esc(k.replace("_override", "").replace("_", " "))}</dt><dd>${esc(v ?? "Lodestar's default")}</dd>`).join("")}</dl>`;
+  }
+  return (l.text ? `<pre class="st-text">${esc(l.text)}</pre>` : "") + chips(l.items);
+}
+
+$("#st-body").addEventListener("click", e => {
+  const b = e.target.closest("[data-edit]");
+  if (!b) return;
+  e.preventDefault();
+  $("#stack-sheet").close();
+  if (b.dataset.edit === "project") return openProjectSheet(STACK_FOR ?? (current ? current.folder : folder));
+  drawChatSettings(); $("#chat-settings").showModal(); $("#s-system_prompt").focus();
+});

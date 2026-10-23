@@ -104,3 +104,21 @@ def test_a_broken_prefs_file_is_left_alone_and_the_yaml_stands(make_client, tmp_
     c = make_client(config(tmp_path)).get("/api/config").json()
     assert c["claude"]["name"] == "wren" and [f["name"] for f in c["folders"]] == ["Main", "music"]
     assert (tmp_path / "symposium-prefs.json").read_text(encoding="utf-8") == "{not json"
+
+
+def test_a_new_project_starts_from_the_defaults(make_client, tmp_path):
+    tc = make_client(config(tmp_path))
+    assert tc.get("/api/config").json()["project_defaults"] == {}
+    r = tc.patch("/api/prefs", json={"project_defaults": {"voice": "claude", "model": "opus",
+                                                          "system_prompt": "", "temperature": None}})
+    assert r.status_code == 200 and r.json()["project_defaults"] == {"voice": "claude", "model": "opus"}
+    assert tc.get("/api/config").json()["project_defaults"] == {"voice": "claude", "model": "opus"}
+
+    made = tc.post("/api/projects", json={"name": "art"}).json()
+    assert (made["voice"], made["model"]) == ("claude", "opus"), "left out: the defaults fill it"
+    own = tc.post("/api/projects", json={"name": "code", "voice": "lodestar", "model": ""}).json()
+    assert own["voice"] == "lodestar" and own["model"] in ("", None), "sent, even blank: its own"
+    assert tc.patch("/api/prefs", json={"project_defaults": {"voice": "parrot"}}).status_code == 400
+    assert tc.patch("/api/prefs", json={"project_defaults": {"colour": "blue"}}).status_code == 400
+    # kept like every other window setting
+    assert make_client(config(tmp_path)).get("/api/config").json()["project_defaults"]["model"] == "opus"

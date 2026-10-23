@@ -119,6 +119,15 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                "/api/sessions/{sid}/messages/{index}",
                # -> the prefs file beside the chats
                "/api/prefs", "/api/projects", "/api/projects/remove", "/api/claude",
+               # -> Margin, for the preface (seren_symposium.preface): the one page the
+               #    room reads to the model as its system prompt. The CLI's own bookmark
+               #    hook reads Margin at that door already; this is the same door, and
+               #    a Margin that does not answer costs the page, never the turn
+               "/api/claude/system",
+               # -> what a chat's model is given (seren_symposium.stack): files on
+               #    this box, the preface as above, and for a local model
+               #    Lodestar's own /chat/inspect through app.state.client
+               "/api/stack",
                # -> the claude voice's own permission tool, and your answer to it
                "/api/permit", "/api/permit/answer",
                # -> this desktop's screen, taken here
@@ -171,16 +180,19 @@ def test_folder_preset_is_resolved_into_the_payload():
     assert "folder" not in out, "Lodestar has never heard of a folder"
 
 
-def test_per_session_values_override_the_folder_preset():
-    """The documented layering: folder default, then the session chip on top."""
+def test_per_session_values_override_the_folder_preset_and_prompts_add_up():
+    """The documented layering: folder default, then the session chip on top -
+    except the system prompt, where the two add up (22 Oct 2026), unless the
+    chat says not to inherit its folder's."""
     cfg = SymposiumConfig(folders=[FolderPreset(
         name="f", system_prompt="from folder", model="a", temperature=0.2)])
-    out = to_lodestar_payload(cfg, {
-        "prompt": "hi", "folder": "f",
-        "system_prompt": "from session", "model_override": "b", "temperature": 0.9})
-    assert out["system_prompt"] == "from session"
+    body = {"prompt": "hi", "folder": "f",
+            "system_prompt": "from session", "model_override": "b", "temperature": 0.9}
+    out = to_lodestar_payload(cfg, body)
+    assert out["system_prompt"] == "from folder\n\nfrom session"
     assert out["model_override"] == "b"
     assert out["temperature"] == 0.9
+    assert to_lodestar_payload(cfg, {**body, "system_inherit": False})["system_prompt"] == "from session"
 
 
 def test_temperature_zero_survives_the_override_check():

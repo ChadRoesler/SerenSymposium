@@ -42,6 +42,16 @@ WHAT COMES OUT:
 
     Text from inside a subagent (parent_tool_use_id set) is not ours to show.
 
+EVERYTHING IT SAYS IS THE ANSWER:
+    The CLI's own `result` is only the text after the last tool. What Claude
+    says before and between tools ("let me look in that folder") used to
+    stream into the window and then vanish when that result replaced it, and
+    it never reached the saved chat or a later handover (22 Oct 2026). Each
+    top-level text block is now a `said` step in the turn, in order among the
+    thinking and the tools; the answer is all of them, joined; and the steps
+    keep where each piece was said, so the window can show the words with the
+    thinking and the tools folded between them.
+
 ASKED, NOT REFUSED:
     -p has nobody at a terminal to say yes, so a tool not on the allowed list
     was refused. With claude.ask, the CLI is given a permission tool of ours
@@ -54,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -65,6 +76,8 @@ from contextlib import aclosing
 from typing import Any, AsyncIterator, Optional
 
 from .config import ClaudeConfig
+
+log = logging.getLogger("seren_symposium")
 
 # Bookkeeping the CLI does in front of every deferred MCP tool: not a tool
 # the answer reached for, so not one the receipt names.
@@ -124,6 +137,23 @@ def _target(tool: str, tool_input: dict[str, Any]) -> str:
     return ""
 
 
+def suggest_rules(tool: str, tool_input: Any) -> list[str]:
+    """What an Always could be, narrowest first (22 Oct 2026: one per tool
+    meant a Workbench asked a hundred times): the folder, the command's first
+    word, the site, the one MCP tool - then the whole kind, the whole
+    command, every site, the whole MCP server."""
+    narrow = suggest_rule(tool, tool_input)
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    wider: list[str] = []
+    if tool in FILE_TOOLS and _target(tool, tool_input):
+        wider.append(FILE_TOOLS[tool])
+    elif tool in ("Bash", "WebFetch") and narrow != tool:
+        wider.append(tool)
+    elif tool.startswith("mcp__") and tool.count("__") >= 2:
+        wider.append(tool[:tool.index("__", 5) + 2] + "*")
+    return list(dict.fromkeys([narrow, *wider]))
+
+
 def suggest_rule(tool: str, tool_input: Any) -> str:
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     if tool in FILE_TOOLS and (target := _target(tool, tool_input)):
@@ -162,9 +192,64 @@ def permit_server() -> list[str]:
     return [str(quiet if os.name == "nt" and quiet.is_file() else exe), "-m", "seren_symposium.permit"]
 
 
+def user_mcp_servers(names: list[str], path: str = "") -> Optional[dict[str, Any]]:
+    """The named servers, as Claude Code's user config (~/.claude.json)
+    defines them - url, headers helper and all, so no token is copied into
+    Symposium's config. None when a name is not there (or the file is not):
+    the caller then loads servers the loose way rather than lose one."""
+    if not names:
+        return {}
+    file = os.path.expanduser(path or "~/.claude.json")
+    try:
+        known = (json.load(open(file, encoding="utf-8")) or {}).get("mcpServers") or {}
+    except (OSError, ValueError) as ex:
+        log.warning("claude.mcp_servers: cannot read %s (%s); loading every server", file, ex)
+        return None
+    missing = [n for n in names if n not in known]
+    if missing:
+        log.warning("claude.mcp_servers: %s not in %s; loading every server", ", ".join(missing), file)
+        return None
+    return {n: known[n] for n in names}
+
+
+# What the CLI says it loaded, kept for the prompt stack (seren_symposium.stack):
+# a turn's init event names the model, the mode, every tool, the MCP servers
+# and how each is doing, the skills, agents, commands and plugins. Names only,
+# capped, so a box with everything installed still keeps a small session file.
+MAX_INIT_ITEMS = 600
+
+
+def digest_init(ev: dict[str, Any]) -> dict[str, Any]:
+    """The CLI's init event as the prompt stack keeps it - never its session
+    id, where its key came from, or its sockets."""
+    def names(v: Any) -> list[str]:
+        out = []
+        for x in (v if isinstance(v, list) else [])[:MAX_INIT_ITEMS]:
+            n = x.get("name") if isinstance(x, dict) else x
+            if isinstance(n, str) and n:
+                out.append(n[:200])
+        return out
+    servers = [{"name": str(s["name"])[:200], "status": str(s.get("status") or "")[:40],
+                "source": str(s.get("source") or "")[:40]}
+               for s in (ev.get("mcp_servers") or [])[:100] if isinstance(s, dict) and s.get("name")]
+    memory = ev.get("memory_paths") if isinstance(ev.get("memory_paths"), dict) else {}
+    return {"version": str(ev.get("claude_code_version") or ""), "model": str(ev.get("model") or ""),
+            "mode": str(ev.get("permissionMode") or ""), "cwd": str(ev.get("cwd") or ""),
+            "output_style": str(ev.get("output_style") or ""), "memory_auto": str(memory.get("auto") or ""),
+            "tools": names(ev.get("tools")), "mcp_servers": servers, "skills": names(ev.get("skills")),
+            "agents": names(ev.get("agents")), "slash_commands": names(ev.get("slash_commands")),
+            "plugins": names(ev.get("plugins"))}
+
+
 def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
          model: str = "", system_prompt: str = "", add_dirs: Optional[list[str]] = None,
-         allow: Optional[list[str]] = None, ask: bool = False) -> list[str]:
+         allow: Optional[list[str]] = None, ask: bool = False, replace: bool = False,
+         mode: Optional[str] = None, own_tools: bool = True) -> list[str]:
+    """`replace`: the system prompt is the whole one (--system-prompt, the
+    preface in front), not an addition to the CLI's own. `mode` and
+    `own_tools=False`: the turn's permissions were worked out in layers
+    (seren_symposium.permissions) and `allow` is the whole list; without
+    them, the config's mode and list, plus `allow`."""
     exe = shutil.which(cfg.command[0]) or cfg.command[0]
     out = [exe, *cfg.command[1:], "-p", "--output-format", "stream-json", "--verbose",
            "--include-partial-messages"]
@@ -172,16 +257,22 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
     if model := (model or cfg.model):
         out += ["--model", model]
     if system_prompt:
-        out += ["--append-system-prompt", system_prompt]
-    if cfg.permission_mode:
-        out += ["--permission-mode", cfg.permission_mode]
+        out += ["--system-prompt" if replace else "--append-system-prompt", system_prompt]
+    if mode := (cfg.permission_mode if mode is None else mode):
+        out += ["--permission-mode", mode]
     for d in [*cfg.add_dirs, *(add_dirs or [])]:
         out += ["--add-dir", os.path.expanduser(d)]
-    if tools := [*cfg.allowed_tools, *(allow or [])]:
+    if tools := list(dict.fromkeys([*(cfg.allowed_tools if own_tools else []), *(allow or [])])):
         out += ["--allowedTools", *tools]
+    named = user_mcp_servers(cfg.mcp_servers, cfg.claude_json)
+    servers: dict[str, Any] = dict(named or {})
     if ask:
-        mcp = {"mcpServers": {"symposium": {"command": permit_server()[0], "args": permit_server()[1:]}}}
-        out += ["--mcp-config", json.dumps(mcp), "--permission-prompt-tool", "mcp__symposium__permit"]
+        servers["symposium"] = {"command": permit_server()[0], "args": permit_server()[1:]}
+        out += ["--permission-prompt-tool", "mcp__symposium__permit"]
+    if servers:
+        out += ["--mcp-config", json.dumps({"mcpServers": servers})]
+    if named:
+        out += ["--strict-mcp-config"]
     return out
 
 
@@ -250,6 +341,7 @@ class ClaudeTurn:
     def __init__(self, session_id: str):
         self.session_id = session_id
         self.model: Optional[str] = None
+        self.init: dict[str, Any] = {}          # digest_init of the CLI's init event
         self.tools: list[str] = []
         # Under the fold: [{"kind": "thinking", "text"} | {"kind": "tool", "id",
         # "tool", "summary", "ok"?, "result"?} | {"kind": "asked", ...}]
@@ -263,6 +355,36 @@ class ClaudeTurn:
         if len(self.steps) < MAX_STEPS:
             self.steps.append(s)
 
+    def say(self, text: str) -> None:
+        """Words of the answer, kept in their place among the steps. Never
+        capped by MAX_STEPS: they are the answer, not a note about it."""
+        last = self.steps[-1] if self.steps else None
+        if last is not None and last["kind"] == "said" and not last.get("closed"):
+            last["text"] += text
+        else:
+            self.steps.append({"kind": "said", "text": text})
+
+    def close_said(self) -> None:
+        if self.steps and self.steps[-1]["kind"] == "said":
+            self.steps[-1]["closed"] = True
+
+    def said(self) -> list[dict[str, Any]]:
+        return [s for s in self.steps if s["kind"] == "said" and s["text"].strip()]
+
+    def answer(self, result: str) -> str:
+        """The whole answer: every piece it said, in order. The CLI's result
+        (the last piece) stands alone when nothing streamed, and is added if
+        it somehow is not among what did."""
+        parts = [s["text"].strip() for s in self.said()]
+        if not parts:
+            return result
+        text = "\n\n".join(parts)
+        if result and result.strip() and result.strip() not in text:
+            self.say("")
+            self.steps[-1]["text"] = result.strip()
+            text += "\n\n" + result.strip()
+        return text
+
     def think(self, text: str) -> None:
         last = self.steps[-1] if self.steps else None
         if last is not None and last["kind"] == "thinking" and not last.get("closed"):
@@ -272,8 +394,16 @@ class ClaudeTurn:
             self.step({"kind": "thinking", "text": text[:MAX_THINKING]})
 
     def kept_steps(self) -> list[dict[str, Any]]:
-        return [{k: v for k, v in s.items() if k != "closed"} for s in self.steps
-                if s["kind"] != "thinking" or s["text"].strip()]
+        """The steps as the receipt keeps them. A lone `said` at the very end
+        is the answer in its usual place (the steps fold above it), so it is
+        not kept twice; `said` steps are kept when the answer had words before
+        or between its steps, which is when their places matter."""
+        kept = [{k: v for k, v in s.items() if k != "closed"} for s in self.steps
+                if s["kind"] not in ("thinking", "said") or s["text"].strip()]
+        said = [i for i, s in enumerate(kept) if s["kind"] == "said"]
+        if said == [len(kept) - 1]:
+            kept.pop()
+        return kept
 
 
 MAX_TOOL_IMAGES = 8
@@ -307,14 +437,17 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                  system_prompt: str = "", add_dirs: Optional[list[str]] = None,
                  allow: Optional[list[str]] = None,
                  turn: Optional[ClaudeTurn] = None,
-                 permit: Optional[dict[str, str]] = None) -> AsyncIterator[dict[str, Any]]:
+                 permit: Optional[dict[str, str]] = None,
+                 replace: bool = False, mode: Optional[str] = None,
+                 own_tools: bool = True) -> AsyncIterator[dict[str, Any]]:
     """One turn, as Symposium stream events (see the module docstring).
     Always ends with exactly one `done` or `error`. `permit` ({url, ticket})
     is where the CLI's permission asks go; without it, unlisted tools are
     refused as before."""
     turn = turn or ClaudeTurn(resume or str(uuid.uuid4()))
     cmd = argv(cfg, resume=resume, new_id=turn.session_id, model=model, system_prompt=system_prompt,
-               add_dirs=add_dirs, allow=allow, ask=bool(permit))
+               add_dirs=add_dirs, allow=allow, ask=bool(permit), replace=replace,
+               mode=mode, own_tools=own_tools)
     stderr: list[str] = []
     blocks: dict[Any, dict[str, Any]] = {}      # content block index -> what it is so far
     try:
@@ -329,6 +462,7 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                 kind = ev.get("type")
                 if kind == "system" and ev.get("subtype") == "init":
                     turn.model = ev.get("model")
+                    turn.init = digest_init(ev)
                 elif kind == "stream_event" and not ev.get("parent_tool_use_id"):
                     inner = ev.get("event") or {}
                     block = inner.get("content_block") or {}
@@ -337,12 +471,15 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                     if inner.get("type") == "content_block_start":
                         blocks[at] = {"type": block.get("type"), "id": block.get("id"),
                                       "name": block.get("name"), "json": ""}
+                        if block.get("type") == "text":
+                            turn.close_said()               # a new block of words is a new piece
                         if block.get("type") == "tool_use":
                             name = block.get("name") or "a tool"
                             if name not in QUIET_TOOLS:
                                 turn.tools.append(name)
                                 yield {"type": "tool_status", "tool": name}
                     elif inner.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
+                        turn.say(delta.get("text", ""))
                         yield {"type": "chunk", "content": delta.get("text", "")}
                     elif inner.get("type") == "content_block_delta" and delta.get("type") == "thinking_delta":
                         turn.think(delta.get("thinking", ""))
@@ -352,6 +489,8 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                             blocks[at]["json"] += delta.get("partial_json", "")
                     elif inner.get("type") == "content_block_stop":
                         b = blocks.pop(at, None) or {}
+                        if b.get("type") == "text":
+                            turn.close_said()
                         if b.get("type") == "thinking" and turn.steps and turn.steps[-1]["kind"] == "thinking":
                             turn.steps[-1]["closed"] = True
                         elif b.get("type") == "tool_use" and (b.get("name") or "") not in QUIET_TOOLS:
@@ -381,7 +520,7 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                         yield {"type": "error", "error": "claude did not finish the answer",
                                "detail": "; ".join(map(str, errors)) or ev.get("result") or ev.get("subtype")}
                     else:
-                        yield {"type": "done", "response": ev.get("result") or "", "model": turn.model,
+                        yield {"type": "done", "response": turn.answer(ev.get("result") or ""), "model": turn.model,
                                "node": cfg.name, "tool_rounds": max(0, int(ev.get("num_turns") or 1) - 1)}
                     return
     except OSError as ex:
