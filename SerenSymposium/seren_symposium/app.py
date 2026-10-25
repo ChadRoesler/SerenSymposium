@@ -34,6 +34,7 @@ Serves:
     GET    /api/sessions/{id}     one session, whole - also the export (PATCH, DELETE)
     GET    /api/sessions/{id}/live          the turn running in it now, replayed then followed (LiveTurn)
     POST   /api/sessions/{id}/files         attach a file (JSON, base64) - GET .../files/{name} reads it
+    GET    /api/sessions/{id}/files/{name}/settings   what made a picture drawn here (pictures.made_of)
     PATCH  /api/prefs             your name, the claude voice's settings, confirm - kept beside the chats
     GET    /api/claude            the claude voice's settings and the carabiner clipped on this box
     POST   /api/permit            the claude voice asking may-I (from seren_symposium.permit)
@@ -1355,6 +1356,20 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         media, headers = attachments.serve_headers(attachments.guess_type(name, attachments.head(path)))
         return FileResponse(path, media_type=media, headers=headers)
 
+    @app.get("/api/sessions/{sid}/files/{name}/settings")
+    async def files_settings(request: Request, sid: str, name: str):
+        """What made a picture: {name, kept: all|receipt|none, drawn, note}.
+        A picture from before its settings were kept answers 200 with
+        kept "none" or "receipt" and says so in `note` - it is not missing,
+        it just has less to say."""
+        s = request.app.state.sessions.get(sid)
+        if s is None:
+            return JSONResponse({"error": "no such session"}, status_code=404)
+        made = pictures.made_of(s, name)
+        if made is None:
+            return JSONResponse({"error": "no such file in this chat"}, status_code=404)
+        return made
+
     # ── Rewind, fork, take one out ──────────────────────────────────────
     # Not while Claude is answering: the turn would land on a thread that
     # moved under it.
@@ -1442,7 +1457,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         why = str(body.get("why") or "").strip()
         if not sid:
             return {k: v for k, v in out.items()}
-        kept = await asyncio.to_thread(pictures.keep_drawn, store, sid, asked, why, out)
+        kept = await asyncio.to_thread(pictures.keep_drawn, store, sid, asked, why, out, body["request"])
         if kept is None:
             return JSONResponse({"error": "the node finished but sent no picture back", **{k: v for k, v in out.items() if k != "images"}},
                                 status_code=502)

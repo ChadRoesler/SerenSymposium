@@ -12,6 +12,10 @@ Pinned here:
   a receipt of model / node / seed), shown at full size by the chat's own
   files route; without a session nothing is kept
 - the gallery is relayed, the file streamed, never a path on another box
+- what made a picture is kept on its file entry (`drawn`: prompt, negative,
+  model, LoRAs and weights, steps / cfg / sampler, seed, size) and answered
+  by .../files/{name}/settings; a picture from before that says so plainly
+  (kept "receipt" or "none"), never an error (24 Oct 2026)
 """
 from __future__ import annotations
 
@@ -20,7 +24,7 @@ import json
 
 import httpx
 
-from seren_symposium.pictures import parse_translation, picture_name, shape_options, slug
+from seren_symposium.pictures import drawn_settings, model_name, parse_translation, picture_name, shape_options, slug
 
 PNG = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 60
 
@@ -64,7 +68,8 @@ def _lodestar(seen: list):
             assert body["holder"] == "symposium"
             return httpx.Response(200, json={"ok": True, "node": "node-c", "model": {"name": "krea2Turbo.safetensors"}, "arch": "krea2",
                                              "prompt": body["prompt"], "negative": "people", "seed": 42, "width": 1024, "height": 1024,
-                                             "loras": [], "seconds": 31.5, "notes": [],
+                                             "loras": [dict(l, fit="good") for l in body.get("loras") or []], "seconds": 31.5, "notes": [],
+                                             "settings": {"steps": 8, "cfg": 1.0, "sampler": "euler", "scheduler": "simple"},
                                              "images": [{"filename": "7_00001_.png", "mime": "image/png", "data": base64.b64encode(PNG).decode()}]})
         if p == "/api/v1/gallery":
             return httpx.Response(200, json={"nodes": [{"node": "node-a", "service": "seren-workbench-x", "days": [{"day": "2026-10-15", "pictures": 2}], "count": 2}], "count": 2})
@@ -147,6 +152,74 @@ def test_a_drawing_is_kept_in_the_chat_as_a_turn_and_a_file(client):
     assert client.post("/api/pictures/draw", json={"request": "x"}).status_code == 400
     loose = client.post("/api/pictures/draw", json={"request": {"prompt": "x"}}).json()
     assert loose["ok"] and loose["images"][0]["data"], "no session: the picture comes back and is kept nowhere"
+
+
+def test_what_made_a_picture_is_kept_with_it_and_answered(client):
+    """Click a picture, see what made it: the prompt and negative as drawn,
+    the model, each LoRA with its weight, steps / cfg / sampler, seed, size -
+    on the picture's own file entry, and through the settings route."""
+    seen = []
+    _wire(client, seen)
+    sid = client.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    req = {"prompt": "a houseboat at dawn, mist", "negative": "text", "model": "krea2Turbo.safetensors",
+           "loras": [{"name": "x.safetensors", "weight": 0.7}], "width": 1024, "height": 1024}
+    got = client.post("/api/pictures/draw", json={"session": sid, "asked": "a houseboat", "request": req}).json()
+    (f,) = got["files"]
+    drawn = f["drawn"]
+    assert drawn["prompt"] == "a houseboat at dawn, mist" and drawn["negative"] == "people", "what Lodestar drew, its negative"
+    assert drawn["model"] == "krea2Turbo.safetensors" and drawn["arch"] == "krea2" and drawn["node"] == "node-c"
+    assert drawn["loras"] == [{"name": "x.safetensors", "weight": 0.7}]
+    assert drawn["settings"] == {"steps": 8, "cfg": 1.0, "sampler": "euler", "scheduler": "simple"}
+    assert drawn["seed"] == 42 and (drawn["width"], drawn["height"]) == (1024, 1024)
+    assert drawn["request"] == req, "the request as asked, without the holder Symposium added"
+    kept = client.get(f"/api/sessions/{sid}").json()["messages"][1]
+    assert kept["files"][0]["drawn"] == drawn, "kept in the chat, not only answered"
+    assert kept["meta"]["settings"]["steps"] == 8, "the turn's receipt has the steps too"
+    made = client.get(f"/api/sessions/{sid}/files/{f['name']}/settings").json()
+    assert made == {"name": f["name"], "kept": "all", "drawn": drawn, "note": ""}
+    # a fork takes the picture and what made it
+    fork = client.post(f"/api/sessions/{sid}/fork", json={"at": 2}).json()["id"]
+    assert client.get(f"/api/sessions/{fork}/files/{f['name']}/settings").json()["kept"] == "all"
+    assert client.get(f"/api/sessions/{sid}/files/nope.png/settings").status_code == 404
+    assert client.get("/api/sessions/nope/files/x.png/settings").status_code == 404
+
+
+def test_a_picture_from_before_says_so_plainly(client):
+    """Pictures drawn before `drawn` was kept: what their turn's receipt has,
+    and a note that steps, cfg and the sampler were not kept. An attached
+    picture has nothing: kept "none", said plainly - 200, not an error."""
+    old = [{"role": "user", "content": "a houseboat"},
+           {"role": "assistant", "content": "![a houseboat](files/0a1b2c3d-picture-1.png)",
+            "meta": {"voice": "picture", "model": {"name": "krea2Turbo.safetensors"}, "node": "node-c", "seed": 7,
+                     "prompt": "a houseboat, mist", "negative": "people", "loras": [], "width": 1024, "height": 1024},
+            "files": [{"name": "0a1b2c3d-picture-1.png", "orig": "picture-1.png", "type": "image/png", "size": 68}]},
+           {"role": "user", "content": "look at this", "files": [{"name": "4e5f6a7b-cat.png", "orig": "cat.png",
+                                                                   "type": "image/png", "size": 68}]},
+           {"role": "assistant", "content": "a cat"}]
+    sid = client.post("/api/sessions", json={"folder": "den", "messages": old}).json()["id"]
+    made = client.get(f"/api/sessions/{sid}/files/0a1b2c3d-picture-1.png/settings")
+    assert made.status_code == 200
+    made = made.json()
+    assert made["kept"] == "receipt" and "not kept" in made["note"]
+    assert made["drawn"] == {"model": "krea2Turbo.safetensors", "node": "node-c", "seed": 7, "prompt": "a houseboat, mist",
+                             "negative": "people", "loras": [], "width": 1024, "height": 1024}
+    cat = client.get(f"/api/sessions/{sid}/files/4e5f6a7b-cat.png/settings")
+    assert cat.status_code == 200 and cat.json()["kept"] == "none" and cat.json()["drawn"] is None
+    assert "no settings were kept" in cat.json()["note"]
+
+
+def test_an_edited_plan_s_drawing_keeps_what_the_request_said():
+    """A plan's workflow, edited and drawn, comes back with no description:
+    the request fills in, the workflow itself is not kept (it is big, and
+    flagged instead); a model named by catalog key is kept by file name."""
+    drawn = drawn_settings({"ok": True, "node": "node-c", "seconds": 12, "images": []},
+                           {"prompt": "a lighthouse", "seed": 3, "workflow": {"1": {"inputs": {}}}, "node": "node-c",
+                            "holder": "symposium", "save_as": "symposium"})
+    assert drawn["prompt"] == "a lighthouse" and drawn["seed"] == 3 and drawn["from_workflow"] is True
+    assert "workflow" not in drawn["request"] and "holder" not in drawn["request"]
+    assert drawn["loras"] == [] and drawn["settings"] == {}
+    assert model_name("checkpoints/sdxl/pony.safetensors") == "pony.safetensors"
+    assert model_name({"name": "krea2Turbo.safetensors"}) == "krea2Turbo.safetensors" and model_name(None) is None
 
 
 def test_translate_asks_whoever_answers_the_chat(make_client, tmp_path, monkeypatch):

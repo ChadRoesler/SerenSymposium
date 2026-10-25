@@ -72,7 +72,14 @@
 
 <!-- ── Chat ─────────────────────────────────────────────────────────── -->
 <section class="view" id="chat">
-  <aside id="side"></aside>
+  <!-- Both bars fold to a strip and the chat gets the room (24 Oct 2026);
+       which are folded is this browser's to remember (scripts.js, BARS).
+       The chevron is the shell's .seren-chev, turned by aria-expanded. -->
+  <aside id="side">
+    <button type="button" class="bar-toggle" id="side-toggle" aria-expanded="true" aria-controls="side-list"
+            title="fold the projects away"><span class="seren-chev" aria-hidden="true"></span><span class="bar-name">Projects</span></button>
+    <div class="side-list" id="side-list"></div>
+  </aside>
 
   <div class="room" id="room">
     <div class="titlebar" id="titlebar" hidden>
@@ -105,7 +112,9 @@
     <div class="dropcover" id="dropcover">drop to attach</div>
   </div>
 
-  <div class="rail">
+  <div class="rail" id="rail">
+    <button type="button" class="bar-toggle" id="rail-toggle" aria-expanded="true"
+            title="fold the panels away"><span class="seren-chev" aria-hidden="true"></span><span class="bar-name">Panels</span></button>
     <!-- The picture panel: words -> a prompt the model reads (translate) ->
          what would be drawn and where (plan) -> any of it changed (tweak) ->
          drawn and kept in this chat (draw). Lodestar plans and draws;
@@ -123,6 +132,9 @@
           <button type="button" class="ghost" id="pic-translate" title="have whoever answers this chat write the prompt in this model's style">translate</button>
           <button type="button" class="ghost" id="pic-plan" title="what would be drawn, and where, without drawing">plan</button>
         </div>
+        <!-- what translate is doing, beside the button that started it: a
+             local model can take a minute, and the note by draw is out of sight -->
+        <p class="pic-status" id="pic-status" role="status" aria-live="polite" hidden></p>
         <label class="pic-label">prompt <span class="muted">(editable)</span></label>
         <textarea id="pic-prompt" rows="4" placeholder="the prompt the model reads - translate writes a draft, or write your own"></textarea>
         <label class="pic-label">negative</label>
@@ -323,7 +335,10 @@
   <div class="pages" id="services"></div>
 </section>
 
-<div class="lightbox" id="lightbox" hidden><img id="lightbox-img" alt=""></div>
+<div class="lightbox" id="lightbox" hidden><img id="lightbox-img" alt="">
+  <!-- a picture drawn here: what made it (GET .../files/{name}/settings) -->
+  <div class="lb-made" id="lightbox-made" hidden></div>
+</div>
 <div class="menu" id="menu" hidden role="menu"></div>
 <input type="file" id="picker" multiple hidden>
 <input type="file" id="importer" accept="application/json,.json" hidden>

@@ -115,6 +115,8 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                # -> files on this machine; no network at all
                "/api/sessions", "/api/sessions/{sid}", "/api/sessions/{sid}/live",
                "/api/sessions/{sid}/files", "/api/sessions/{sid}/files/{name}",
+               # what made a picture drawn here: read from the chat's own file
+               "/api/sessions/{sid}/files/{name}/settings",
                "/api/sessions/{sid}/rewind", "/api/sessions/{sid}/fork",
                "/api/sessions/{sid}/messages/{index}",
                # -> the prefs file beside the chats

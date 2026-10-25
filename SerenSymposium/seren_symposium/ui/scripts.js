@@ -147,7 +147,8 @@ async function ensureSession() {
 const presetFor = name => CFG.folders.find(f => f.name === name) || {};
 
 function drawSide() {
-  $("#side").innerHTML = folderNames().map(name => {
+  // into the list, not the bar: the bar's fold button is the page's, not redrawn
+  $("#side-list").innerHTML = folderNames().map(name => {
     const f = presetFor(name);
     const bits = [f.voice === "claude" ? voiceName("claude") : null, f.model,
                   f.voice !== "claude" && f.temperature != null ? `t=${f.temperature}` : null].filter(Boolean).join(" · ");
@@ -1232,9 +1233,94 @@ function drawShots() {
 }
 $("#shots").addEventListener("click", e => { const i = e.target.closest("[data-shot]"); if (i) lightbox(i.dataset.shot); });
 
-function lightbox(src) { $("#lightbox-img").src = src; $("#lightbox").hidden = false; }
-$("#lightbox").onclick = () => { $("#lightbox").hidden = true; $("#lightbox-img").removeAttribute("src"); };
-document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#lightbox").hidden) $("#lightbox").click(); });
+// A picture an answer brought (one drawn here, above all) opens with what
+// made it beside it - prompt, negative, model, LoRAs and weights, steps, cfg,
+// sampler, seed, size - from .../files/{name}/settings (24 Oct 2026). One
+// drawn before those were kept says so; your own attachments open bare.
+let LB_ASKED = 0;
+function lightbox(src) {
+  $("#lightbox-img").src = src; $("#lightbox").hidden = false;
+  const made = $("#lightbox-made"), ask = ++LB_ASKED;
+  made.hidden = true; made.innerHTML = ""; $("#lightbox").classList.remove("with-made");
+  const ours = answeredPicture(src);
+  if (!ours) return;
+  const shown = html => {
+    if (ask !== LB_ASKED || $("#lightbox").hidden) return;   // closed, or another picture opened meanwhile
+    made.innerHTML = html; made.hidden = false; $("#lightbox").classList.add("with-made");
+  };
+  call("GET", `${fileUrl(ours.sid, ours.name)}/settings`)
+    .then(got => { made.dataset.drawn = JSON.stringify(got.drawn || null); shown(madeHtml(got)); })
+    .catch(ex => shown(`<h4>What made it</h4><p class="lb-note bad">${esc(ex.body?.error || ex.message)}</p>`));
+}
+// A file of the open chat that an answer brought back, not a screen share:
+// {sid, name}, or null for anything else (your attachment, a gallery picture).
+function answeredPicture(src) {
+  let path;
+  try { path = new URL(src, location.href).pathname; } catch { return null; }
+  const m = path.match(/^\/api\/sessions\/([^/]+)\/files\/([^/]+)$/);
+  if (!m || !current || decodeURIComponent(m[1]) !== current.id) return null;
+  const name = decodeURIComponent(m[2]);
+  const msg = current.messages.find(x => (x.files || []).some(f => f.name === name));
+  const f = msg?.files.find(f => f.name === name);
+  return msg && msg.role === "assistant" && !isScreen(f) ? { sid: current.id, name } : null;
+}
+function madeHtml(got) {
+  const d = got.drawn, head = `<h4>What made it</h4>`;
+  if (!d) return head + `<p class="lb-note">${esc(got.note || "no settings were kept for this picture")}</p>`;
+  const show = v => v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+  const loras = (d.loras || []).map(l => `${String(l.name || "?").replace(/\.safetensors$/i, "")}  ×${l.weight ?? "?"}`).join("\n");
+  const rows = [["model", [d.model, d.arch, d.base].filter(Boolean).join(" · ")], ["vae", d.vae], ["node", d.node],
+                ["size", d.width && d.height ? `${d.width} × ${d.height}` : null],
+                ["seed", d.seed != null ? `${d.seed}${d.index ? ` · picture ${d.index} of ${d.count || "?"}` : ""}` : null],
+                ...Object.entries(d.settings || {}).map(([k, v]) => [k, show(v)]),
+                ["loras", d.loras ? (loras || "none") : null], ["prompt", d.prompt], ["negative", d.negative || (d.prompt ? "none" : null)],
+                ["notes", (d.notes || []).join("; ") || null],
+                ["drawn", [d.at ? new Date(d.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : null,
+                           d.seconds != null ? `in ${d.seconds}s` : null].filter(Boolean).join(" ") || null]];
+  return head + `<div class="pic-facts">`
+    + rows.filter(([, v]) => v != null && v !== "").map(([k, v]) => `<div class="row"><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join("")
+    + `</div>` + (got.note ? `<p class="lb-note">${esc(got.note)}</p>` : "")
+    + `<div class="lb-go">${d.prompt ? `<button type="button" class="ghost" data-copy="prompt">copy prompt</button>` : ""}`
+    + `<button type="button" class="ghost" data-copy="all" title="every setting, as JSON">copy all</button></div>`;
+}
+const lightboxClose = () => {
+  LB_ASKED++;
+  $("#lightbox").hidden = true; $("#lightbox-img").removeAttribute("src");
+  $("#lightbox-made").hidden = true; $("#lightbox").classList.remove("with-made");
+};
+$("#lightbox").onclick = e => {
+  const made = e.target.closest("#lightbox-made");
+  if (!made) return lightboxClose();                        // the picture or the dark around it: close
+  const b = e.target.closest("[data-copy]");
+  if (!b) return;                                           // reading, selecting: stay open
+  let d = null;
+  try { d = JSON.parse(made.dataset.drawn || "null"); } catch {}
+  if (d) copyText(b.dataset.copy === "prompt" ? d.prompt || "" : JSON.stringify(d, null, 1), b, b.textContent);
+};
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#lightbox").hidden) lightboxClose(); });
+
+// ── The bars: projects on the left, the panels on the right ─────────────
+// Either folds to a strip so the chat gets the room (24 Oct 2026). Which are
+// folded is this browser's to remember, like the tab - keep() and local()
+// already swallow a storage that refuses (a private window, a locked profile).
+const BARS = Object.assign({ side: true, rail: true }, local("symposium.bars", {}));
+function drawBars() {
+  for (const [bar, what] of [["side", "projects"], ["rail", "panels"]]) {
+    const open = BARS[bar] !== false;
+    $("#chat").classList.toggle(`${bar}-folded`, !open);
+    const t = $(`#${bar}-toggle`);
+    t.setAttribute("aria-expanded", String(open));
+    t.title = open ? `fold the ${what} away` : `bring the ${what} back`;
+  }
+}
+function foldBar(bar, open = BARS[bar] === false) {
+  BARS[bar] = open;
+  keep("symposium.bars", { side: BARS.side !== false, rail: BARS.rail !== false });
+  drawBars();
+}
+$("#side-toggle").onclick = () => foldBar("side");
+$("#rail-toggle").onclick = () => foldBar("rail");
+drawBars();
 
 // ── Screen share ────────────────────────────────────────────────────────
 // A source - a display (the main one unless you pick another) or, on Windows,
@@ -1892,10 +1978,18 @@ boot();
 const PIC = Object.assign({ model: "", size: "", loras: {} }, local("symposium.picture", {}));
 const savePic = () => keep("symposium.picture", { model: PIC.model, size: PIC.size, loras: PIC.loras });
 let PIC_OPTIONS = null, PIC_LORAS = [], PIC_PLAN = null;
+// The clock while a translate runs (null when none is): one at a time.
+let PIC_TRANSLATING = null;
 
 const picEl = id => $("#pic-" + id);
 const picNote = (text, bad = false) => { picEl("note").textContent = text || ""; picEl("note").classList.toggle("bad", !!bad); };
 const picState = text => { picEl("state").textContent = text || ""; };
+// The line under translate / plan: what translate is doing, or why it failed.
+const picStatus = (text, bad = false, busy = false) => {
+  const el = picEl("status");
+  el.textContent = text || ""; el.hidden = !text;
+  el.classList.toggle("bad", !!bad); el.classList.toggle("busy", !!busy);
+};
 
 function picModel() { return PIC_OPTIONS?.models.find(m => m.key === PIC.model || m.name === PIC.model) || null; }
 
@@ -1959,21 +2053,39 @@ function picRequest() {
   return req;
 }
 
+// 24 Oct 2026: a translate can take a minute on a local model, and all it
+// showed was a greyed button and a note down by draw, out of sight - so it
+// looked like nothing happened. Now the button spins and says so, a line
+// under it counts the seconds, the prompt box waits (read-only, so nothing
+// typed there is lost to the draft), and a failure is said in that line.
 async function picTranslate() {
+  if (PIC_TRANSLATING) return;                               // Ctrl+Enter while one runs asks nothing new
   const text = picEl("text").value.trim();
-  if (!text) { picNote("say what you want to see first", true); return; }
+  if (!text) { picStatus("say what you want to see first", true); return; }
   const m = picModel();
-  const button = picEl("translate");
-  button.disabled = true; picNote("writing the prompt…");
+  const button = picEl("translate"), prompt = picEl("prompt"), started = Date.now();
+  const who = voiceOfChat() === "claude" ? voiceName("claude") : "this chat's model";
+  const tick = () => picStatus(`translating with ${who}… ${Math.round((Date.now() - started) / 1000)}s`, false, true);
+  button.disabled = true; button.setAttribute("aria-busy", "true");
+  button.innerHTML = `<span class="spin" aria-hidden="true"></span>translating…`;
+  prompt.readOnly = true; prompt.classList.add("waiting");
+  tick(); PIC_TRANSLATING = setInterval(tick, 1000);
   try {
     // whoever answers this chat writes the draft: Claude in a Claude chat, the chat's own model otherwise
     const got = await call("POST", "/api/pictures/translate", { text, guide: m?.style?.guide || "", session: current?.id, folder });
-    picEl("prompt").value = got.prompt || "";
+    prompt.value = got.prompt || "";
     picEl("negative").value = got.negative || "";
     const by = got.voice === "claude" ? voiceName("claude") : (got.model || "a local model");
-    picNote(`drafted by ${by}${got.node && got.voice !== "claude" ? " on " + got.node : ""} - edit it as you like`);
-  } catch (ex) { picNote(ex.body?.error || ex.message, true); }
-  finally { button.disabled = false; }
+    picStatus(`drafted by ${by}${got.node && got.voice !== "claude" ? " on " + got.node : ""} in `
+      + `${Math.round((Date.now() - started) / 1000)}s - edit it as you like`);
+  } catch (ex) {
+    const detail = typeof ex.body?.detail === "string" ? ex.body.detail : "";
+    picStatus(`translate failed: ${[ex.body?.error || ex.message, detail].filter(Boolean).join(" - ")}`, true);
+  } finally {
+    clearInterval(PIC_TRANSLATING); PIC_TRANSLATING = null;
+    button.disabled = false; button.removeAttribute("aria-busy"); button.textContent = "translate";
+    prompt.readOnly = false; prompt.classList.remove("waiting");
+  }
 }
 
 async function picPlan() {
@@ -2018,6 +2130,7 @@ async function picDraw() {
 
 $("#picture-btn").onclick = () => {
   const p = $("#p-picture");
+  if (BARS.rail === false) foldBar("rail", true);            // the panel is in the rail: unfold it to show it
   p.open = true;
   if (!PIC_OPTIONS) picLoadOptions();
   picEl("text").focus();

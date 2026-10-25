@@ -17,7 +17,7 @@ body { height: 100vh; display: flex; flex-direction: column; font-size: 14px; }
 #views { flex: 1; min-height: 0; max-width: none; }
 .view { padding: 0; height: 100%; }
 .view.active { display: block; }
-#chat.view.active { display: grid; grid-template-columns: 250px minmax(0, 1fr) 300px; }
+#chat.view.active { display: grid; grid-template-columns: var(--side-w, 250px) minmax(0, 1fr) var(--rail-w, 300px); }
 #settings.view.active, #backend.view.active { overflow: auto; }
 .grow { flex: 1; }
 .note { font-size: 11.5px; color: var(--faint); margin: 6px 0 0; }
@@ -270,6 +270,7 @@ details.project .form { padding: 4px 0 14px 27px; }
 .pic-guide { margin: 0; font-size: 11.5px; line-height: 1.4; }
 .pic-go { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
 .pic-go .pic-note { margin-right: auto; font-size: 11.5px; min-height: 1em; }
+.pic-note.bad { color: var(--danger); }
 .pic-label { font-size: 11.5px; color: var(--text-dim); margin-top: 2px; }
 .pic-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
 .pic-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--text-dim); min-width: 0; }
@@ -368,7 +369,7 @@ dl.facts dd { margin: 0; font-family: var(--mono); font-size: 12px; word-break: 
             align-items: center; justify-content: center; cursor: zoom-out; }
 .lightbox img { max-width: 94vw; max-height: 92vh; border-radius: 6px; }
 
-@media (max-width: 1100px) { #chat.view.active { grid-template-columns: 220px minmax(0, 1fr); } .rail { display: none; } }
+@media (max-width: 1100px) { #chat.view.active { grid-template-columns: var(--side-w, 220px) minmax(0, 1fr); } .rail { display: none; } }
 
 /* A prompt fed in by a plugin (the game table, seren_symposium.table): marked
    by the server, drawn as the plugin's - left side, dashed, tagged - never as
@@ -447,3 +448,48 @@ details.st-server { margin: 4px 0; }
 details.st-server > summary { cursor: pointer; font-size: 12.5px; overflow-wrap: anywhere; }
 .st-status.connected { color: var(--ok); }
 .st-status.needs-auth, .st-status.failed { color: var(--danger); }
+
+/* ── 24 Oct 2026: the bars fold, translate shows it is working, a picture says what made it ── */
+/* Each bar folds to a strip with only its button, and the chat takes the
+   width. The chevron is the shell's .seren-chev (turned by aria-expanded). */
+#chat.side-folded { --side-w: 34px; }
+#chat.rail-folded { --rail-w: 34px; }
+.side-list { display: flex; flex-direction: column; gap: 1px; flex: 1 0 auto; }
+.bar-toggle { flex: none; display: flex; align-items: center; gap: 7px; width: 100%; padding: 3px 6px; margin: 0 0 4px;
+              background: none; border: 0; border-radius: 6px; color: var(--text-dim);
+              font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.bar-toggle:hover { color: var(--text); background: var(--surface-2); }
+.rail .bar-toggle { margin: 0; }
+#chat.side-folded #side { padding: 10px 3px; overflow: hidden; }
+#chat.side-folded .side-list { display: none; }
+#chat.rail-folded .rail { padding: 12px 3px; overflow: hidden; }
+#chat.rail-folded .rail > :not(.bar-toggle) { display: none; }
+#chat.side-folded #side .bar-toggle, #chat.rail-folded .rail .bar-toggle { flex-direction: column; padding: 6px 0; gap: 8px; }
+#chat.side-folded #side .bar-name, #chat.rail-folded .rail .bar-name { writing-mode: vertical-rl; }
+
+/* translate at work: the button spins, the line under it counts, the prompt waits */
+.pic-status { margin: -2px 0 0; font-size: 11.5px; color: var(--text-dim); text-align: right; }
+.pic-status.busy { color: var(--accent); }
+.pic-status.bad { color: var(--danger); text-align: left; }
+#pic-translate[aria-busy="true"] { color: var(--accent); cursor: progress; display: inline-flex; align-items: center; gap: 6px; }
+.spin { width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+        display: inline-block; flex: none; animation: pic-spin .8s linear infinite; }
+@keyframes pic-spin { to { transform: rotate(360deg); } }
+.pic textarea.waiting { opacity: .55; cursor: progress; }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; border-right-color: currentColor; opacity: .7; } }
+
+/* the lightbox, with what made the picture beside it */
+.lightbox.with-made { gap: 18px; padding: 0 16px; }
+.lightbox.with-made img { max-width: calc(94vw - 360px); }
+.lb-made { width: 330px; max-height: 92vh; overflow: auto; flex: none; cursor: auto; padding: 12px 14px;
+           background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 10px; font-size: 12.5px; }
+.lb-made h4 { margin: 0 0 8px; font-size: 13px; }
+.lb-made .pic-facts { padding: 0; }
+.lb-note { margin: 8px 0 0; font-size: 12px; color: var(--text-dim); }
+.lb-note.bad { color: var(--danger); }
+.lb-go { display: flex; gap: 6px; justify-content: flex-end; margin-top: 10px; }
+@media (max-width: 800px) {
+    .lightbox.with-made { flex-direction: column; overflow: auto; padding: 16px; }
+    .lightbox.with-made img { max-width: 94vw; max-height: 55vh; }
+    .lb-made { width: min(94vw, 520px); max-height: none; }
+}

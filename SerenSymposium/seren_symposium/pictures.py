@@ -18,7 +18,9 @@ comes back into the chat and is kept with it.
     draw        Lodestar's /api/v1/image, then the pictures are KEPT: saved
                 into the chat's files and recorded as a turn - the request
                 as what you said, the picture as the answer - so the chat
-                shows it at full size now and when the gallery is tidied
+                shows it at full size now and when the gallery is tidied.
+                Each picture's file entry carries `drawn`: what made it
+    made        what made one picture in a chat (made_of), for the viewer
     gallery     every node's gallery through Lodestar, for the gallery tab
 
 Symposium does not plan or draw anything itself; Lodestar owns the catalog,
@@ -125,12 +127,53 @@ def picture_name(seed: Any, why: str, i: int, count: int, mime: str) -> str:
     return f"picture-{stamp}-{seed}-{slug(why)}{f'-{i + 1}' if count > 1 else ''}{ext}"
 
 
-def keep_drawn(store: SessionStore, sid: str, asked: str, why: str, out: dict[str, Any]) -> Optional[dict[str, Any]]:
+def model_name(model: Any) -> Optional[str]:
+    """Lodestar names the model by catalog key ("checkpoints/x.safetensors")
+    or as {name, ...}; the file's name either way."""
+    if isinstance(model, dict):
+        model = model.get("name") or model.get("key")
+    return str(model).replace("\\", "/").rsplit("/", 1)[-1] if model else None
+
+
+def drawn_settings(out: dict[str, Any], request: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """What made a picture, kept on its file entry as `drawn` (24 Oct 2026:
+    the user wanted to click a picture and see what made it - prompt, negative,
+    the LoRAs and their weights, the lot). Lodestar's answer first: it says
+    what was actually drawn, the model's own negative added, the profile's
+    LoRAs chosen. The request fills what the answer leaves out - an edited
+    plan's workflow comes back with no description - and is kept as asked,
+    less the workflow, which can be the size of the rest put together."""
+    req = {k: v for k, v in (request or {}).items() if k not in ("workflow", "holder", "save_as")}
+
+    def got(k: str) -> Any:
+        return out.get(k) if out.get(k) not in (None, "") else req.get(k)
+
+    loras = out.get("loras") if out.get("loras") is not None else req.get("loras")
+    worn = [{"name": l.get("name"), "weight": l.get("weight")} if isinstance(l, dict) else {"name": l, "weight": None}
+            for l in loras or []]
+    drawn = {"model": model_name(got("model")), "arch": out.get("arch"), "base": out.get("base"),
+             "vae": model_name(out.get("vae")), "node": out.get("node"), "prompt": got("prompt"),
+             "negative": got("negative"), "seed": got("seed"), "width": got("width"), "height": got("height"),
+             "count": got("count"), "loras": worn, "settings": dict(out.get("settings") or {}),
+             "notes": list(out.get("notes") or []), "seconds": out.get("seconds"),
+             "at": dt.datetime.now().isoformat(timespec="seconds")}
+    drawn = {k: v for k, v in drawn.items() if v is not None}
+    if req:
+        drawn["request"] = req
+    if isinstance((request or {}).get("workflow"), dict):
+        drawn["from_workflow"] = True          # drawn from an edited plan: the workflow said the rest
+    return drawn
+
+
+def keep_drawn(store: SessionStore, sid: str, asked: str, why: str, out: dict[str, Any],
+               request: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
     """The drawing into the chat: each picture a file beside the session,
-    the turn recorded - the request as what you said, the pictures as the
-    answer with a receipt (model, node, seed, seconds). None when there is
-    no such session or nothing came back."""
+    carrying what made it (drawn_settings), the turn recorded - the request
+    as what you said, the pictures as the answer with a receipt (model,
+    node, seed, seconds). None when there is no such session or nothing
+    came back."""
     images = out.get("images") or []
+    drawn = drawn_settings(out, request)
     entries = []
     for i, im in enumerate(images):
         try:
@@ -143,6 +186,9 @@ def keep_drawn(store: SessionStore, sid: str, asked: str, why: str, out: dict[st
         entry = store.add_file(sid, picture_name(out.get("seed"), why or asked, i, len(images), mime), data, mime)
         if entry is None:
             return None
+        # on the entry, not a sidecar file: it goes where the picture goes -
+        # a fork, an export, an import - and the files folder holds only files
+        entry["drawn"] = {**drawn, **({"index": i + 1} if len(images) > 1 else {})}
         entries.append(entry)
     if not entries:
         return None
@@ -152,10 +198,39 @@ def keep_drawn(store: SessionStore, sid: str, asked: str, why: str, out: dict[st
     meta = {"voice": "picture", "model": out.get("model"), "node": out.get("node"), "seed": out.get("seed"),
             "seconds": out.get("seconds"), "prompt": out.get("prompt"), "negative": out.get("negative"),
             "loras": out.get("loras"), "width": out.get("width"), "height": out.get("height"),
-            "notes": out.get("notes") or []}
+            "settings": out.get("settings") or {}, "notes": out.get("notes") or []}
     saved = store.record(sid, asked, answer, meta, answer_files=entries)
     return {"files": entries, "answer": answer, "meta": meta, "session": saved}
 
 
+# What a turn's receipt kept before the pictures carried `drawn` (before 24
+# Oct 2026): enough to show, never steps, cfg or the sampler.
+_RECEIPT = ("model", "node", "prompt", "negative", "seed", "width", "height", "loras", "notes", "seconds")
+NOT_KEPT = "no settings were kept for this picture - it was not drawn here, or was drawn before Symposium kept them"
+PARTIAL = ("drawn before Symposium kept every setting: this is what the chat's receipt has; "
+           "steps, cfg and the sampler were not kept")
+
+
+def made_of(session: dict[str, Any], name: str) -> Optional[dict[str, Any]]:
+    """What made picture `name` in this chat: {name, kept, drawn, note}.
+    kept is "all" (it carries `drawn`), "receipt" (an older drawing: what
+    its turn's receipt has), or "none" (attached, a screen share, or drawn
+    before even the receipt). None when no message in the chat has it."""
+    for m in session.get("messages") or []:
+        for f in m.get("files") or []:
+            if f.get("name") != name:
+                continue
+            if isinstance(f.get("drawn"), dict):
+                return {"name": name, "kept": "all", "drawn": f["drawn"], "note": ""}
+            meta = m.get("meta") or {}
+            if meta.get("voice") == "picture" and meta.get("prompt"):
+                old = {k: meta.get(k) for k in _RECEIPT if meta.get(k) not in (None, "")}
+                if "model" in old:
+                    old["model"] = model_name(old["model"])
+                return {"name": name, "kept": "receipt", "drawn": old, "note": PARTIAL}
+            return {"name": name, "kept": "none", "drawn": None, "note": NOT_KEPT}
+    return None
+
+
 __all__ = ["shape_options", "parse_translation", "translate", "keep_drawn", "picture_name", "slug", "DRAW_TIMEOUT",
-           "TRANSLATE_SYSTEM"]
+           "TRANSLATE_SYSTEM", "drawn_settings", "made_of", "model_name"]
