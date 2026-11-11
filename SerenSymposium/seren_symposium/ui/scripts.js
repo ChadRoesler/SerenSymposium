@@ -74,7 +74,7 @@ async function boot() {
   await adoptOldProjects();
   folder = (CFG.folders[0] || {}).name || "";
   drawVoices(); await refresh(); drawLog(); drawTray(); screenInit(); earsInit();
-  poll(); setInterval(poll, 15000);
+  startWatching();
   show(local("symposium.tab", "chat"));
 }
 
@@ -664,34 +664,52 @@ const STATUS_LABEL = {
   unreachable:  ["down", "lodestar down"],
 };
 
-async function poll() {
-  try {
-    HEALTH = await (await fetch("/health")).json();
-    const [cls, label] = STATUS_LABEL[HEALTH.lodestar.status] || ["down", "unknown"];
-    $("#dot").className = "dot " + cls;
-    $("#stat").textContent = label;
-    $("#stat-pill").title = HEALTH.lodestar.detail || "";
-    $("#stat-pill").classList.toggle("hot", cls === "up");
-  } catch {
-    HEALTH = null;
-    $("#dot").className = "dot down"; $("#stat").textContent = "offline";
-    $("#stat-pill").classList.remove("hot");
-  }
+// The two things this page keeps an eye on, both through the baseplate's
+// watch(): each is redrawn only when its answer changed.
+function paintHealth(h) {
+  const [cls, label] = STATUS_LABEL[h.lodestar.status] || ["down", "unknown"];
+  $("#dot").className = "dot " + cls;
+  $("#stat").textContent = label;
+  $("#stat-pill").title = h.lodestar.detail || "";
+  $("#stat-pill").classList.toggle("hot", cls === "up");
+}
+function healthDown() {
+  HEALTH = null;
+  $("#dot").className = "dot down"; $("#stat").textContent = "offline";
+  $("#stat-pill").classList.remove("hot");
+  healthPanels();
+}
+// The panels that read HEALTH follow every answer, and a lost one.
+function healthPanels() {
   if (tab === "settings") drawAbout();
   if (tab === "backend") drawPings();
-  // Chats made or grown behind this window's back (the game table speaking
-  // into one) show up without a reload; the open chat is re-read when it grew.
-  try {
-    const seen = (await call("GET", "/api/sessions")).sessions;
-    const key = list => JSON.stringify(list.map(s => [s.id, s.updated, s.folder, s.title, s.answering]));
-    if (key(seen) !== key(SESSIONS)) {
-      SESSIONS = seen;
-      for (const s of SESSIONS) s.answering ? ANSWERING.add(s.id) : ANSWERING.delete(s.id);
-      drawSide(); lockComposer();
-      const open = current && SESSIONS.find(s => s.id === current.id);
-      if (open && open.updated !== current.updated && !ANSWERING.has(current.id) && !FOLLOWER) await openSession(current.id);
-    }
-  } catch {}
+}
+
+// Chats made or grown behind this window's back (the game table speaking
+// into one) show up without a reload; the open chat is re-read when it grew.
+const sessionsKey = list => JSON.stringify(list.map(s => [s.id, s.updated, s.folder, s.title, s.answering]));
+async function paintSessions(d) {
+  // already held: this window's own refresh() read the same list first
+  if (sessionsKey(d.sessions) === sessionsKey(SESSIONS)) return;
+  SESSIONS = d.sessions;
+  for (const s of SESSIONS) s.answering ? ANSWERING.add(s.id) : ANSWERING.delete(s.id);
+  drawSide(); lockComposer();
+  const open = current && SESSIONS.find(s => s.id === current.id);
+  if (open && open.updated !== current.updated && !ANSWERING.has(current.id) && !FOLLOWER) await openSession(current.id);
+}
+
+function startWatching() {
+  // /health needs no JSON content-type and no bearer: a plain fetch, as before
+  watch("/health", 15000, paintHealth, {
+    fetch: async path => (await fetch(path)).json(),
+    each: h => { HEALTH = h; healthPanels(); },
+    onError: healthDown,
+  });
+  // a failed read of the chats says nothing; the next round tries again
+  watch("/api/sessions", 15000, paintSessions, {
+    fetch: path => call("GET", path),
+    signature: d => sessionsKey(d.sessions),
+  });
 }
 
 // ── The tray: files waiting to go ───────────────────────────────────────

@@ -37,7 +37,7 @@ dependencies = [
     # and the viewer baseplate - so the chat chrome matches the embedded tabs
     # instead of looking like a different application bolted on. No Sinew:
     # Symposium talks only to Lodestar, and Lodestar does the waking.
-    "seren-meninges>=6.0.0,<7",
+    "seren-meninges>=6.2.0,<7",
 ]
 
 [project.optional-dependencies]
