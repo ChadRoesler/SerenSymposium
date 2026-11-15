@@ -138,6 +138,9 @@ def clean_messages(raw: Any) -> list[dict[str, Any]]:
         kept = {"role": m["role"], "content": m["content"], "at": m.get("at") or _now()}
         if isinstance(m.get("meta"), dict):
             kept["meta"] = m["meta"]
+        # An answer from a seat of a room (seren_symposium.room): whose it was.
+        if m["role"] == "assistant" and isinstance(m.get("seat"), str) and m["seat"]:
+            kept["seat"] = m["seat"][:32]
         # A message that did not come from the person: who fed it (the game
         # table, say) stays on it, so it is never drawn as theirs.
         if isinstance(m.get("source"), str) and m["source"]:
@@ -173,7 +176,9 @@ def summary(s: dict[str, Any]) -> dict[str, Any]:
     return {"id": s["id"], "folder": s["folder"], "title": s["title"],
             "created": s["created"], "updated": s["updated"], "count": len(s["messages"]),
             # what has spoken into this chat besides the person (["table"]), for the badge
-            "sources": list(s.get("sources") or [])}
+            "sources": list(s.get("sources") or []),
+            # a room's seats, by name (seren_symposium.room)
+            "seats": [x["name"] for x in s.get("seats") or []]}
 
 
 class SessionStore:
@@ -272,8 +277,9 @@ class SessionStore:
         out = set()
         for summ in self.list():
             s = self.get(summ["id"]) or {}
-            if (s.get("claude") or {}).get("session"):
-                out.add(s["claude"]["session"])
+            for holder in [s, *(s.get("seats") or [])]:      # a chat's own, and each seat's
+                if (holder.get("claude") or {}).get("session"):
+                    out.add(holder["claude"]["session"])
         return frozenset(out)
 
     def pick_up(self, conversation: dict[str, Any], folder: str = "", fork: bool = False) -> dict[str, Any]:
@@ -340,9 +346,100 @@ class SessionStore:
     @staticmethod
     def _forget_claude_past(s: dict[str, Any], index: int) -> None:
         """A change at message `index`: if Claude's conversation saw that far,
-        it no longer matches the chat, and the next turn starts a new one."""
+        it no longer matches the chat, and the next turn starts a new one -
+        for each seat of a room the same, one by one."""
         if (s.get("claude") or {}).get("seen", 0) > index:
             s.pop("claude", None)
+        for seat in s.get("seats") or []:
+            if (seat.get("claude") or {}).get("seen", 0) > index:
+                seat.pop("claude", None)
+
+    # ── A room's seats (seren_symposium.room) ───────────────────────────
+
+    def add_seat(self, sid: str, name: str, cwd: str = "", conversation: Optional[str] = None,
+                 fork: bool = False, host: str = "host") -> Optional[dict[str, Any]]:
+        """A seat at this chat's table: a name, the folder it works in, and -
+        picked up from a terminal - the CLI conversation it carries on. That
+        conversation has heard nothing of this room yet (seen 0), so its
+        first turn here is handed the room so far.
+
+        The FIRST seat added to a chat that already has a Claude in it makes
+        that Claude a seat too, named `host`, keeping its conversation and
+        all it has seen: inviting someone doesn't throw out who was there."""
+        from . import room
+        s = self.get(sid)
+        if s is None:
+            return None
+        if not room.valid_name(name):
+            raise Invalid("a seat's name is 1-32 letters, digits, _ . - or ·")
+        if not isinstance(cwd, str):
+            raise Invalid("cwd is a string")
+        if not s.get("seats") and s.get("claude"):
+            if not room.valid_name(host) or host == name:
+                raise Invalid(f"the chat's own Claude takes a seat too: name it something besides {name}")
+            s["seats"] = [{"name": host, "cwd": s["settings"].get("cwd") or "", "claude": s.pop("claude")}]
+        seats = s.setdefault("seats", [])
+        if room.seat(s, name) is not None:
+            raise Invalid(f"there is already a seat called {name}")
+        seat: dict[str, Any] = {"name": name, "cwd": cwd}
+        if conversation:
+            seat["claude"] = {"session": conversation, "seen": 0, **({"fork": True} if fork else {})}
+        seats.append(seat)
+        s["updated"] = _now()
+        self._write(s)
+        return s
+
+    def drop_seat(self, sid: str, name: str) -> Optional[dict[str, Any]]:
+        """The seat leaves; what it said stays in the chat, under its name."""
+        s = self.get(sid)
+        if s is None:
+            return None
+        before = len(s.get("seats") or [])
+        s["seats"] = [x for x in s.get("seats") or [] if x.get("name") != name]
+        if len(s["seats"]) == before:
+            raise Invalid(f"no seat called {name}")
+        if not s["seats"]:
+            s.pop("seats")
+        s["updated"] = _now()
+        self._write(s)
+        return s
+
+    def record_seat(self, sid: str, name: str, prompt: Optional[str], answer: Optional[str],
+                    meta: Optional[dict[str, Any]], claude_session: str,
+                    files: Optional[list[dict[str, Any]]] = None,
+                    answer_files: Optional[list[dict[str, Any]]] = None,
+                    claude_init: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+        """One seat's turn in a round. `prompt`: the person's message, which
+        the FIRST seat to come back writes in (the round's others find it
+        there). `answer` None: the seat passed - nothing of its goes in, but
+        it has heard the round. Either way the seat has now seen it all."""
+        s = self.get(sid)
+        if s is None:
+            return None
+        from . import room
+        seat = room.seat(s, name)
+        if seat is None:
+            raise Invalid(f"no seat called {name}")
+        now = _now()
+        if prompt is not None:
+            asked: dict[str, Any] = {"role": "user", "content": prompt, "at": now}
+            if files:
+                asked["files"] = files
+            s["messages"].append(asked)
+            if not s["title"]:
+                s["title"] = " ".join(prompt.split())[:48]
+        if answer is not None:
+            said: dict[str, Any] = {"role": "assistant", "content": answer, "at": now, "seat": name,
+                                    "meta": meta or {}}
+            if answer_files:
+                said["files"] = answer_files
+            s["messages"].append(said)
+        seat["claude"] = {"session": claude_session, "seen": len(s["messages"])}
+        if claude_init:
+            seat["claude_init"] = {**claude_init, "at": now}
+        s["updated"] = now
+        self._write(s)
+        return s
 
     def rewind(self, sid: str, to: Any) -> Optional[dict[str, Any]]:
         """Keep the first `to` messages; everything after goes."""

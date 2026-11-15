@@ -7,6 +7,8 @@ FAKE_CLAUDE_LOG, when set, gets one JSON line per run: {argv, prompt, cwd}.
 --fork-session with --resume: as the real one, the turn is in a NEW conversation,
 whose id `init` gives (the resumed one is left as it was).
 FAKE_CLAUDE_REPLY, when set, is the answer instead of "Hello there".
+FAKE_CLAUDE_SEATS='{"name": "words"}': the answer of that seat of a room (cued
+"Your turn, name."); {cwd} in the words is the folder it ran in.
 FAKE_CLAUDE_SAVE=name: the answer first writes a small PNG of that name into
 the first --add-dir (as Claude saving an image into the chat would).
 FAKE_CLAUDE_DRAW=1: a make_image call whose result is text AND an image block
@@ -136,6 +138,12 @@ def main():
         with open(os.path.join(args[args.index("--add-dir") + 1], save), "wb") as f:
             f.write(PNG)
     reply = os.environ.get("FAKE_CLAUDE_REPLY", "Hello there")
+    # A seat of a room is cued "Your turn, <name>." - FAKE_CLAUDE_SEATS maps a
+    # seat's name to what it says ({"kitchen": "pass"}); "{cwd}" in it is where it ran.
+    seats = json.loads(os.environ.get("FAKE_CLAUDE_SEATS") or "{}")
+    for name, said in seats.items():
+        if prompt.rstrip().endswith(f"Your turn, {name}."):
+            reply = said.replace("{cwd}", os.path.basename(os.getcwd()))
     if (want := os.environ.get("FAKE_CLAUDE_ASK")) and "--permission-prompt-tool" in args:
         reply = f"asked: {ask_permission(args, json.loads(want))['behavior']}"
     for word in (reply[:5], reply[5:]):

@@ -19,6 +19,8 @@ seren-symposium
 
 **Two voices.** A chat is answered by a local model through Lodestar, or — with `voice: claude` — by the `claude` CLI on your machine, with its own login, MCP servers and hooks. Each chat is one Claude conversation, resumed turn after turn; switch voices mid-chat and Claude is handed what it missed.
 
+**A room, not a relay.** Invite seats into a chat and it becomes a table: each seat its own Claude conversation in its own repo, answering in turn, each hearing what the others said, labelled by name. `@name` asks one. The point is pooled *contexts*, not more opinions from the same head.
+
 **Picked up, not copied.** A conversation started in a terminal can carry on in a chat: **pick up…** lists the CLI's own on this box, and the one picked resumes in the repo it began in — forked if its terminal may still have it open, so two windows never write one conversation. Only a terminal's: a headless run (the hippocampus waking a session) stays where it was started.
 
 **A loopback shim, not a web server.** Serving the UI from Python means the bearer never reaches JavaScript and Lodestar never needs CORS opened for a desktop app. The cost is one loopback port — and no inbound auth, which is why it binds `127.0.0.1` only. Widen `ui.host` past loopback and you haven't exposed the UI, you've built a different, unauthenticated service. And because loopback keeps out the LAN but not the other tabs in your browser, every request must come from Symposium's own page: a loopback `Host`, our own `Origin`, and JSON.
