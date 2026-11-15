@@ -504,3 +504,10 @@ details.st-server > summary { cursor: pointer; font-size: 12.5px; overflow-wrap:
 .pu-where { color: var(--accent); font-size: 12px; justify-self: end; }
 .pu-when, .pu-warm { color: var(--faint); font-size: 11.5px; }
 .pu-warm { justify-self: end; }
+
+/* A room's seats, under the chat's ⚙ (seren_symposium.room) */
+.seat-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
+.seat-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.seat-row .note { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.seat-add { display: flex; flex-wrap: wrap; gap: 6px; }
+.seat-add input { flex: 1 1 120px; min-width: 0; }

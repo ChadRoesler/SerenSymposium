@@ -53,7 +53,8 @@ const chatBusy = () => drawing || (current != null && ANSWERING.has(current.id))
 function lockComposer() {
   const locked = chatBusy();
   $("#send").disabled = locked;
-  $("#input").placeholder = locked && !drawing ? "answering… read or write in another chat meanwhile" : PLACEHOLDER;
+  $("#input").placeholder = locked && !drawing ? "answering… read or write in another chat meanwhile"
+    : current?.seats?.length ? `the room: ${current.seats.map(x => x.name).join(", ")} · @name asks just one` : PLACEHOLDER;
 }
 
 const voiceName = v => v === "claude" ? (CFG.claude?.name || "claude") : "local model";
@@ -209,24 +210,76 @@ async function drawPickup() {
     $("#pu-body").innerHTML = `<p class="note">Nothing to pick up in ${esc(got.dir)}.</p>`; return;
   }
   $("#pu-body").innerHTML = `<div class="pu-list">` + got.sessions.map(s =>
-    `<button class="pu-row" data-pu="${esc(s.id)}" title="${esc(s.cwd)} · ${esc(s.id)}">`
+    `<button class="pu-row" data-pu="${esc(s.id)}" data-cwd="${esc(s.cwd)}" title="${esc(s.cwd)} · ${esc(s.id)}">`
     + `<span class="pu-title">${esc(s.title || "untitled")}</span>`
     + `<span class="pu-where">${esc(lastPart(s.cwd))}</span>`
     + `<span class="pu-when">${s.said} said · ${esc(ago(s.updated))}</span>`
     + (s.warm ? `<span class="pu-warm" title="touched in the last few minutes: picking it up forks it">warm · will fork</span>` : "")
     + `</button>`).join("") + `</div>`;
 }
-function openPickup() { drawPickup(); $("#pickup-sheet").showModal(); }
+// Picked for a seat of the open chat rather than as a chat of its own: set by
+// "from a terminal…" under the chat's seats.
+let PICKUP_SEAT = false;
+function openPickup(forSeat = false) {
+  PICKUP_SEAT = forSeat;
+  $("#pickup-sheet h3").textContent = forSeat ? "Invite from a terminal" : "Pick up from a terminal";
+  drawPickup(); $("#pickup-sheet").showModal();
+}
 $("#pu-refresh").onclick = drawPickup;
+// A seat's name from its folder, the kitchen's way: SerenLodestar -> lodestar.
+const seatNameFor = cwd => lastPart(cwd).replace(/^seren/i, "").toLowerCase().replace(/[^\w·.-]+/g, "").slice(0, 32);
 $("#pu-body").onclick = async e => {
   const row = e.target.closest("[data-pu]");
   if (!row || row.disabled) return;
   row.disabled = true;
   try {
+    if (PICKUP_SEAT && current) {
+      const name = prompt("Seat name", seatNameFor(row.dataset.cwd) || "guest");
+      if (!name) { row.disabled = false; return; }
+      current = await call("POST", `/api/sessions/${encodeURIComponent(current.id)}/seats`, { name, pickup: row.dataset.pu });
+      $("#pickup-sheet").close(); await refresh(); drawLog(); drawSeats(); return;
+    }
     current = await call("POST", "/api/claude/sessions/pickup", { id: row.dataset.pu, folder });
     $("#pickup-sheet").close();
     folder = current.folder; await refresh(); drawLog(); show("chat");
   } catch (ex) { row.disabled = false; alert(`Could not pick it up: ${ex.message}`); }
+};
+
+// ── A room's seats (seren_symposium.room), under the chat's ⚙ ───────────
+// Each seat its own claude conversation in its own folder; a message goes
+// round them in order, each hearing the ones before; @name asks just one.
+function drawSeats() {
+  const box = $("#s-seats");
+  if (!current) { box.innerHTML = `<p class="note">Send the first message, then invite seats.</p>`; return; }
+  const seats = current.seats || [];
+  box.innerHTML = (seats.length
+      ? `<div class="seat-list">` + seats.map(x => `<div class="seat-row"><b>${esc(seatWho(x.name))}</b>`
+          + `<span class="note" title="${esc(x.cwd || "")}">${esc(x.cwd ? lastPart(x.cwd) : "claude.cwd")}</span>`
+          + `<button type="button" class="ghost" data-unseat="${esc(x.name)}" title="let ${esc(x.name)} go - what they said stays">✕</button></div>`).join("")
+        + `</div>`
+      : `<p class="note">One Claude here. Invite a seat and this becomes a room: each seat its own session in its own folder, `
+        + `answering in turn and hearing the others. @name asks just one.</p>`)
+    + `<div class="seat-add"><input id="seat-name" placeholder="name" maxlength="32" spellcheck="false">`
+    + `<input id="seat-cwd" placeholder="folder it works in" spellcheck="false">`
+    + `<button type="button" class="ghost" id="seat-invite">invite</button>`
+    + `<button type="button" class="ghost" id="seat-pickup">from a terminal…</button></div>`;
+}
+$("#s-seats").onclick = async e => {
+  if (!current) return;
+  const sid = encodeURIComponent(current.id);
+  try {
+    const gone = e.target.closest("[data-unseat]");
+    if (gone) {
+      current = await call("DELETE", `/api/sessions/${sid}/seats/${encodeURIComponent(gone.dataset.unseat)}`);
+    } else if (e.target.id === "seat-invite") {
+      const name = $("#seat-name").value.trim(), cwd = $("#seat-cwd").value.trim();
+      if (!name) return $("#seat-name").focus();
+      current = await call("POST", `/api/sessions/${sid}/seats`, { name, cwd });
+    } else if (e.target.id === "seat-pickup") {
+      return openPickup(true);
+    } else return;
+    await refresh(); drawLog(); drawSeats(); lockComposer();
+  } catch (ex) { alert(ex.message); }
 };
 
 // Drag a chat onto a project - its name, or any chat in it - to move it there;
@@ -411,10 +464,14 @@ function drawLog() {
   toBottom(true);
 }
 
+// A seat of a room, named the way the kitchen names a hand: wren·kitchen.
+const seatWho = s => CFG.claude?.name ? `${CFG.claude.name}·${s}` : s;
+
 // Who said it: you, the chat's Claude by name, or the local model that answered.
 function whoName(m) {
   // Fed in by a plugin (the game table): the plugin's name, never yours.
   if (m.role === "user") return m.source ? (m.by || m.source) : (CFG.you || "you");
+  if (m.seat) return seatWho(m.seat);
   const meta = m.meta || {};
   if (CFG.claude?.name && String(meta.node).toLowerCase() === CFG.claude.name.toLowerCase()) return CFG.claude.name;
   if (meta.voice === "picture") return `🖼 ${String(meta.model?.name || meta.model || "a picture").replace(/\.safetensors$/i, "")}`;
@@ -971,9 +1028,12 @@ async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
   // Claude's answer comes in pieces with steps between them, and is drawn in
   // that order rather than started over after every tool (22 Oct 2026: what
   // it said between tools used to vanish). A local model's preamble still goes.
-  const interleave = voiceOfChat() === "claude";
+  const interleave = voiceOfChat() === "claude" || !!current?.seats?.length;
   const parts = [];
   let partsBox = null;
+  // A room (seren_symposium.room): seat after seat in this one bubble, each
+  // kept as it lands; a seat that fails doesn't end the round.
+  const roomErrors = [];
   const paint = () => {
     queued = false;
     if (interleave) {
@@ -994,6 +1054,15 @@ async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
   const reader = r.body.getReader(), dec = new TextDecoder();
   let buf = "", failed = null, kept = false;
   const handle = ev => {
+    if (ev.type === "seat") {
+      // The next seat's turn: the bubble is theirs now, and starts empty.
+      parts.length = 0; steps.length = 0; raw = "";
+      live.querySelectorAll(".permit").forEach(p => p.remove());
+      live.querySelector(".who").textContent = seatWho(ev.seat);
+      status.set(`${ev.seat}'s turn`); paint();
+      return;
+    }
+    if (ev.type === "pass") { status.set(`${ev.seat} passes`); return; }
     if (ev.type === "chunk") {
       status.set("writing");
       if (interleave) {
@@ -1040,11 +1109,33 @@ async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
       if (!interleave) raw = ev.response ?? raw;
       paint(); tool?.remove(); status.set("keeping it");
     } else if (ev.type === "saved") {
+      kept = true;
+      if (ev.seat) {
+        // One seat of a room is in; the round goes on. Redraw the messages
+        // and keep this bubble for the next seat - never reopen the chat
+        // here, which would replay the round from its start (and loop).
+        if (FOLLOWER?.ctrl === ctrl) FOLLOWER.asked = null;
+        return refresh().then(async () => {
+          if (current?.id !== sid) return;
+          current = await call("GET", `/api/sessions/${encodeURIComponent(sid)}`);
+          drawLog();
+        });
+      }
       // The server has it. Redraw from the file - if this chat is still the
       // one on screen; otherwise the sidebar is enough.
-      kept = true; ANSWERING.delete(sid);
+      ANSWERING.delete(sid);
       return refresh().then(() => { if (current?.id === sid) return openSession(sid); });
+    } else if (ev.type === "round") {
+      ANSWERING.delete(sid);
+      if (!kept) return;
+      return refresh().then(async () => {
+        if (current?.id !== sid) return;
+        await openSession(sid);
+        if (roomErrors.length) $("#log").append(bubble({ role: "assistant", content: roomErrors.join("\n\n") },
+                                                       -1, 0, { cls: "err", bare: true, who: "symposium" }));
+      });
     } else if (ev.type === "error") {
+      if (ev.seat) { roomErrors.push(`${seatWho(ev.seat)}: ${[ev.error, ev.detail].filter(Boolean).join(" - ")}`); return; }
       failed = ev;
     }
   };
@@ -1069,6 +1160,7 @@ async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
   await Promise.all(pending);
   status.stop();
   if (left) return kept ? true : null;
+  if (!kept && !failed && roomErrors.length) failed = { error: roomErrors.join(" · ") };
   if (!kept && !failed) failed = { error: "the answer stopped before it was kept" };
   if (failed) {
     // Shown, never kept: the session file only ever gets turns that came back.
@@ -1590,6 +1682,7 @@ function drawChatSettings() {
   $("#s-model_override").setAttribute("list", claude ? "claude-models" : "models");
   if (claude && !preset.model) $("#s-model_override").placeholder = "the CLI's default";
   $("#s-cwd").placeholder = CFG.claude?.cwd || "Symposium's own folder (claude.cwd)";
+  drawSeats();
   // Claude's permissions for this chat, over its project's, every chat's and
   // the carabiner's, and what a turn here would run with (22 Oct 2026).
   document.querySelectorAll("#set-chat-form .claude-only").forEach(el => { el.hidden = !claude; });

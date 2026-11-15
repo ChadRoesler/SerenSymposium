@@ -107,6 +107,8 @@ What runs is the yaml's (`claude:` — the program, its working directory, the t
 
 Each turn is also told where it's answering (`claude.framing`, after the chat's own system prompt): that replies render as Markdown, where the chat's files are, and how to show an image.
 
+**A room: seats at one table.** A chat can have **seats** (⚙ → seats → *invite*, or *from a terminal…*): each its own Claude conversation, in its own folder, with a name — `wren·kitchen`, `wren·lodestar`. A message goes **round the table in seat order**, and each seat is handed everything said since it last spoke, every line labelled with who said it (`[Chad]`, `[lodestar]`), so the second can disagree with the first instead of both talking past you. `@name` in a message (or `to` on the wire) asks just those seats. A seat with nothing to add answers `pass`, which puts nothing in the chat but still counts as having heard the round. Each seat's system prompt says it is one seat of several, by name (`claude.room_framing`). The point is not five opinions from one head, it's five **contexts**: the seat that's been in Lodestar all week knows things this one doesn't. Inviting the first seat into a chat that already has a Claude keeps that Claude at the table as a seat of its own (named from its folder), with its conversation intact. A seat that leaves takes nothing with it; what it said stays, under its name. A room's round is one turn: it streams (`seat` opens each seat's part, `round` ends it), runs on if you close the window, and holds the chat until the last seat is done.
+
 **Picked up, not copied.** A conversation started in a terminal can carry on here: **pick up…** at the foot of the chat list shows the `claude` CLI's own conversations on this box (its transcripts, `~/.claude/projects` or `claude.projects_dir`, read and never written) that aren't a chat yet. Picked, one becomes a chat that *is* that conversation, not a transcript of it: its words come over for you to read, and Claude's next turn `--resume`s it, so nothing is handed over twice. It runs in the folder it began in (the chat's own **works in**, under ⚙), because `--resume` only finds a conversation from there, and that repo's CLAUDE.md and project settings are the ones it had. A conversation touched in the last ten minutes may still be open in its terminal, and two processes on one transcript would each answer without the other's turns, so that one is **forked** (`--fork-session` on its first turn here: a new id, the same past) and the terminal keeps its own; an older one is taken over, and a later `claude --resume` at the terminal sees what was said here. Only what began at a terminal is offered: a headless run — the hippocampus waking a session, a ripple, a chat Symposium itself started — stays where it was started, and asking for one by id is refused. What comes over is the words, not the workings: what you typed (including what you said mid-answer) and what was said back. The tools, the thinking and the hooks stay in the transcript, where the resumed conversation still has them.
 
 ---
@@ -234,6 +236,7 @@ claude:                  # the claude voice - see Voices
   ask: true              # ask in the window about a tool not on the list
   carabiner: ""          # its claude.yaml, for Settings; blank looks for it
   projects_dir: ""       # the CLI's conversations, for pick up…; blank = ~/.claude/projects
+  # room_framing: "..."  # what each seat of a room is told; {seats} {me} {you}; blank says nothing
   save_files: true       # may write into the chat's own folder, and only there
   handover_max_chars: 100000
   # framing: "..."       # what each turn is told about the window; blank says nothing
@@ -267,6 +270,8 @@ Three of these reach Lodestar; the session and screen routes touch only this mac
 | POST, PATCH | `/api/projects` | make a project; change one's settings or rename it (`{name, set?, rename?}` — its chats move along) |
 | POST | `/api/projects/remove` | `{name}` — the project goes; its chats stay, out of any project |
 | GET | `/api/claude` | the claude voice's settings, the modes, the carabiner on this box and its `session:` block (never its tokens); with `session`, or `folder` and `settings`, what a chat runs with and where each part came from |
+| POST | `/api/sessions/{id}/seats` | `{name, cwd?, pickup?, fork?, host?}` — a seat at the chat's table; `pickup` makes a terminal's conversation the seat. The first seat into a chat with a Claude seats that Claude too (`host`, else named from its folder) |
+| DELETE | `/api/sessions/{id}/seats/{name}` | the seat leaves; what it said stays |
 | GET | `/api/claude/sessions` | the CLI's conversations on this box begun at a terminal and not yet a chat here, newest first: `{id, cwd, title, updated, said, warm}` |
 | POST | `/api/claude/sessions/pickup` | `{id, folder?, fork?}` — a new chat that resumes that conversation, in its folder; `fork` defaults to whether it's warm. 403 for a headless run, 409 if it's already a chat |
 | GET | `/api/stack` | what a chat's model is given, layer by layer — `session`, or `folder` and a JSON `settings` (a chat not made yet; a project's own with none) |
@@ -349,7 +354,8 @@ Honesty beats a feature list that lies:
 - **A local model sees no pictures.** It's told an image was attached; showing it one is for Lodestar and a vision model. Audio and video aren't handled by anyone yet.
 - **Screen share is stills.** Polling sends the newest frame with your next message, not a stream; there's no global hotkey for push yet, only the button. Sharing one window is Windows-only.
 - **macOS doesn't start it at login yet.** Linux gets an XDG autostart entry, Windows a Startup shortcut; on a Mac, open it from the launcher.
-- **One Claude per chat.** A picked-up conversation is a chat of its own; bringing several into one room, each in its own repo and hearing the others, is the next piece, not this one.
+- **A room is slow by design and can't retry yet.** Seats answer one after another, so a round of four takes four turns' time. Retrying a round is refused (rewind and send again). Every seat is a Claude; a local model through Lodestar can't take a seat yet, though a voice that isn't one more of the same head is exactly what a room wants.
+- **Seats don't speak unprompted.** A round starts only when you send; seats can't call on each other or keep arguing without you.
 - **Warm is a guess.** "Touched in the last ten minutes" stands in for "a terminal still has it open"; a terminal left idle longer than that is taken over rather than forked. Say `fork: true` to be sure.
 - **Files stay until the chat goes.** Rewinding past or deleting a message leaves its files in the chat's folder (an edit sends them again); only deleting the chat removes them.
 

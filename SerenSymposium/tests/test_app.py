@@ -119,6 +119,9 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                "/api/sessions/{sid}/files/{name}/settings",
                "/api/sessions/{sid}/rewind", "/api/sessions/{sid}/fork",
                "/api/sessions/{sid}/messages/{index}",
+               # a room's seats: the chat's own file, and a terminal's transcript
+               # for a seat picked up from one (seren_symposium.room)
+               "/api/sessions/{sid}/seats", "/api/sessions/{sid}/seats/{name}",
                # -> the prefs file beside the chats
                "/api/prefs", "/api/projects", "/api/projects/remove", "/api/claude",
                # -> Margin, for the preface (seren_symposium.preface): the one page the

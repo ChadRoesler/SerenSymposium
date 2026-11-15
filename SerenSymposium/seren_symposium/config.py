@@ -134,6 +134,11 @@ class PrefaceConfig(BaseModel):
         )
 
 
+def _room_framing() -> str:
+    from .room import FRAMING
+    return FRAMING
+
+
 class ClaudeConfig(BaseModel):
     """The claude voice: chats where Claude answers, through the `claude` CLI
     on this machine (seren_symposium.claude_voice has the why).
@@ -175,6 +180,10 @@ class ClaudeConfig(BaseModel):
     # Where the CLI keeps its conversations, for picking one up from a
     # terminal into a chat (seren_symposium.terminal). Blank = ~/.claude/projects.
     projects_dir: str = ""
+    # Said to each seat of a room after the framing (seren_symposium.room):
+    # that it is one seat of several and how to share a table. {seats} the
+    # names, {me} this seat's, {you} the person's. Blank says nothing.
+    room_framing: str = Field(default_factory=lambda: _room_framing())
     # The page read to the model as its system prompt (PrefaceConfig).
     preface: PrefaceConfig = Field(default_factory=PrefaceConfig)
     # A tool that is not on the list is asked about IN THE WINDOW - Allow

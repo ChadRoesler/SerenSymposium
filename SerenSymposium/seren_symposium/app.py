@@ -76,7 +76,7 @@ from seren_meninges import get_version
 from seren_meninges.viewer import render_from_dir
 
 from . import __version__ as _fallback_version
-from . import attachments, preface, carabiner, claude_voice, ears, pictures, screen, stack, terminal
+from . import attachments, preface, carabiner, claude_voice, ears, pictures, room, screen, stack, terminal
 from . import permissions
 from .config import FolderPreset, SymposiumConfig, load_config
 from .prefs import Invalid as BadPref
@@ -117,13 +117,14 @@ def refuse_cross_site(cfg: SymposiumConfig, method: str, headers) -> Optional[tu
     return None
 
 
-def _trim_history(history: Any, max_chars: int) -> list[dict[str, Any]]:
+def _trim_history(history: Any, max_chars: int, also: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     """Keep the newest whole messages that fit in max_chars, oldest dropped first.
 
     Whole messages, never partial ones: half a turn reads as the model having
     been told something it was not. Dropping from the oldest end is what makes
     a long session degrade into a short-memory one instead of failing outright.
-    Only role and content go on: a session's timestamps and receipts are ours.
+    Only role and content go on: a session's timestamps and receipts are ours
+    (and `also`: a room's handover needs who said each one - seat, by).
     """
     if not history or not isinstance(history, list):
         return []
@@ -136,7 +137,8 @@ def _trim_history(history: Any, max_chars: int) -> list[dict[str, Any]]:
         if cost > budget:
             break
         budget -= cost
-        kept.append({"role": message.get("role"), "content": message.get("content", "")})
+        kept.append({"role": message.get("role"), "content": message.get("content", ""),
+                     **{k: message[k] for k in also if message.get(k)}})
     kept.reverse()
     return kept
 
@@ -195,6 +197,14 @@ class Turn:
         # shell draws such a message as its source's, never as the person's.
         self.source: Optional[str] = None
         self.by: str = ""
+        # A room (seren_symposium.room): the seats this message goes round,
+        # in order. Then claude is planned seat by seat, as the round goes.
+        self.room: Optional[list[str]] = None
+        self.layered: dict[str, Any] = {}
+        # One seat's turn in that round: whose, and whether it writes the
+        # person's message in (the first seat to come back does).
+        self.seat: Optional[str] = None
+        self.with_prompt = True
 
     def receipt(self, reply: dict[str, Any], tools: Optional[list[str]] = None,
                 steps: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
@@ -254,6 +264,33 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
         "cwd": layered.get("cwd") or "",
         "fork": bool(resume and known.get("fork")),
     }
+
+
+def plan_seat(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], seat: dict[str, Any],
+              layered: dict[str, Any], prompt: str, files: Optional[list[dict[str, Any]]],
+              pending: bool) -> dict[str, Any]:
+    """plan_claude for one seat of a room (seren_symposium.room): the same
+    permissions, model and files - but its own conversation and folder, a
+    handover where every line says who said it, and the room's framing after
+    the system prompt. `pending`: the person's message isn't in the chat yet
+    (no seat has come back this round), so it ends the handover from here."""
+    plan = plan_claude(cfg, store, {**s, "claude": seat.get("claude")},
+                       {**layered, "cwd": seat.get("cwd") or layered.get("cwd") or ""},
+                       s["messages"], prompt, files)
+    known = seat.get("claude") or {}
+    thread = list(s["messages"]) + ([{"role": "user", "content": prompt, "files": files or []}] if pending else [])
+    resumed = plan["resume"] is not None
+    missed = thread[known.get("seen", 0):] if resumed else thread
+    folder = store.files_dir(s["id"])
+    told = [{**m, "content": attachments.with_files(m.get("content", ""),
+                                                    attachments.for_claude(m.get("files") or [], folder))}
+            for m in missed]
+    plan["prompt"] = room.handover(_trim_history(told, cfg.claude.handover_max_chars, also=("seat", "by")),
+                                   seat["name"], cfg.ui.you, cfg.claude.name, resumed)
+    names = [x["name"] for x in s.get("seats") or []]
+    plan["system_prompt"] = "\n\n".join(p for p in (
+        plan["system_prompt"], room.framing(cfg.claude.room_framing, names, seat["name"], cfg.ui.you)) if p)
+    return plan
 
 
 def claude_system(cfg: SymposiumConfig, own: str, files: str) -> tuple[str, bool]:
@@ -378,9 +415,11 @@ def plan_turn(cfg: SymposiumConfig, store: SessionStore, body: Any,
     if not prompt and not files:
         return JSONResponse({"error": "prompt is required"}, status_code=400)
     layered = {**s["settings"],
-               **{k: v for k, v in body.items() if k not in ("session", "retry", "history", "files", "screen")},
+               **{k: v for k, v in body.items() if k not in ("session", "retry", "history", "files", "screen", "to")},
                "prompt": prompt, "folder": s["folder"], "history": messages}
     preset = cfg.folder(s["folder"])
+    if s.get("seats"):
+        return plan_room(cfg, s, layered, prompt, files, keep, body.get("to"))
     voice = layered.get("voice") or (preset.voice if preset else "") or "lodestar"
     if voice == "claude":
         if not claude_voice.available(cfg.claude):
@@ -397,6 +436,37 @@ def plan_turn(cfg: SymposiumConfig, store: SessionStore, body: Any,
     layered["prompt"] = attachments.with_files(
         prompt, attachments.for_local(files, store, sid, cfg.files.inline_max_chars))
     return Turn(to_lodestar_payload(cfg, layered), sid, prompt, keep, files=files)
+
+
+def _seat_name_for(folder: str, fallback: str) -> str:
+    """A seat's name from the folder it works in, the way the kitchen names a
+    hand: SerenLodestar -> lodestar. `fallback` when that makes no name."""
+    base = re.sub(r"^seren", "", Path(os.path.expanduser(folder or "")).name, flags=re.I).lower()
+    base = re.sub(r"[^\w·.-]+", "", base)[:32]
+    return base if room.valid_name(base) else fallback
+
+
+def plan_room(cfg: SymposiumConfig, s: dict[str, Any], layered: dict[str, Any], prompt: str,
+              files: list[dict[str, Any]], keep: Optional[int], to: Any) -> "Turn | JSONResponse":
+    """A message into a room: who answers it (room.who_answers), checked
+    before anything runs. Each seat's own plan waits for its turn."""
+    if keep is not None:
+        return JSONResponse({"error": "a room can't retry a round yet",
+                             "hint": "rewind to before the message and send it again"}, status_code=409)
+    if not claude_voice.available(cfg.claude):
+        return JSONResponse({"error": "the claude voice is not available here",
+                             "hint": "a room's seats are claude conversations"}, status_code=409)
+    names = room.who_answers(s["seats"], prompt, to)
+    if isinstance(names, str):
+        return JSONResponse({"error": names}, status_code=400)
+    for name in names:
+        where = (room.seat(s, name) or {}).get("cwd") or ""
+        if where and not Path(os.path.expanduser(where)).is_dir():
+            return JSONResponse({"error": f"{name} works in {where}, which is not a folder on this machine",
+                                 "hint": "give the seat another folder, or let it go"}, status_code=409)
+    turn = Turn({}, s["id"], prompt, None, files=files)
+    turn.room, turn.layered = names, layered
+    return turn
 
 
 async def bring_back(cfg: SymposiumConfig, store: SessionStore, turn: Turn, answer: str,
@@ -504,7 +574,12 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                                      mode=ask.get("mode"), own_tools="mode" not in ask,
                                      cwd=ask.get("cwd") or "", fork=bool(ask.get("fork")))
         async for event in (_with_asks(spoken, desk) if desk else spoken):
-            if event["type"] == "done":
+            # A seat of a room with nothing to add says so (room.passed): it
+            # has heard the round, and nothing of its goes in the chat.
+            passing = (event["type"] == "done" and turn.seat is not None
+                       and room.passed(event.get("response") or ""))
+            found: list[dict[str, Any]] = []
+            if event["type"] == "done" and not passing:
                 event["response"], found = await bring_back_said(cfg, store, turn, heard,
                                                                  event.get("response") or "", before)
                 # Pictures a tool sent back (make_image draws on another box):
@@ -513,13 +588,21 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                                                       int(cfg.files.max_mb * 1024 * 1024), heard.steps)
                 if found:
                     event["files"] = found
-            yield event
+            yield {"type": "pass", "model": event.get("model"), "node": event.get("node")} if passing else event
             if event["type"] == "done":
-                saved = store.record(turn.session, turn.prompt, event["response"],
-                                     turn.receipt(event, heard.tools, heard.kept_steps()), keep=turn.keep,
-                                     claude_session=heard.session_id, files=turn.files,
-                                     answer_files=found, source=turn.source, by=turn.by,
-                                     claude_init=heard.init)
+                if turn.seat is not None:
+                    saved = store.record_seat(
+                        turn.session, turn.seat, turn.prompt if turn.with_prompt else None,
+                        None if passing else event["response"],
+                        None if passing else turn.receipt(event, heard.tools, heard.kept_steps()),
+                        heard.session_id, files=turn.files if turn.with_prompt else None,
+                        answer_files=found, claude_init=heard.init)
+                else:
+                    saved = store.record(turn.session, turn.prompt, event["response"],
+                                         turn.receipt(event, heard.tools, heard.kept_steps()), keep=turn.keep,
+                                         claude_session=heard.session_id, files=turn.files,
+                                         answer_files=found, source=turn.source, by=turn.by,
+                                         claude_init=heard.init)
                 if saved is not None:
                     yield {"type": "saved", "session": summary(saved)}
     finally:
@@ -527,6 +610,35 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
         if desk is not None:
             permits.pop(desk.ticket, None)
             desk.close("the turn ended before anyone answered")
+
+
+async def room_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
+                      permits: Optional[dict[str, PermitDesk]] = None):
+    """A message going round a room's table (seren_symposium.room): each seat
+    in `turn.room`, in order, as a claude turn of its own - its conversation,
+    its folder - planned only when its turn comes, so it is handed what the
+    seats before it said this round. Every event says whose it is: a `seat`
+    line opens each one's part, and the round ends with `round`.
+
+    The person's message goes into the chat with the first seat to come back
+    (a turn that fails writes nothing, as anywhere here); one that fails or
+    passes doesn't stop the round."""
+    written = False
+    for name in turn.room or []:
+        s = store.get(turn.session)
+        seat = room.seat(s, name) if s is not None else None
+        yield {"type": "seat", "seat": name}
+        if seat is None:
+            yield {"type": "error", "seat": name, "error": f"{name} has left the room"}
+            continue
+        one = Turn({}, turn.session, turn.prompt, files=turn.files if not written else [])
+        one.seat, one.with_prompt = name, not written
+        one.claude = plan_seat(cfg, store, s, seat, turn.layered, turn.prompt, turn.files, pending=not written)
+        async for ev in claude_answer(cfg, store, one, set(), permits):
+            if ev["type"] == "saved":
+                written = True
+            yield {**ev, "seat": name}
+    yield {"type": "round", "seats": list(turn.room or [])}
 
 
 async def _with_asks(spoken, desk: PermitDesk):
@@ -921,6 +1033,9 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         turn = plan_turn(cfg, store, await _json(request), request.app.state.screen)
         if isinstance(turn, JSONResponse):
             return turn
+        if turn.room is not None:
+            return JSONResponse({"error": "a room's round is several answers; it streams",
+                                 "hint": "POST /api/chat/stream"}, status_code=400)
         if turn.claude is not None:
             if turn.session in request.app.state.answering:
                 return _busy()
@@ -968,6 +1083,11 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             return turn
         if turn.session and turn.session in request.app.state.answering:
             return _busy()
+        if turn.room is not None:
+            # A room: the round is one LiveTurn, holding the chat from the
+            # first seat to the last (seren_symposium.room).
+            source = room_answer(cfg, store, turn, request.app.state.permits)
+            return _ndjson(LiveTurn.begin(request, turn.session, source, asked_of(turn)).follow())
         if turn.claude is not None:
             # A set of its own: see /api/chat.
             source = claude_answer(cfg, store, turn, set(), request.app.state.permits)
@@ -1162,6 +1282,65 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         except Invalid as ex:
             return JSONResponse({"error": str(ex)}, status_code=400)
         return JSONResponse(s, status_code=201)
+
+    # ── A room's seats (seren_symposium.room) ───────────────────────────
+    # The chat's file, and - for a seat picked up from a terminal - the CLI's
+    # transcripts, read only. No network.
+
+    @app.post("/api/sessions/{sid}/seats")
+    async def seat_add(request: Request, sid: str):
+        """{name, cwd?, pickup?, fork?, host?} - a seat at this chat's table.
+        `pickup`: a terminal's conversation (an id from /api/claude/sessions)
+        that carries on as this seat, in its own folder unless `cwd` says
+        otherwise; `fork` as for a pickup. `host`: what the chat's own Claude
+        is called when it takes the first seat (else from its folder)."""
+        body = await _json(request)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "send a JSON object"}, status_code=400)
+        store: SessionStore = request.app.state.sessions
+        s = store.get(sid)
+        if s is None:
+            return JSONResponse({"error": "no such session"}, status_code=404)
+        if sid in request.app.state.answering:
+            return _busy()
+        cwd, conversation, fork = body.get("cwd") or "", None, False
+        if body.get("pickup") is not None:
+            if not terminal.is_id(body["pickup"]):
+                return JSONResponse({"error": "pickup is a claude conversation id"}, status_code=400)
+            if body["pickup"] in await asyncio.to_thread(store.claude_ids):
+                return JSONResponse({"error": "that conversation is already a chat or a seat here"}, status_code=409)
+            path = await asyncio.to_thread(terminal.find, terminal.projects_dir(cfg.claude.projects_dir), body["pickup"])
+            if path is None:
+                return JSONResponse({"error": "no such conversation on this box"}, status_code=404)
+            told = await asyncio.to_thread(terminal.transcript, path)
+            if not told["terminal"]:
+                return JSONResponse({"error": "that conversation was not started at a terminal"}, status_code=403)
+            conversation, cwd = told["id"], cwd or told["cwd"]
+            fork = body.get("fork")
+            if fork is None:
+                fork = time.time() - path.stat().st_mtime < terminal.WARM_SECONDS
+        if cwd and not Path(os.path.expanduser(str(cwd))).is_dir():
+            return JSONResponse({"error": f"{cwd} is not a folder on this machine"}, status_code=400)
+        host = body.get("host") or _seat_name_for(s["settings"].get("cwd") or cfg.claude.cwd, "host")
+        try:
+            s = store.add_seat(sid, body.get("name") or "", cwd=cwd, conversation=conversation,
+                               fork=bool(fork), host=host)
+        except Invalid as ex:
+            return JSONResponse({"error": str(ex)}, status_code=400)
+        return JSONResponse(s, status_code=201)
+
+    @app.delete("/api/sessions/{sid}/seats/{name}")
+    async def seat_drop(request: Request, sid: str, name: str):
+        store: SessionStore = request.app.state.sessions
+        if sid in request.app.state.answering:
+            return _busy()
+        try:
+            s = store.drop_seat(sid, name)
+        except Invalid as ex:
+            return JSONResponse({"error": str(ex)}, status_code=404)
+        if s is None:
+            return JSONResponse({"error": "no such session"}, status_code=404)
+        return s
 
     # ── May I? The claude voice's permission asks ───────────────────────
     # Not a door for anyone to open: an ask needs the ticket of a turn that
