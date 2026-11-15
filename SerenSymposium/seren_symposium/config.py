@@ -172,6 +172,9 @@ class ClaudeConfig(BaseModel):
     # strictness off for that turn (with a warning) rather than lose a tool.
     mcp_servers: list[str] = Field(default_factory=list)
     claude_json: str = ""            # that file; blank = ~/.claude.json
+    # Where the CLI keeps its conversations, for picking one up from a
+    # terminal into a chat (seren_symposium.terminal). Blank = ~/.claude/projects.
+    projects_dir: str = ""
     # The page read to the model as its system prompt (PrefaceConfig).
     preface: PrefaceConfig = Field(default_factory=PrefaceConfig)
     # A tool that is not on the list is asked about IN THE WINDOW - Allow

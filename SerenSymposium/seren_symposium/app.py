@@ -37,6 +37,8 @@ Serves:
     GET    /api/sessions/{id}/files/{name}/settings   what made a picture drawn here (pictures.made_of)
     PATCH  /api/prefs             your name, the claude voice's settings, confirm - kept beside the chats
     GET    /api/claude            the claude voice's settings and the carabiner clipped on this box
+    GET    /api/claude/sessions   the CLI's own conversations on this box (a terminal's), to pick up
+    POST   /api/claude/sessions/pickup      a new chat that IS one of them (seren_symposium.terminal)
     POST   /api/permit            the claude voice asking may-I (from seren_symposium.permit)
     POST   /api/permit/answer     your answer: once, always, deny
     POST   /api/projects          a new project (PATCH: change or rename one; .../remove)
@@ -55,6 +57,7 @@ import base64
 import binascii
 import json
 import logging
+import os
 import re
 import secrets
 import time
@@ -73,7 +76,7 @@ from seren_meninges import get_version
 from seren_meninges.viewer import render_from_dir
 
 from . import __version__ as _fallback_version
-from . import attachments, preface, carabiner, claude_voice, ears, pictures, screen, stack
+from . import attachments, preface, carabiner, claude_voice, ears, pictures, screen, stack, terminal
 from . import permissions
 from .config import FolderPreset, SymposiumConfig, load_config
 from .prefs import Invalid as BadPref
@@ -246,6 +249,10 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
         "add_dirs": [str(folder)],
         "allow": ([claude_voice.folder_rule(str(folder))] if cfg.claude.save_files else []) + perms["allow"],
         "mode": perms["mode"],
+        # Where it runs (a picked-up chat: where its conversation began), and
+        # whether its first turn here forks it off a terminal still holding it.
+        "cwd": layered.get("cwd") or "",
+        "fork": bool(resume and known.get("fork")),
     }
 
 
@@ -380,6 +387,11 @@ def plan_turn(cfg: SymposiumConfig, store: SessionStore, body: Any,
             return JSONResponse({"error": "the claude voice is not available here",
                                  "hint": "claude.enabled is off, or claude.command is not "
                                          "on this machine's PATH"}, status_code=409)
+        where = layered.get("cwd") or ""
+        if where and not Path(os.path.expanduser(where)).is_dir():
+            return JSONResponse({"error": f"this chat works in {where}, which is not a folder on this machine",
+                                 "hint": "change the chat's folder (⚙), or clear it to use claude.cwd"},
+                                status_code=409)
         return Turn({}, sid, prompt, keep, files=files,
                     claude=plan_claude(cfg, store, s, layered, messages, prompt, files))
     layered["prompt"] = attachments.with_files(
@@ -489,7 +501,8 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                                      add_dirs=ask.get("add_dirs"), allow=ask.get("allow"), turn=heard,
                                      permit={"url": _permit_url(cfg), "ticket": desk.ticket} if desk else None,
                                      replace=bool(ask.get("system_replace")),
-                                     mode=ask.get("mode"), own_tools="mode" not in ask)
+                                     mode=ask.get("mode"), own_tools="mode" not in ask,
+                                     cwd=ask.get("cwd") or "", fork=bool(ask.get("fork")))
         async for event in (_with_asks(spoken, desk) if desk else spoken):
             if event["type"] == "done":
                 event["response"], found = await bring_back_said(cfg, store, turn, heard,
@@ -807,7 +820,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             "folders": [f.model_dump() for f in cfg.folders],
             "sessions_dir": str(cfg.sessions_dir()),
             "claude": {"name": cfg.claude.name, "available": claude_voice.available(cfg.claude),
-                       "models": cfg.claude.models},
+                       "models": cfg.claude.models, "cwd": cfg.claude.cwd},
             "project_defaults": prefs.project_defaults(),
             "you": cfg.ui.you,
             "prefs_file": str(prefs.path),
@@ -1106,6 +1119,49 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
                 own = own if isinstance(own, dict) else {}
             out["effective"] = await asyncio.to_thread(permissions.for_chat, cfg, folder, own)
         return out
+
+    # ── Picking up a terminal's conversation (seren_symposium.terminal) ──
+    # Files on this box, read only: the CLI's own transcripts. No network.
+
+    @app.get("/api/claude/sessions")
+    async def terminal_sessions(request: Request):
+        """The CLI's newest conversations on this box that are not a chat
+        here yet, newest first: {id, cwd, title, updated, said, warm}."""
+        store = request.app.state.sessions
+        root = terminal.projects_dir(cfg.claude.projects_dir)
+        rows = await asyncio.to_thread(lambda: terminal.listing(root, exclude=store.claude_ids()))
+        return {"sessions": rows, "dir": str(root), "warm_seconds": terminal.WARM_SECONDS}
+
+    @app.post("/api/claude/sessions/pickup")
+    async def terminal_pickup(request: Request):
+        """{id, folder?, fork?} - a new chat that IS that conversation. fork
+        defaults to whether it is warm (a terminal may still be in it)."""
+        body = await _json(request)
+        if not isinstance(body, dict) or not terminal.is_id(body.get("id")):
+            return JSONResponse({"error": "id is a claude conversation id"}, status_code=400)
+        store = request.app.state.sessions
+        if body["id"] in await asyncio.to_thread(store.claude_ids):
+            return JSONResponse({"error": "that conversation is already a chat here"}, status_code=409)
+        root = terminal.projects_dir(cfg.claude.projects_dir)
+        path = await asyncio.to_thread(terminal.find, root, body["id"])
+        if path is None:
+            return JSONResponse({"error": "no such conversation on this box"}, status_code=404)
+        folder = body.get("folder") or ""
+        if not isinstance(folder, str):
+            return JSONResponse({"error": "folder is a string"}, status_code=400)
+        fork = body.get("fork")
+        if fork is None:
+            fork = time.time() - path.stat().st_mtime < terminal.WARM_SECONDS
+        conversation = await asyncio.to_thread(terminal.transcript, path)
+        if not conversation["terminal"]:
+            return JSONResponse({"error": "that conversation was not started at a terminal",
+                                 "hint": "a headless run - the hippocampus waking a session, a ripple - "
+                                         "stays where it was started"}, status_code=403)
+        try:
+            s = store.pick_up(conversation, folder=folder, fork=bool(fork))
+        except Invalid as ex:
+            return JSONResponse({"error": str(ex)}, status_code=400)
+        return JSONResponse(s, status_code=201)
 
     # ── May I? The claude voice's permission asks ───────────────────────
     # Not a door for anyone to open: an ask needs the ticket of a turn that

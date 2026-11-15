@@ -29,6 +29,11 @@ rewind, an edit, a deleted message - drops `claude`: the next turn starts a
 new CLI conversation with the chat as it now stands handed over. A fork, not
 an undo.
 
+A chat PICKED UP from a terminal (pick_up, seren_symposium.terminal) starts
+with `claude` already set - that conversation's id, every message seen - and
+`"fork": true` when the terminal may still have it open: its first turn here
+resumes into a new id, and the record of that turn drops the flag.
+
 WHY HERE AND NOT IN THE WEBVIEW: see SessionsConfig. The short of it is that
 localStorage belongs to an origin, and the origin has a port in it.
 
@@ -65,6 +70,9 @@ SETTINGS = {
     "permission_mode": str,
     "allowed_tools": list,
     "tools_inherit": bool,
+    # the folder the claude voice runs in for this chat, over claude.cwd: a
+    # chat picked up from a terminal runs where that conversation was started
+    "cwd": str,
 }
 ROLES = ("user", "assistant")
 VOICES = ("lodestar", "claude")
@@ -255,6 +263,29 @@ class SessionStore:
         s = {"id": uuid.uuid4().hex, "folder": folder, "title": title[:MAX_TITLE],
              "created": now, "updated": now,
              "settings": clean_settings(settings), "messages": clean_messages(messages)}
+        self._write(s)
+        return s
+
+    def claude_ids(self) -> frozenset[str]:
+        """Every CLI conversation a chat here is in - already picked up, or
+        begun here - so the list of a terminal's leaves them out."""
+        out = set()
+        for summ in self.list():
+            s = self.get(summ["id"]) or {}
+            if (s.get("claude") or {}).get("session"):
+                out.add(s["claude"]["session"])
+        return frozenset(out)
+
+    def pick_up(self, conversation: dict[str, Any], folder: str = "", fork: bool = False) -> dict[str, Any]:
+        """A chat that IS a CLI conversation already under way (a terminal's,
+        read by terminal.transcript): its words as the messages, its folder
+        as the chat's cwd, and Claude's next turn resuming it - nothing
+        handed over, since that conversation has seen it all."""
+        settings = {"voice": "claude", **({"cwd": conversation["cwd"]} if conversation.get("cwd") else {})}
+        s = self.create(folder=folder, title=conversation.get("title") or "", settings=settings,
+                        messages=conversation.get("messages") or [])
+        s["claude"] = {"session": conversation["id"], "seen": len(s["messages"]),
+                       **({"fork": True} if fork else {})}
         self._write(s)
         return s
 

@@ -130,6 +130,9 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                #    this box, the preface as above, and for a local model
                #    Lodestar's own /chat/inspect through app.state.client
                "/api/stack",
+               # -> the claude CLI's own transcripts on this box, read only, to
+               #    pick a terminal's conversation up as a chat (seren_symposium.terminal)
+               "/api/claude/sessions", "/api/claude/sessions/pickup",
                # -> the claude voice's own permission tool, and your answer to it
                "/api/permit", "/api/permit/answer",
                # -> this desktop's screen, taken here

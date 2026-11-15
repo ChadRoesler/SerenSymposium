@@ -3,7 +3,9 @@ stream-json in the shapes the real one does (captured from claude 2.1),
 so the claude voice is tested without a login, a network or a bill.
 
 FAKE_CLAUDE picks what happens:  ok (default) | fail | die
-FAKE_CLAUDE_LOG, when set, gets one JSON line per run: {argv, prompt}.
+FAKE_CLAUDE_LOG, when set, gets one JSON line per run: {argv, prompt, cwd}.
+--fork-session with --resume: as the real one, the turn is in a NEW conversation,
+whose id `init` gives (the resumed one is left as it was).
 FAKE_CLAUDE_REPLY, when set, is the answer instead of "Hello there".
 FAKE_CLAUDE_SAVE=name: the answer first writes a small PNG of that name into
 the first --add-dir (as Claude saving an image into the chat would).
@@ -66,8 +68,10 @@ def main():
     prompt = sys.stdin.read()
     if log := os.environ.get("FAKE_CLAUDE_LOG"):
         with open(log, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"argv": args, "prompt": prompt}) + "\n")
+            f.write(json.dumps({"argv": args, "prompt": prompt, "cwd": os.getcwd()}) + "\n")
     sid = args[args.index("--resume") + 1] if "--resume" in args else args[args.index("--session-id") + 1]
+    if "--resume" in args and "--fork-session" in args:
+        sid = str(uuid.uuid4())
     mode = os.environ.get("FAKE_CLAUDE", "ok")
 
     out({"type": "system", "subtype": "init", "session_id": sid, "model": "fake-model",

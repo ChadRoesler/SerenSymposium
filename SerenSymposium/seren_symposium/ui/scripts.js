@@ -17,7 +17,7 @@ async function call(method, path, body) {
   return j;
 }
 
-const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty"];
+const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty", "cwd"];
 const NUMBER = new Set(["temperature", "max_tokens", "repeat_penalty"]);
 // A chat's settings sit on top of its project's; the project calls one of
 // them by a shorter name.
@@ -169,7 +169,9 @@ function drawSide() {
          + (open ? (rows.join("") || `<div class="sess empty">nothing yet</div>`) : "");
   }).join("") + `<div class="loose-drop" data-folder="">drop here to take it out of its project</div>`
               + `<div class="foot"><button class="ghost" data-project="1">+ project</button>`
-              + `<button class="ghost" data-import="1">import…</button></div>`;
+              + `<button class="ghost" data-import="1">import…</button>`
+              + (CFG?.claude?.available ? `<button class="ghost" data-pickup="1" title="carry on a conversation a terminal started">pick up…</button>` : "")
+              + `</div>`;
 }
 
 $("#side").onclick = async e => {
@@ -185,6 +187,46 @@ $("#side").onclick = async e => {
   }
   if (e.target.closest("[data-project]")) return openNewProject();
   if (e.target.closest("[data-import]")) $("#importer").click();
+  if (e.target.closest("[data-pickup]")) openPickup();
+};
+
+// ── Pick up a terminal's conversation ──────────────────────────────────
+// The claude CLI's own conversations on this box (GET /api/claude/sessions);
+// one picked becomes a chat in the project open now, resuming it where it
+// began - forked off the terminal when it may still be open there.
+const ago = at => {
+  const s = Math.max(0, Date.now() / 1000 - at);
+  return s < 90 ? "just now" : s < 5400 ? `${Math.round(s / 60)} min ago`
+    : s < 129600 ? `${Math.round(s / 3600)} h ago` : when(at);
+};
+const lastPart = p => String(p || "").split(/[\\/]/).filter(Boolean).pop() || p || "?";
+async function drawPickup() {
+  $("#pu-body").innerHTML = `<p class="note">looking…</p>`;
+  let got;
+  try { got = await call("GET", "/api/claude/sessions"); }
+  catch (ex) { $("#pu-body").innerHTML = `<p class="note">Could not look: ${esc(ex.message)}</p>`; return; }
+  if (!got.sessions.length) {
+    $("#pu-body").innerHTML = `<p class="note">Nothing to pick up in ${esc(got.dir)}.</p>`; return;
+  }
+  $("#pu-body").innerHTML = `<div class="pu-list">` + got.sessions.map(s =>
+    `<button class="pu-row" data-pu="${esc(s.id)}" title="${esc(s.cwd)} · ${esc(s.id)}">`
+    + `<span class="pu-title">${esc(s.title || "untitled")}</span>`
+    + `<span class="pu-where">${esc(lastPart(s.cwd))}</span>`
+    + `<span class="pu-when">${s.said} said · ${esc(ago(s.updated))}</span>`
+    + (s.warm ? `<span class="pu-warm" title="touched in the last few minutes: picking it up forks it">warm · will fork</span>` : "")
+    + `</button>`).join("") + `</div>`;
+}
+function openPickup() { drawPickup(); $("#pickup-sheet").showModal(); }
+$("#pu-refresh").onclick = drawPickup;
+$("#pu-body").onclick = async e => {
+  const row = e.target.closest("[data-pu]");
+  if (!row || row.disabled) return;
+  row.disabled = true;
+  try {
+    current = await call("POST", "/api/claude/sessions/pickup", { id: row.dataset.pu, folder });
+    $("#pickup-sheet").close();
+    folder = current.folder; await refresh(); drawLog(); show("chat");
+  } catch (ex) { row.disabled = false; alert(`Could not pick it up: ${ex.message}`); }
 };
 
 // Drag a chat onto a project - its name, or any chat in it - to move it there;
@@ -1547,6 +1589,7 @@ function drawChatSettings() {
   for (const k of LOCAL_ONLY) { $(`#s-${k}`).hidden = claude; $(`label[for="s-${k}"]`).hidden = claude; }
   $("#s-model_override").setAttribute("list", claude ? "claude-models" : "models");
   if (claude && !preset.model) $("#s-model_override").placeholder = "the CLI's default";
+  $("#s-cwd").placeholder = CFG.claude?.cwd || "Symposium's own folder (claude.cwd)";
   // Claude's permissions for this chat, over its project's, every chat's and
   // the carabiner's, and what a turn here would run with (22 Oct 2026).
   document.querySelectorAll("#set-chat-form .claude-only").forEach(el => { el.hidden = !claude; });

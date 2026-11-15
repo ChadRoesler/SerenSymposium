@@ -493,3 +493,14 @@ details.st-server > summary { cursor: pointer; font-size: 12.5px; overflow-wrap:
     .lightbox.with-made img { max-width: 94vw; max-height: 55vh; }
     .lb-made { width: min(94vw, 520px); max-height: none; }
 }
+
+/* Pick up from a terminal: one row per claude conversation on this box */
+.pu-list { display: flex; flex-direction: column; gap: 2px; max-height: 60vh; overflow-y: auto; }
+.pu-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; text-align: left; padding: 7px 10px;
+          border: 0; border-radius: 6px; background: none; color: var(--text); font: inherit; cursor: pointer; }
+.pu-row:hover { background: var(--surface-2); }
+.pu-row:disabled { opacity: .5; cursor: progress; }
+.pu-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pu-where { color: var(--accent); font-size: 12px; justify-self: end; }
+.pu-when, .pu-warm { color: var(--faint); font-size: 11.5px; }
+.pu-warm { justify-self: end; }

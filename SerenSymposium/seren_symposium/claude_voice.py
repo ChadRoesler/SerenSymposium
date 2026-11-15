@@ -244,16 +244,20 @@ def digest_init(ev: dict[str, Any]) -> dict[str, Any]:
 def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
          model: str = "", system_prompt: str = "", add_dirs: Optional[list[str]] = None,
          allow: Optional[list[str]] = None, ask: bool = False, replace: bool = False,
-         mode: Optional[str] = None, own_tools: bool = True) -> list[str]:
+         mode: Optional[str] = None, own_tools: bool = True, fork: bool = False) -> list[str]:
     """`replace`: the system prompt is the whole one (--system-prompt, the
     preface in front), not an addition to the CLI's own. `mode` and
     `own_tools=False`: the turn's permissions were worked out in layers
     (seren_symposium.permissions) and `allow` is the whole list; without
-    them, the config's mode and list, plus `allow`."""
+    them, the config's mode and list, plus `allow`. `fork`: resume into a
+    new id, leaving the conversation resumed as it was (a terminal's, still
+    open - seren_symposium.terminal); the new id comes back in `init`."""
     exe = shutil.which(cfg.command[0]) or cfg.command[0]
     out = [exe, *cfg.command[1:], "-p", "--output-format", "stream-json", "--verbose",
            "--include-partial-messages"]
     out += ["--resume", resume] if resume else ["--session-id", new_id]
+    if resume and fork:
+        out += ["--fork-session"]
     if model := (model or cfg.model):
         out += ["--model", model]
     if system_prompt:
@@ -439,19 +443,21 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                  turn: Optional[ClaudeTurn] = None,
                  permit: Optional[dict[str, str]] = None,
                  replace: bool = False, mode: Optional[str] = None,
-                 own_tools: bool = True) -> AsyncIterator[dict[str, Any]]:
+                 own_tools: bool = True, cwd: str = "", fork: bool = False) -> AsyncIterator[dict[str, Any]]:
     """One turn, as Symposium stream events (see the module docstring).
     Always ends with exactly one `done` or `error`. `permit` ({url, ticket})
     is where the CLI's permission asks go; without it, unlisted tools are
-    refused as before."""
+    refused as before. `cwd`: where this turn runs, over claude.cwd (a chat
+    picked up from a terminal runs where its conversation was started)."""
     turn = turn or ClaudeTurn(resume or str(uuid.uuid4()))
     cmd = argv(cfg, resume=resume, new_id=turn.session_id, model=model, system_prompt=system_prompt,
                add_dirs=add_dirs, allow=allow, ask=bool(permit), replace=replace,
-               mode=mode, own_tools=own_tools)
+               mode=mode, own_tools=own_tools, fork=fork)
     stderr: list[str] = []
     blocks: dict[Any, dict[str, Any]] = {}      # content block index -> what it is so far
+    where = cwd or cfg.cwd
     try:
-        lines = _raw_lines(cmd, prompt, cfg.cwd and os.path.expanduser(cfg.cwd), cfg.timeout_seconds, stderr,
+        lines = _raw_lines(cmd, prompt, where and os.path.expanduser(where), cfg.timeout_seconds, stderr,
                            env=_env(permit))
         async with aclosing(lines):
             async for line in lines:
@@ -462,6 +468,10 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                 kind = ev.get("type")
                 if kind == "system" and ev.get("subtype") == "init":
                     turn.model = ev.get("model")
+                    # The conversation this turn is in, as the CLI has it: the
+                    # one asked for, or - forked - a new one.
+                    if isinstance(ev.get("session_id"), str) and ev["session_id"]:
+                        turn.session_id = ev["session_id"]
                     turn.init = digest_init(ev)
                 elif kind == "stream_event" and not ev.get("parent_tool_use_id"):
                     inner = ev.get("event") or {}
