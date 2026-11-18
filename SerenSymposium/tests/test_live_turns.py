@@ -126,6 +126,59 @@ def _until(check, seconds=10.0):
     return False
 
 
+def test_a_running_turn_can_be_stopped(make_client, tmp_path, monkeypatch):
+    """17 Nov 2026: a room's round ran four seats long with no way to say
+    stop. And, the same evening, the first stop in a real chat: the window
+    showed the stopped answer, a reload showed neither it nor the message it
+    answered, and the CLI's conversation remembered both. A stopped turn is
+    KEPT as far as it got - the message, the words said, the steps taken,
+    marked stopped - and the next turn carries on in the same conversation.
+    That conversation saw the message; whether it kept its own cut-short
+    answer is not something a killed CLI can be trusted on (the second stop,
+    the same night: the chat showed a whole answer the conversation could
+    not recall), so the answer is handed back to it, said to be its own."""
+    gate, log = tmp_path / "let-it-finish", tmp_path / "runs.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_WAIT", str(gate))
+    monkeypatch.setenv("FAKE_CLAUDE_SAY_FIRST", "Running the tests now.")
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    tc = make_client(config())
+    sid = tc.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    assert tc.post(f"/api/sessions/{sid}/stop", json={}).status_code == 404, "nothing to stop"
+
+    asker = _InThread(lambda: tc.post("/api/chat/stream", json={"session": sid, "prompt": "think about it"}))
+    asker.start()
+    live = tc.app.state.live
+    assert _until(lambda: sid in live and any(e["type"] == "thinking" for e in live[sid].events)), \
+        "it has said something and used a tool, and is still at work"
+    assert tc.post(f"/api/sessions/{sid}/stop", json={}).json() == {"ok": True}
+    asker.join(15)
+    assert not asker.is_alive(), "the stream ends when the turn is stopped"
+
+    kinds = [e["type"] for e in _events(asker.result.text)]
+    assert kinds[-2:] == ["stopped", "saved"] and "error" not in kinds and "done" not in kinds, kinds
+    s = tc.get(f"/api/sessions/{sid}").json()
+    assert s["answering"] is False
+    asked, said = s["messages"]
+    assert asked["content"] == "think about it"
+    assert said["content"] == "Running the tests now." and said["meta"]["stopped"] is True
+    assert [x["kind"] for x in said["meta"]["steps"]][:2] == ["said", "tool"]      # what it did, in order
+    first = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    conversation = first["argv"][first["argv"].index("--session-id") + 1]
+    assert s["claude"] == {"session": conversation, "seen": 1}, "it saw the message; its own answer goes back to it"
+
+    gate.write_text("go")
+    assert tc.post("/api/chat/stream", json={"session": sid, "prompt": "and now?"}).status_code == 200
+    again = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert again["argv"][again["argv"].index("--resume") + 1] == conversation
+    told = again["prompt"]
+    assert told.startswith("Your last answer in this chat was stopped by the person before it finished.")
+    assert "Running the tests now." in told and "Tools you had started before the stop" in told
+    assert "think about it" not in told, "the message itself it had already seen"
+    assert told.endswith("Now:\n\nand now?")
+    s = tc.get(f"/api/sessions/{sid}").json()
+    assert len(s["messages"]) == 4 and s["claude"]["seen"] == 4
+
+
 def test_a_running_turn_is_seen_joined_and_kept_whoever_is_watching(make_client, tmp_path, monkeypatch):
     gate = tmp_path / "let-it-finish"
     monkeypatch.setenv("FAKE_CLAUDE_WAIT", str(gate))

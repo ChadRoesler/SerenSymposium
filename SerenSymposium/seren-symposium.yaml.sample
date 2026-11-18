@@ -37,6 +37,17 @@ ui:
   port: 7426
   confirm_destructive: true
   you: "you"             # your name on your own messages
+  # What you send while an answer is coming waits above the box. Once the answer
+  # is in: meld (all of it as one message), each (one at a time) or hold (it waits
+  # for you). Every chat's default; a chat can say otherwise. Set from Settings too.
+  queue: "meld"
+  # What the picture panel's translate drafts a prompt from: plain (your words),
+  # chat (your words and the chat's recent messages) or fork (a throwaway copy of
+  # the chat's own Claude conversation - it knows everything, and is the slow one).
+  # Every chat's default; a chat can say otherwise. Set from Settings too.
+  translate: "chat"
+  translate_messages: 12       # chat: how many of the latest messages go along
+  translate_max_chars: 8000    # ...and how much of them at most
 
 # ── What the window sets wins ──────────────────────────────────────────
 # Your name, Claude's, its permissions and folders, confirm_destructive and the
@@ -98,8 +109,21 @@ claude:
   save_files: true          # may write into the chat's own folder - a drawing, notes - and only there
   handover_max_chars: 100000  # how much of the chat a NEW claude conversation is handed
   # framing: "..."          # what each turn is told about the window ({files} = the chat's folder)
+  # room_framing: "..."     # what each seat of a room is told ({seats} {me} {you})
+  room_volleys: 6           # a room: turns seats may take by calling on each other (@name) per message; 0 = they can't
   mcp_servers: []           # only these MCP servers (names from ~/.claude.json) are loaded, e.g. ["wren-workbench"];
-                            # empty = every server the CLI knows, the account's connectors included
+                            # empty = every server the CLI knows
+  mcp_always_load: []       # of mcp_servers, the ones whose tools are loaded up front instead of found through
+                            # ToolSearch, e.g. ["wren-workbench"]; costs each turn that server's whole tool list
+  builtin_tools: []         # Claude Code's own tools, cut down to these (ToolSearch is always kept); empty = all,
+                            # e.g. ["Bash", "PowerShell", "Read", "Edit", "Write", "Glob", "Grep", "Task", "WebSearch"]
+  skills: true              # its skills and slash commands; false = none of them (and no Skill tool)
+  claudeai_connectors: false  # the account's claude.ai connectors (Gmail, Drive...) as MCP servers; off = not loaded
+  auto_memory: last_resort  # Claude Code's own MEMORY.md: last_resort (kept, and each turn is told to use the
+                            # house's memory tools first) | off (the CLI starts without it) | on (as Claude Code has it)
+  # auto_memory_note: "..." # what each turn is told when auto_memory is last_resort
+  # tools_note: "..."       # what each turn is told about the house's own tools when mcp_servers names them
+                            # ({servers} = the names); blank says nothing
   # The preface: Margin's page (GET /preface) read to the model as its system
   # prompt IN PLACE of the CLI's own; the folder's prompt and the framing are
   # appended to it. Blank = the CLI keeps its prompt. A Margin that does not

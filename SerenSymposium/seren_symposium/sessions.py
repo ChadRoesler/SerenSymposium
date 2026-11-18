@@ -73,7 +73,28 @@ SETTINGS = {
     # the folder the claude voice runs in for this chat, over claude.cwd: a
     # chat picked up from a terminal runs where that conversation was started
     "cwd": str,
+    # the colour of each voice's bubbles in this chat, as a hue: {who: 0-359}.
+    # who: `you` (the person), `default` (the chat's one Claude), a local
+    # model's or a plugin's name. A seat keeps its own (its `hue`). Chad, 17
+    # Nov 2026: "color bubbles for all, set up in the per chat settings".
+    "colors": dict,
+    # the face each voice wears in THIS chat: {who: a picture in this chat's
+    # files}. Over the one it wears everywhere (seren_symposium.avatars), so a
+    # chat can have its own - Chad, 17 Nov 2026: "if you decide you want a
+    # specific avatar for cheese tag, or whatever, you have one".
+    "faces": dict,
+    # how what you send while an answer is coming goes once it is in, over
+    # every chat's (ui.queue): meld (as one message), each (one at a time) or
+    # hold (they wait for you). Chad, 17 Nov 2026: "they should also be a per
+    # chat with a default setting as well".
+    "queue": str,
+    # what the picture panel's translate is drafted from in this chat, over
+    # every chat's (ui.translate): plain (your words), chat (and the recent
+    # messages) or fork (a throwaway copy of the chat's Claude conversation)
+    "translate": str,
 }
+QUEUE_MODES = ("meld", "each", "hold")
+TRANSLATE_MODES = ("plain", "chat", "fork")
 ROLES = ("user", "assistant")
 VOICES = ("lodestar", "claude")
 MAX_TITLE = 120
@@ -105,6 +126,26 @@ def clean_settings(raw: Any) -> dict[str, Any]:
                 raise Invalid(f"{key} is true or false")
             out[key] = value
             continue
+        if key == "colors":
+            if not isinstance(value, dict) or len(value) > 64:
+                raise Invalid("colors is {who: hue}")
+            for who, hue in value.items():
+                if (not isinstance(who, str) or not 0 < len(who) <= 64 or isinstance(hue, bool)
+                        or not isinstance(hue, int) or not 0 <= hue < 360):
+                    raise Invalid("colors is {who: a hue from 0 to 359}")
+            if value:
+                out[key] = dict(value)
+            continue
+        if key == "faces":
+            if not isinstance(value, dict) or len(value) > 64:
+                raise Invalid("faces is {who: a picture in this chat}")
+            for who, name in value.items():
+                if (not isinstance(who, str) or not 0 < len(who) <= 64 or not isinstance(name, str)
+                        or not 0 < len(name) <= 200 or "/" in name or "\\" in name or name.startswith(".")):
+                    raise Invalid("faces is {who: the name of a picture in this chat's files}")
+            if value:
+                out[key] = dict(value)
+            continue
         if key == "allowed_tools":
             from .permissions import clean_rules
             try:
@@ -120,6 +161,10 @@ def clean_settings(raw: Any) -> dict[str, Any]:
             from .permissions import WINDOW_MODES
             if value not in WINDOW_MODES:
                 raise Invalid(f"permission_mode is one of {', '.join(m for m in WINDOW_MODES if m)}")
+        if key == "queue" and value not in QUEUE_MODES:
+            raise Invalid(f"queue is one of {', '.join(QUEUE_MODES)}")
+        if key == "translate" and value not in TRANSLATE_MODES:
+            raise Invalid(f"translate is one of {', '.join(TRANSLATE_MODES)}")
         if key == "voice" and value not in VOICES:
             raise Invalid(f"voice is one of {', '.join(VOICES)}")
         out[key] = value
@@ -141,6 +186,10 @@ def clean_messages(raw: Any) -> list[dict[str, Any]]:
         # An answer from a seat of a room (seren_symposium.room): whose it was.
         if m["role"] == "assistant" and isinstance(m.get("seat"), str) and m["seat"]:
             kept["seat"] = m["seat"][:32]
+            # ...and its last piece, which is what the other seats are handed
+            # (dropped if an edit left the answer without those words).
+            if isinstance(m.get("final"), str) and m["final"] and m["final"] in m["content"]:
+                kept["final"] = m["final"]
         # A message that did not come from the person: who fed it (the game
         # table, say) stays on it, so it is never drawn as theirs.
         if isinstance(m.get("source"), str) and m["source"]:
@@ -343,6 +392,51 @@ class SessionStore:
         shutil.rmtree(self.files_dir(sid), ignore_errors=True)
         return True
 
+    def set_face(self, sid: str, who: str, name: Optional[str]) -> Optional[dict[str, Any]]:
+        """`who` wears the picture `name` (one of this chat's files) in this
+        chat; None takes it off, back to what they wear everywhere. A chat's
+        `updated` stays: a face put on is not something said in it."""
+        s = self.get(sid)
+        if s is None:
+            return None
+        faces = dict(s["settings"].get("faces") or {})
+        if name:
+            if self.file_path(sid, name) is None:
+                raise Invalid("no such picture in this chat")
+            faces[who] = name
+        else:
+            faces.pop(who, None)
+        s["settings"] = clean_settings({**s["settings"], "faces": faces})
+        self._write(s)
+        return s
+
+    def remove(self, sid: str) -> Optional[dict[str, Any]]:
+        """Take a chat OUT of Symposium without destroying anything (Chad,
+        17 Nov 2026: a terminal's conversation loaded in by accident should
+        be removable "without deleting"). Its file and its attachments are
+        set aside under removed/, where nothing here looks; a Claude
+        conversation it carried was never Symposium's to delete and is free
+        again - to be picked up once more, or carried on in a terminal.
+        The chat as it was, or None when there is no such chat. Moving the
+        two back puts it back."""
+        path = self._path(sid)
+        s = self.get(sid)
+        if s is None or path is None:
+            return None
+        aside = self.root / "removed"
+        aside.mkdir(parents=True, exist_ok=True)
+        files = self.files_dir(sid)
+        for src in (path, files):
+            if not src.exists():
+                continue
+            dst = aside / src.name
+            if dst.is_dir():
+                shutil.rmtree(dst, ignore_errors=True)       # a copy set aside before, then put back: this is newer
+            elif dst.exists():
+                dst.unlink()
+            shutil.move(str(src), str(dst))
+        return s
+
     @staticmethod
     def _forget_claude_past(s: dict[str, Any], index: int) -> None:
         """A change at message `index`: if Claude's conversation saw that far,
@@ -377,11 +471,12 @@ class SessionStore:
         if not s.get("seats") and s.get("claude"):
             if not room.valid_name(host) or host == name:
                 raise Invalid(f"the chat's own Claude takes a seat too: name it something besides {name}")
-            s["seats"] = [{"name": host, "cwd": s["settings"].get("cwd") or "", "claude": s.pop("claude")}]
+            s["seats"] = [{"name": host, "cwd": s["settings"].get("cwd") or "", "hue": room.next_hue([]),
+                           "claude": s.pop("claude")}]
         seats = s.setdefault("seats", [])
         if room.seat(s, name) is not None:
             raise Invalid(f"there is already a seat called {name}")
-        seat: dict[str, Any] = {"name": name, "cwd": cwd}
+        seat: dict[str, Any] = {"name": name, "cwd": cwd, "hue": room.next_hue(seats)}
         if conversation:
             seat["claude"] = {"session": conversation, "seen": 0, **({"fork": True} if fork else {})}
         seats.append(seat)
@@ -404,15 +499,69 @@ class SessionStore:
         self._write(s)
         return s
 
+    def order_seats(self, sid: str, order: Any) -> Optional[dict[str, Any]]:
+        """Who sits where: `order` is every seat's name, once, in the order
+        the table goes round."""
+        s = self.get(sid)
+        if s is None:
+            return None
+        seats = s.get("seats") or []
+        names = [x["name"] for x in seats]
+        if not isinstance(order, list) or sorted(map(str, order)) != sorted(names):
+            raise Invalid(f"order is every seat's name, once (the seats: {', '.join(names) or 'none'})")
+        s["seats"] = [next(x for x in seats if x["name"] == n) for n in order]
+        s["updated"] = _now()
+        self._write(s)
+        return s
+
+    def change_seat(self, sid: str, name: str, changes: Any) -> Optional[dict[str, Any]]:
+        """{name?, hue?}: call a seat something else, or give it another
+        colour. A new name goes on what it already said too, so the chat
+        reads as one seat's and the others are handed it under one name;
+        its conversation and what it has heard are untouched."""
+        from . import room
+        s = self.get(sid)
+        if s is None:
+            return None
+        seat = room.seat(s, name)
+        if seat is None:
+            raise Invalid(f"no seat called {name}")
+        if not isinstance(changes, dict) or not changes or set(changes) - {"name", "hue"}:
+            raise Invalid("a seat's name or hue can be changed")
+        if "hue" in changes:
+            hue = changes["hue"]
+            if isinstance(hue, bool) or not isinstance(hue, int) or not 0 <= hue < 360:
+                raise Invalid("hue is a whole number from 0 to 359")
+            seat["hue"] = hue
+        new = changes.get("name", name)
+        if new != name:
+            if not room.valid_name(new):
+                raise Invalid("a seat's name is 1-32 letters, digits, _ . - or ·")
+            if room.seat(s, new) is not None:
+                raise Invalid(f"there is already a seat called {new}")
+            seat["name"] = new
+            for m in s["messages"]:
+                if m.get("seat") == name:
+                    m["seat"] = new
+        s["updated"] = _now()
+        self._write(s)
+        return s
+
     def record_seat(self, sid: str, name: str, prompt: Optional[str], answer: Optional[str],
                     meta: Optional[dict[str, Any]], claude_session: str,
                     files: Optional[list[dict[str, Any]]] = None,
                     answer_files: Optional[list[dict[str, Any]]] = None,
-                    claude_init: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+                    claude_init: Optional[dict[str, Any]] = None,
+                    final: Optional[str] = None, heard_it: bool = True,
+                    stopped: bool = False) -> Optional[dict[str, Any]]:
         """One seat's turn in a round. `prompt`: the person's message, which
         the FIRST seat to come back writes in (the round's others find it
         there). `answer` None: the seat passed - nothing of its goes in, but
-        it has heard the round. Either way the seat has now seen it all."""
+        it has heard the round. Either way the seat has now seen it all.
+        `final`: the answer's last piece, when it was said in several - what
+        the other seats are handed of it (room.heard). `heard_it` False: a
+        turn stopped before its CLI had even started, so the seat's
+        conversation has seen none of this and is handed it next time."""
         s = self.get(sid)
         if s is None:
             return None
@@ -433,8 +582,14 @@ class SessionStore:
                                     "meta": meta or {}}
             if answer_files:
                 said["files"] = answer_files
+            if final and final != answer:
+                said["final"] = final
             s["messages"].append(said)
-        seat["claude"] = {"session": claude_session, "seen": len(s["messages"])}
+        if heard_it:
+            # `stopped`: counted as having seen everything but its own
+            # cut-short answer, which is handed back to it (see record).
+            seat["claude"] = {"session": claude_session,
+                              "seen": len(s["messages"]) - (1 if stopped and answer is not None else 0)}
         if claude_init:
             seat["claude_init"] = {**claude_init, "at": now}
         s["updated"] = now
@@ -506,14 +661,19 @@ class SessionStore:
                files: Optional[list[dict[str, Any]]] = None,
                answer_files: Optional[list[dict[str, Any]]] = None,
                source: Optional[str] = None, by: str = "",
-               claude_init: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+               claude_init: Optional[dict[str, Any]] = None,
+               stopped: bool = False) -> Optional[dict[str, Any]]:
         """A turn that came back. keep cuts the thread first (a retry
         replaces the exchange it retried). A session with no title is named
         after its first prompt. claude_session: Claude answered, in that CLI
         session, and has now seen the whole thread. files: what the prompt
         carried; answer_files: what the answer brought back. source: the
         prompt was not the person's but fed in (the game table: "table"),
-        shown under `by`; the chat remembers every source that spoke in it."""
+        shown under `by`; the chat remembers every source that spoke in it.
+        `stopped`: the answer was cut short, and its conversation is counted
+        as having seen the prompt but NOT that answer - a CLI killed mid-turn
+        may or may not have written its own words down - so the next turn
+        hands them back."""
         s = self.get(sid)
         if s is None:
             return None
@@ -535,7 +695,7 @@ class SessionStore:
         if not s["title"]:
             s["title"] = " ".join(prompt.split())[:48]
         if claude_session:
-            s["claude"] = {"session": claude_session, "seen": len(s["messages"])}
+            s["claude"] = {"session": claude_session, "seen": len(s["messages"]) - (1 if stopped else 0)}
         if claude_init:
             s["claude_init"] = {**claude_init, "at": now}
         s["updated"] = now

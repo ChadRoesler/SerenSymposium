@@ -103,10 +103,18 @@ def handover(history: list[dict[str, Any]], prompt: str, resumed: bool = False) 
     another voice answered since its last: those, plainly, then the ask."""
     if not history:
         return prompt
+    if resumed and all(m.get("stopped") for m in history):
+        # Only its own answer, cut short: said plainly as that, not as
+        # something another voice did (app.as_told has why it goes back).
+        lines = ["Your last answer in this chat was stopped by the person before it finished. The chat kept "
+                 "what you had said, and your own record of that turn may be missing it. You had said:", ""]
+        lines += [m.get("content") or "(nothing yet)" for m in history]
+        return "\n".join(lines + ["", "Now:", "", prompt])
     lines = ["In this chat, while another voice was answering:" if resumed
              else "Earlier in this chat, before you were answering in it:", ""]
     for m in history:
-        lines.append(f"[{m.get('role')}] {m.get('content', '')}")
+        who = f"{m.get('role')}, stopped before it finished" if m.get("stopped") else m.get("role")
+        lines.append(f"[{who}] {m.get('content', '')}")
     lines += ["", "Now:", "", prompt]
     return "\n".join(lines)
 
@@ -244,20 +252,28 @@ def digest_init(ev: dict[str, Any]) -> dict[str, Any]:
 def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
          model: str = "", system_prompt: str = "", add_dirs: Optional[list[str]] = None,
          allow: Optional[list[str]] = None, ask: bool = False, replace: bool = False,
-         mode: Optional[str] = None, own_tools: bool = True, fork: bool = False) -> list[str]:
+         mode: Optional[str] = None, own_tools: bool = True, fork: bool = False,
+         ephemeral: bool = False) -> list[str]:
     """`replace`: the system prompt is the whole one (--system-prompt, the
     preface in front), not an addition to the CLI's own. `mode` and
     `own_tools=False`: the turn's permissions were worked out in layers
     (seren_symposium.permissions) and `allow` is the whole list; without
     them, the config's mode and list, plus `allow`. `fork`: resume into a
     new id, leaving the conversation resumed as it was (a terminal's, still
-    open - seren_symposium.terminal); the new id comes back in `init`."""
+    open - seren_symposium.terminal); the new id comes back in `init`.
+    `ephemeral`: nothing of this turn is kept and nobody is told it happened -
+    the CLI writes no transcript and runs no hooks (so no session-start
+    bookmark, no kitchen magnet for a session that is gone a moment later).
+    With `fork`, that is a side copy of a conversation: asked once, thrown
+    away, the conversation itself untouched (side_copy)."""
     exe = shutil.which(cfg.command[0]) or cfg.command[0]
     out = [exe, *cfg.command[1:], "-p", "--output-format", "stream-json", "--verbose",
            "--include-partial-messages"]
     out += ["--resume", resume] if resume else ["--session-id", new_id]
     if resume and fork:
         out += ["--fork-session"]
+    if ephemeral:
+        out += ["--no-session-persistence", "--settings", json.dumps({"disableAllHooks": True})]
     if model := (model or cfg.model):
         out += ["--model", model]
     if system_prompt:
@@ -268,8 +284,16 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
         out += ["--add-dir", os.path.expanduser(d)]
     if tools := list(dict.fromkeys([*(cfg.allowed_tools if own_tools else []), *(allow or [])])):
         out += ["--allowedTools", *tools]
+    # Claude Code's own extras, cut down (claude.builtin_tools, claude.skills).
+    if cfg.builtin_tools:
+        out += ["--tools", ",".join(dict.fromkeys([*cfg.builtin_tools, "ToolSearch"]))]
+    if not cfg.skills:
+        out += ["--disable-slash-commands"]
     named = user_mcp_servers(cfg.mcp_servers, cfg.claude_json)
-    servers: dict[str, Any] = dict(named or {})
+    # alwaysLoad: that server's tools are in the list from the start, not
+    # behind ToolSearch (claude.mcp_always_load).
+    servers: dict[str, Any] = {n: ({**s, "alwaysLoad": True} if n in cfg.mcp_always_load else s)
+                               for n, s in (named or {}).items()}
     if ask:
         servers["symposium"] = {"command": permit_server()[0], "args": permit_server()[1:]}
         out += ["--permission-prompt-tool", "mcp__symposium__permit"]
@@ -280,10 +304,22 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
     return out
 
 
-def _env(permit: Optional[dict[str, str]] = None) -> dict[str, str]:
+def _env(permit: Optional[dict[str, str]] = None, cfg: Optional[ClaudeConfig] = None) -> dict[str, str]:
     env = dict(os.environ)
     for k in PARENT_ENV:
         env.pop(k, None)
+    if cfg is not None:
+        # What Claude Code brings of its own that this house did not ask for:
+        # the account's claude.ai connectors, and its auto memory.
+        # Set or cleared, never inherited: a Symposium that was itself started
+        # by a Claude Code session (17 Nov 2026, a test run from inside one)
+        # carries that session's switches, and the yaml is what decides here.
+        env.pop("ENABLE_CLAUDEAI_MCP_SERVERS", None)
+        env.pop("CLAUDE_CODE_DISABLE_AUTO_MEMORY", None)
+        if not cfg.claudeai_connectors:
+            env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
+        if cfg.auto_memory == "off":
+            env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     if permit:
         # Not argv: any process can read a command line. The CLI hands its
         # environment to the permission tool it starts.
@@ -389,6 +425,15 @@ class ClaudeTurn:
             text += "\n\n" + result.strip()
         return text
 
+    def final(self, result: str) -> str:
+        """The last piece it said: the conclusion, without the working said
+        on the way there ("Checking the real box..."). The CLI's result is
+        that piece; the last words streamed, when it gives none."""
+        if result and result.strip():
+            return result.strip()
+        said = self.said()
+        return said[-1]["text"].strip() if said else ""
+
     def think(self, text: str) -> None:
         last = self.steps[-1] if self.steps else None
         if last is not None and last["kind"] == "thinking" and not last.get("closed"):
@@ -443,7 +488,8 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                  turn: Optional[ClaudeTurn] = None,
                  permit: Optional[dict[str, str]] = None,
                  replace: bool = False, mode: Optional[str] = None,
-                 own_tools: bool = True, cwd: str = "", fork: bool = False) -> AsyncIterator[dict[str, Any]]:
+                 own_tools: bool = True, cwd: str = "", fork: bool = False,
+                 ephemeral: bool = False) -> AsyncIterator[dict[str, Any]]:
     """One turn, as Symposium stream events (see the module docstring).
     Always ends with exactly one `done` or `error`. `permit` ({url, ticket})
     is where the CLI's permission asks go; without it, unlisted tools are
@@ -452,13 +498,13 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
     turn = turn or ClaudeTurn(resume or str(uuid.uuid4()))
     cmd = argv(cfg, resume=resume, new_id=turn.session_id, model=model, system_prompt=system_prompt,
                add_dirs=add_dirs, allow=allow, ask=bool(permit), replace=replace,
-               mode=mode, own_tools=own_tools, fork=fork)
+               mode=mode, own_tools=own_tools, fork=fork, ephemeral=ephemeral)
     stderr: list[str] = []
     blocks: dict[Any, dict[str, Any]] = {}      # content block index -> what it is so far
     where = cwd or cfg.cwd
     try:
         lines = _raw_lines(cmd, prompt, where and os.path.expanduser(where), cfg.timeout_seconds, stderr,
-                           env=_env(permit))
+                           env=_env(permit, cfg))
         async with aclosing(lines):
             async for line in lines:
                 try:
@@ -530,8 +576,10 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                         yield {"type": "error", "error": "claude did not finish the answer",
                                "detail": "; ".join(map(str, errors)) or ev.get("result") or ev.get("subtype")}
                     else:
-                        yield {"type": "done", "response": turn.answer(ev.get("result") or ""), "model": turn.model,
-                               "node": cfg.name, "tool_rounds": max(0, int(ev.get("num_turns") or 1) - 1)}
+                        result = ev.get("result") or ""
+                        yield {"type": "done", "response": turn.answer(result), "final": turn.final(result),
+                               "model": turn.model, "node": cfg.name,
+                               "tool_rounds": max(0, int(ev.get("num_turns") or 1) - 1)}
                     return
     except OSError as ex:
         yield {"type": "error", "error": "could not start claude", "detail": f"{type(ex).__name__}: {ex}"}
@@ -551,4 +599,31 @@ async def one_shot(cfg: ClaudeConfig, prompt: str, system_prompt: str = "", mode
             out = {"ok": True, "response": ev.get("response") or "", "model": ev.get("model"), "node": ev.get("node")}
         elif ev["type"] == "error":
             out = {"ok": False, "error": ev.get("error"), "detail": ev.get("detail")}
+    return out
+
+
+async def side_copy(cfg: ClaudeConfig, *, prompt: str, resume: str, **turn: Any) -> dict[str, Any]:
+    """One question to a throwaway copy of conversation `resume`: forked, so
+    it has all of that conversation in mind and the conversation never hears
+    of it; ephemeral, so the copy is not saved and no hooks run; and it is
+    stopped the moment it reaches for a tool, before the tool runs - a side
+    copy is asked for words, and it has the whole house's tools in reach.
+    `turn`: what a turn in that chat is given (system prompt, model, folders,
+    where it runs), so the copy is the same conversation and the CLI's cache
+    of it is reused. Returns {ok, response, model, node} or {ok: false, ...}.
+
+    Checked on the real CLI (2.1.326, 17 Nov 2026): the copy answered from
+    the conversation, got a new id, wrote no transcript, ran no hooks."""
+    out: dict[str, Any] = {"ok": False, "error": "claude gave no answer"}
+    spoken = events(cfg, prompt=prompt, resume=resume, fork=True, ephemeral=True, **turn)
+    async with aclosing(spoken):
+        async for ev in spoken:
+            if ev["type"] == "tool_status":
+                return {"ok": False, "error": "the side copy reached for a tool instead of answering",
+                        "detail": f"{ev.get('tool') or 'a tool'} - stopped before it ran"}
+            if ev["type"] == "done":
+                out = {"ok": True, "response": ev.get("final") or ev.get("response") or "",
+                       "model": ev.get("model"), "node": ev.get("node")}
+            elif ev["type"] == "error":
+                out = {"ok": False, "error": ev.get("error"), "detail": ev.get("detail")}
     return out

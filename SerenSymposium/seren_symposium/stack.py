@@ -211,7 +211,7 @@ def claude_stack(cfg: SymposiumConfig, preset: Optional[FolderPreset], folder: s
                          text=framing, state="on" if framing else "empty",
                          note="What each turn is told about the window."))
 
-    cwd = init.get("cwd") or cfg.claude.cwd or os.getcwd()
+    cwd = init.get("cwd") or settings.get("cwd") or cfg.claude.cwd or os.getcwd()
     files = memory_files(cwd, init.get("memory_auto") or "")
     layers.append(_layer("memory", "loaded", "Memory files", where=f"read by the CLI from {cwd}",
                          chars=sum(f["chars"] for f in files), files=files,
@@ -226,8 +226,10 @@ def claude_stack(cfg: SymposiumConfig, preset: Optional[FolderPreset], folder: s
     if init:
         grouped = group_tools(init)
         trim = ("Only some servers load: claude.mcp_servers." if cfg.claude.mcp_servers
-                else "Every server the CLI knows loads, the account's connectors too; "
-                     "claude.mcp_servers in the yaml names the only ones to load.")
+                else "Every server the CLI knows loads"
+                     + (", the account's connectors too" if cfg.claude.claudeai_connectors
+                        else ", except the account's claude.ai connectors (claude.claudeai_connectors is off)")
+                     + "; claude.mcp_servers in the yaml names the only ones to load.")
         layers.append(_layer("tools", "tools", "Tools", where=f"as the CLI loaded them for {init_from}",
                              count=grouped["count"], builtin=grouped["builtin"], servers=grouped["servers"],
                              note=trim + (" With ToolSearch among them, an MCP tool's description is read "

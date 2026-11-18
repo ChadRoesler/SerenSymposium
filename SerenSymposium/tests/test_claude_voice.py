@@ -241,6 +241,75 @@ def test_a_preface_replaces_the_clis_own_prompt(make_client, runs, tmp_path):
     assert client.get("/api/claude/system", params={"folder": "den"}).json()["replace"] is False
 
 
+def test_what_claude_code_brings_of_its_own_is_turned_down(make_client, runs):
+    """17 Nov 2026, the first tangle: every seat paid for the account's
+    connectors, and a new chat reached for MEMORY.md before the house's
+    memory. By default the connectors are off and the CLI's own memory is a
+    last resort, said in the system prompt; the yaml can say otherwise."""
+    client = make_client(config())
+    sid = client.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    stream(client, {"session": sid, "prompt": "hi"})
+    (run,) = runs()
+    assert run["env"] == {"ENABLE_CLAUDEAI_MCP_SERVERS": "false"}          # its memory stays, as a last resort
+    system = flag(run["argv"], "--append-system-prompt")
+    assert "You are answering in Seren Symposium" in system and "MEMORY.md" in system and "last resort" in system
+    # 17 Nov 2026: after a few stops, the CLI's filler for a cut-off turn came back as a real answer
+    assert "\"No response requested.\", that is the CLI's filler" in system
+    assert "last resort" in client.get("/api/claude/system", params={"folder": "den"}).json()["system"]
+
+    cfg = config()
+    cfg.claude.auto_memory, cfg.claude.claudeai_connectors = "off", True
+    client = make_client(cfg)
+    sid = client.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    stream(client, {"session": sid, "prompt": "hi"})
+    run = runs()[-1]
+    assert run["env"] == {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}          # off: nothing to be told about
+    assert "MEMORY.md" not in flag(run["argv"], "--append-system-prompt")
+
+    cfg = config()
+    cfg.claude.auto_memory = "on"
+    assert "MEMORY.md" not in make_client(cfg).get("/api/claude/system", params={"folder": "den"}).json()["system"]
+
+
+def test_the_houses_own_tools_are_named_so_they_are_not_forgotten(make_client):
+    """Chad, 17 Nov 2026: "the workbench tools should have a spot somewhere so
+    that theres a lack of forgetting". Their descriptions sit behind ToolSearch,
+    so each turn is told where they are and that they come first - when the
+    yaml names the house's servers; with none named there is nothing to say."""
+    cfg = config()
+    cfg.claude.mcp_servers = ["wren-workbench"]
+    system = make_client(cfg).get("/api/claude/system", params={"folder": "den"}).json()["system"]
+    assert "Your own tools are on the wren-workbench MCP server" in system and "ToolSearch" in system
+    assert system.index("You are answering in Seren Symposium") < system.index("Your own tools") < system.index("last resort")
+    assert "Your own tools" not in make_client(config()).get("/api/claude/system", params={"folder": "den"}).json()["system"]
+    cfg = config()
+    cfg.claude.mcp_servers, cfg.claude.tools_note = ["wren-workbench"], ""
+    assert "Your own tools" not in make_client(cfg).get("/api/claude/system", params={"folder": "den"}).json()["system"]
+
+
+def test_a_named_server_can_have_its_tools_loaded_up_front(tmp_path):
+    known = {"mcpServers": {"wren-workbench": {"type": "http", "url": "http://nuc:7255/mcp"},
+                            "other": {"type": "http", "url": "http://nuc:1/mcp"}}}
+    cj = tmp_path / "claude.json"
+    cj.write_text(json.dumps(known), encoding="utf-8")
+    cfg = ClaudeConfig(mcp_servers=["wren-workbench", "other"], mcp_always_load=["wren-workbench"], claude_json=str(cj))
+    conf = json.loads(flag(claude_voice.argv(cfg, resume=None, new_id="abc"), "--mcp-config"))["mcpServers"]
+    assert conf["wren-workbench"] == {**known["mcpServers"]["wren-workbench"], "alwaysLoad": True}
+    assert conf["other"] == known["mcpServers"]["other"]                   # found through ToolSearch, as before
+
+
+def test_the_clis_built_in_tools_and_skills_can_be_cut_down():
+    """17 Nov 2026: each seat of the first tangle carried 35 built-in tools and
+    30 skills and used a handful. ToolSearch stays whatever the list says:
+    without it a deferred MCP tool cannot be reached."""
+    plain = claude_voice.argv(ClaudeConfig(), resume=None, new_id="abc")
+    assert "--tools" not in plain and "--disable-slash-commands" not in plain      # as the CLI has them
+    cut = claude_voice.argv(ClaudeConfig(builtin_tools=["Bash", "Read"], skills=False), resume=None, new_id="abc")
+    assert flag(cut, "--tools") == "Bash,Read,ToolSearch" and "--disable-slash-commands" in cut
+    kept = claude_voice.argv(ClaudeConfig(builtin_tools=["ToolSearch", "Bash"]), resume=None, new_id="abc")
+    assert flag(kept, "--tools") == "ToolSearch,Bash"
+
+
 def test_a_preface_from_margin_is_fetched_and_a_down_margin_costs_nothing(monkeypatch):
     from seren_symposium import preface
     from seren_symposium.config import PrefaceConfig

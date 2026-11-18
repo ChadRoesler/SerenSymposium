@@ -3,10 +3,12 @@ stream-json in the shapes the real one does (captured from claude 2.1),
 so the claude voice is tested without a login, a network or a bill.
 
 FAKE_CLAUDE picks what happens:  ok (default) | fail | die
-FAKE_CLAUDE_LOG, when set, gets one JSON line per run: {argv, prompt, cwd}.
+FAKE_CLAUDE_LOG, when set, gets one JSON line per run: {argv, prompt, cwd, env}
+(env: the switches Symposium sets for the CLI, when it set them).
 --fork-session with --resume: as the real one, the turn is in a NEW conversation,
 whose id `init` gives (the resumed one is left as it was).
 FAKE_CLAUDE_REPLY, when set, is the answer instead of "Hello there".
+FAKE_CLAUDE_NO_TOOLS=1: answer without the two tool calls every other run makes.
 FAKE_CLAUDE_SEATS='{"name": "words"}': the answer of that seat of a room (cued
 "Your turn, name."); {cwd} in the words is the folder it ran in.
 FAKE_CLAUDE_SAVE=name: the answer first writes a small PNG of that name into
@@ -70,7 +72,9 @@ def main():
     prompt = sys.stdin.read()
     if log := os.environ.get("FAKE_CLAUDE_LOG"):
         with open(log, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"argv": args, "prompt": prompt, "cwd": os.getcwd()}) + "\n")
+            f.write(json.dumps({"argv": args, "prompt": prompt, "cwd": os.getcwd(),
+                                "env": {k: os.environ[k] for k in ("ENABLE_CLAUDEAI_MCP_SERVERS",
+                                                                   "CLAUDE_CODE_DISABLE_AUTO_MEMORY") if k in os.environ}}) + "\n")
     sid = args[args.index("--resume") + 1] if "--resume" in args else args[args.index("--session-id") + 1]
     if "--resume" in args and "--fork-session" in args:
         sid = str(uuid.uuid4())
@@ -98,7 +102,7 @@ def main():
         event({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
         event({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": first}})
         event({"type": "content_block_stop", "index": 0})
-    for name in ("ToolSearch", "mcp__workbench__get_time"):
+    for name in () if os.environ.get("FAKE_CLAUDE_NO_TOOLS") else ("ToolSearch", "mcp__workbench__get_time"):
         tid = "toolu_" + uuid.uuid4().hex[:12]
         event({"type": "content_block_start", "index": 0,
                "content_block": {"type": "tool_use", "id": tid, "name": name, "input": {}}})

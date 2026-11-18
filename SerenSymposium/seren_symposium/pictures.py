@@ -46,6 +46,24 @@ TRANSLATE_SYSTEM = (
     "Keep what the request asked for; add only what the style needs (composition, light, medium). "
     "Never add people the request did not ask for."
 )
+# `chat`: the translator is handed the chat's recent messages with the request.
+CONTEXT_NOTE = (
+    " The request comes out of a conversation, given with it for context only. Use the conversation to work out "
+    "who and what the request means (\"us\", \"that\", a name, the place, what is going on) and how those people "
+    "and things have been described; where it does not say what someone looks like, do not invent a likeness. "
+    "Draw only the picture asked for, not the conversation."
+)
+# `fork`: asked of a side copy of the chat's own conversation, which was there.
+FORK_ASK = (
+    "(From the picture panel, not a message from {you}. You are a side copy of this conversation, made for this one "
+    "question: nothing you say here is shown in the chat or remembered, and the conversation carries on without it.)\n\n"
+    "Turn this request for a picture into a prompt for an image model, using what you know from this conversation "
+    "about who and what it means and what they look like:\n\n{text}\n\n"
+    "Write for THIS model: {guide}\n"
+    "Answer with JSON only, no prose around it: {{\"prompt\": \"...\", \"negative\": \"...\"}}. "
+    "The prompt says what to draw in the model's style; the negative lists what to keep out, or is empty. "
+    "Keep what the request asked for; add only what the style needs. Use no tools: write it from what you already know."
+)
 _JSON = re.compile(r"\{.*\}", re.S)
 _SLUG = re.compile(r"[^a-z0-9]+")
 
@@ -86,14 +104,55 @@ def parse_translation(text: str) -> dict[str, str]:
     return {"prompt": (text or "").strip(), "negative": ""}
 
 
+def chat_context(messages: list[dict[str, Any]], you: str, voice: str, limit: int, max_chars: int) -> str:
+    """The chat's latest messages as text a translator can read: who said
+    what, newest last, at most `limit` of them and `max_chars` in all. A long
+    message keeps its END (where an answer lands on what it means), a seat's
+    answer is its last piece, and a stopped or empty one is left out."""
+    lines: list[str] = []
+    room = max(0, max_chars)
+    for m in reversed(messages[-max(0, limit):] if limit > 0 else []):
+        words = str(m.get("final") or m.get("content") or "").strip()
+        if not words or room <= 0:
+            continue
+        who = you if m.get("role") == "user" else (m.get("seat") or voice)
+        if m.get("source"):                          # fed in by something else (the game table, say): never the person's
+            who = str(m.get("by") or m["source"])
+        each = min(room, 1500)
+        if len(words) > each:
+            if each < 200:                           # no room left for more than a scrap of it: stop here
+                break
+            words = "…" + words[-each:]
+        lines.append(f"{who}: {words}")
+        room -= len(words)
+    return "\n\n".join(reversed(lines))
+
+
+async def translate_fork(claude: Any, turn: dict[str, Any], text: str, guide: str, you: str) -> dict[str, Any]:
+    """Words -> a prompt, drafted by a throwaway copy of the chat's own Claude
+    conversation (claude_voice.side_copy): it knows who "us" is and what has
+    been going on, because it was there. `turn`: {resume, ...what a turn in
+    that chat runs with}. Nothing is saved and the chat never hears of it."""
+    from . import claude_voice
+    asked = FORK_ASK.format(you=you or "the person", guide=guide or "plain words", text=text)
+    out = await claude_voice.side_copy(claude, prompt=asked, **turn)
+    if not out.get("ok"):
+        return out
+    return {"ok": True, **parse_translation(out.get("response") or ""), "model": out.get("model"), "node": out.get("node")}
+
+
 async def translate(client: httpx.AsyncClient, text: str, guide: str, model_override: str = "",
-                    claude: Any = None, claude_model: str = "") -> dict[str, Any]:
+                    claude: Any = None, claude_model: str = "", context: str = "") -> dict[str, Any]:
     """Words -> a prompt in the model's style, by whoever answers the chat:
     Claude (one shot, `claude` is the ClaudeConfig) when the chat is Claude's,
     else the chat's own local model through Lodestar's chat (model_override
-    routes it to the node that model lives on). {ok, prompt, negative, model,
-    node} or {ok: false, error}."""
+    routes it to the node that model lives on). `context`: the chat's recent
+    messages (chat_context), handed over so the request's "us" and "that"
+    mean something. {ok, prompt, negative, model, node} or {ok: false, error}."""
     system = TRANSLATE_SYSTEM.format(guide=guide or "plain words")
+    if context:
+        system += CONTEXT_NOTE
+        text = f"The conversation so far:\n\n{context}\n\n---\nThe picture asked for:\n{text}"
     if claude is not None:
         from . import claude_voice
         out = await claude_voice.one_shot(claude, prompt=text, system_prompt=system + " Use no tools.",

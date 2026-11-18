@@ -234,6 +234,32 @@ def test_the_list_leaves_out_what_is_already_a_chat_here(client, box):
     assert r.status_code == 409
 
 
+def test_a_chat_loaded_in_by_accident_is_removed_without_deleting_anything(client, box, tmp_path):
+    """Chad, 17 Nov 2026: "an ability to remove not just delete a chat, so
+    that if one is accidently loaded into symposium ... it can be removed
+    without deleting." The chat leaves the window; its file and attachments
+    are set aside; the terminal's conversation is untouched and free again."""
+    root, repo = box
+    talk = write(root, repo, [rec("user", "still mine, in a terminal")], age=3600)
+    transcript = next(root.glob(f"*/{talk}.jsonl"))
+    before = transcript.read_bytes()
+    s = client.post("/api/claude/sessions/pickup", json={"id": talk}).json()
+    kept = client.post(f"/api/sessions/{s['id']}/files", json={"name": "note.txt", "data": "aGk="}).json()["name"]
+
+    gone = client.post(f"/api/sessions/{s['id']}/remove", json={})
+    assert gone.status_code == 200 and gone.json()["conversations"] == [talk]
+    assert client.get(f"/api/sessions/{s['id']}").status_code == 404
+    assert s["id"] not in [x["id"] for x in client.get("/api/sessions").json()["sessions"]]
+
+    aside = Path(gone.json()["kept"])
+    assert json.loads((aside / f"{s['id']}.json").read_text(encoding="utf-8"))["title"] == s["title"]
+    assert (aside / f"{s['id']}.files" / kept).read_bytes() == b"hi"            # what was attached, too
+    assert transcript.read_bytes() == before                                    # the conversation: not a byte
+    assert [r["id"] for r in client.get("/api/claude/sessions").json()["sessions"]] == [talk]   # to be picked up again
+    assert client.post("/api/claude/sessions/pickup", json={"id": talk}).status_code == 201
+    assert client.post(f"/api/sessions/{s['id']}/remove", json={}).status_code == 404
+
+
 def test_a_hippocampus_wake_is_never_listed_nor_picked_up(client, box):
     """Headless runs live where they were started (Chad, 15 Nov 2026)."""
     root, repo = box

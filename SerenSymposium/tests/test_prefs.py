@@ -50,6 +50,29 @@ def test_bad_app_settings_are_refused(make_client, tmp_path):
     assert tc.patch("/api/prefs", json={}).status_code == 400
 
 
+def test_how_what_was_sent_mid_answer_goes_is_set_for_every_chat_and_for_one(make_client, tmp_path):
+    """Chad, 17 Nov 2026: one reply per waiting message "causes a stutter";
+    "meld was the word I was missing ... they should also be a per chat with a
+    default setting as well". Every chat's default is the window's to set
+    (kept in the prefs), a chat's own goes over it, and blank means the
+    default again. The melding itself is the window's (ui/scripts.js, QUEUE)."""
+    tc = make_client(config(tmp_path))
+    assert tc.get("/api/config").json()["queue"] == "meld", "melded unless you say otherwise"
+    assert tc.patch("/api/prefs", json={"queue": "hold"}).status_code == 200
+    assert tc.get("/api/config").json()["queue"] == "hold"
+    assert make_client(config(tmp_path)).get("/api/config").json()["queue"] == "hold", "a reinstall leaves it alone"
+    for bad in ("melt", "", True, None, ["each"]):
+        assert tc.patch("/api/prefs", json={"queue": bad}).status_code == 400, bad
+
+    sid = tc.post("/api/sessions", json={"settings": {"queue": "each"}}).json()["id"]
+    assert tc.get(f"/api/sessions/{sid}").json()["settings"]["queue"] == "each"
+    assert tc.patch(f"/api/sessions/{sid}", json={"settings": {"queue": "melt"}}).status_code == 400
+    assert tc.patch(f"/api/sessions/{sid}", json={"settings": {"queue": True}}).status_code == 400
+    # blank: no opinion, so every chat's shows through again
+    assert "queue" not in tc.patch(f"/api/sessions/{sid}", json={"settings": {"queue": None}}).json()["settings"]
+    assert "queue" not in tc.post("/api/sessions", json={}).json()["settings"]
+
+
 def test_a_new_project_is_kept_and_the_yaml_ones_come_along(make_client, tmp_path):
     tc = make_client(config(tmp_path))
     r = tc.post("/api/projects", json={"name": "art", "voice": "claude", "temperature": 0.7})

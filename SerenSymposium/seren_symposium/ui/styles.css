@@ -17,7 +17,15 @@ body { height: 100vh; display: flex; flex-direction: column; font-size: 14px; }
 #views { flex: 1; min-height: 0; max-width: none; }
 .view { padding: 0; height: 100%; }
 .view.active { display: block; }
-#chat.view.active { display: grid; grid-template-columns: var(--side-w, 250px) minmax(0, 1fr) var(--rail-w, 300px); }
+#chat.view.active { display: grid; position: relative;
+                    grid-template-columns: var(--side-w, var(--side-open, 250px)) minmax(0, 1fr) var(--rail-w, var(--rail-open, 300px)); }
+/* each bar's inner edge is a grip: drag it for the width (scripts.js, WIDTHS). Out of the grid's flow, over the seam. */
+#chat .grip { position: absolute; top: 0; bottom: 0; width: 7px; z-index: 6; cursor: col-resize; touch-action: none; }
+#chat .grip[data-grip="side"] { left: calc(var(--side-w, var(--side-open, 250px)) - 4px); }
+#chat .grip[data-grip="rail"] { right: calc(var(--rail-w, var(--rail-open, 300px)) - 4px); }
+#chat .grip:hover, body.gripping #chat .grip:active { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+#chat.side-folded .grip[data-grip="side"], #chat.rail-folded .grip[data-grip="rail"] { display: none; }
+body.gripping { user-select: none; cursor: col-resize; }
 #settings.view.active, #backend.view.active { overflow: auto; }
 .grow { flex: 1; }
 .note { font-size: 11.5px; color: var(--faint); margin: 6px 0 0; }
@@ -167,7 +175,27 @@ button.chip { font: inherit; font-size: 12.5px; cursor: zoom-in; }
 .pending.screen-chip { border-color: var(--mine-line); }
 .pending.screen-chip img { cursor: zoom-in; }
 form#composer { display: flex; flex-direction: column; gap: 8px; padding: 0 16px 14px; }
-form#composer textarea { resize: none; height: 84px; border-radius: 0 0 10px 10px; padding: 9px 11px; }
+form#composer textarea { resize: none; height: var(--input-h, 84px); border-radius: 0 0 10px 10px; padding: 9px 11px; }
+/* the box's top edge is a grip: drag it for the height (scripts.js, setInputHeight) */
+.input-grip { position: absolute; left: 16px; right: 16px; top: -4px; height: 8px; z-index: 4; cursor: row-resize; touch-action: none; border-radius: 4px; }
+.input-grip:hover, body.gripping-row .input-grip { background: color-mix(in srgb, var(--accent) 45%, transparent); }
+body.gripping-row { user-select: none; cursor: row-resize; }
+/* what was sent while an answer was coming, waiting its turn */
+/* on the right, where your own messages sit: they are yours, on their way */
+.queue { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin: 0 16px 6px; }
+.queue .slip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 4px 3px 9px; border-radius: 8px; font-size: 12.5px;
+               border: 1px dashed var(--mine-line); background: color-mix(in srgb, var(--mine) 55%, transparent); }
+#pic-how { width: 100%; }
+/* how the line goes (as one message / one at a time / held), and the switch that holds it or lets it go */
+.queue .q-head { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); }
+.queue .q-head b { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+.queue .q-head.held b { color: var(--accent); }
+.queue .q-head button { padding: 1px 8px; font-size: 12px; }
+.queue .slip b { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); }
+.queue .slip span { max-width: 420px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queue .slip i { font-style: normal; color: var(--text-dim); }
+.queue .slip button { background: none; border: 0; padding: 0 5px; color: var(--text-dim); font-size: 14px; line-height: 1; }
+.queue .slip button:hover { color: var(--danger); }
 form#composer .buttons { display: flex; justify-content: flex-end; gap: 8px; }
 button.send { padding: 6px 22px; }
 button.send[disabled] { opacity: .5; cursor: default; }
@@ -369,7 +397,8 @@ dl.facts dd { margin: 0; font-family: var(--mono); font-size: 12px; word-break: 
             align-items: center; justify-content: center; cursor: zoom-out; }
 .lightbox img { max-width: 94vw; max-height: 92vh; border-radius: 6px; }
 
-@media (max-width: 1100px) { #chat.view.active { grid-template-columns: var(--side-w, 220px) minmax(0, 1fr); } .rail { display: none; } }
+@media (max-width: 1100px) { #chat.view.active { grid-template-columns: var(--side-w, var(--side-open, 220px)) minmax(0, 1fr); }
+                             .rail, #chat .grip[data-grip="rail"] { display: none; } }
 
 /* A prompt fed in by a plugin (the game table, seren_symposium.table): marked
    by the server, drawn as the plugin's - left side, dashed, tagged - never as
@@ -507,7 +536,69 @@ details.st-server > summary { cursor: pointer; font-size: 12.5px; overflow-wrap:
 
 /* A room's seats, under the chat's ⚙ (seren_symposium.room) */
 .seat-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
-.seat-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.seat-row { display: grid; grid-template-columns: auto auto auto minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; }
+.seat-face { background: none; border: 0; padding: 0; line-height: 0; cursor: pointer; }
+.seat-face .avatar { margin: 0; }
+
+/* avatars: the picture a voice wears, or a seat's initial in its colour */
+.avatar { display: inline-block; width: 30px; height: 30px; margin-right: 8px; border-radius: 50%; object-fit: cover;
+          vertical-align: middle; flex: none; background: var(--surface-2); }
+i.avatar.blank { display: inline-flex; align-items: center; justify-content: center; font-style: normal; font-size: 12px;
+                 font-weight: 700; line-height: 1; color: var(--bg); background: var(--seat, var(--accent)); }
+.av-scope { display: inline-flex; margin-bottom: 12px; }
+.av-scope button { padding: 4px 14px; font-size: 12.5px; }
+.av-top { display: flex; gap: 18px; align-items: center; margin-bottom: 12px; }
+.av-now { flex: none; width: 112px; min-height: 96px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; text-align: center; }
+.av-now img { width: 96px; height: 96px; border-radius: 50%; object-fit: cover; border: 1px solid var(--border); background: var(--surface-2); }
+.av-ways { flex: 1; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.av-link { display: flex; gap: 6px; width: 100%; }
+.av-link input { flex: 1; min-width: 0; }
+.av-pics { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 8px; margin: 8px 0 12px; max-height: 260px; overflow: auto; }
+.av-pics button { padding: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); line-height: 0; overflow: hidden; cursor: pointer; }
+.av-pics button:hover { border-color: var(--accent); }
+.av-pics img { width: 100%; aspect-ratio: 1; object-fit: cover; }
+.seat-row .ghost { padding: 2px 7px; }
+.seat-row .ghost[disabled] { opacity: .3; cursor: default; }
+.seat-dot { flex: none; display: inline-block; width: 10px; height: 10px; padding: 0; border: 0; border-radius: 50%; background: var(--seat, var(--accent)); }
+button.seat-dot { cursor: pointer; }
+.seat-name { background: none; border: 0; padding: 0; font-weight: 600; text-align: left; cursor: text;
+             color: color-mix(in srgb, var(--seat, var(--accent)) 80%, var(--text)); }
+.seat-name:hover { text-decoration: underline dotted; }
+
+/* each seat in its own colour: the name, and a wash of it on the bubble */
+.msg.seat { border-color: color-mix(in srgb, var(--seat) 50%, var(--border)); background: color-mix(in srgb, var(--seat) 7%, var(--surface)); }
+.msg.seat .who { color: color-mix(in srgb, var(--seat) 80%, var(--text)); }
+.msg.seat.err { border-color: var(--danger); }
+/* your own bubble, when you have given it a colour: the same wash, a little deeper, as yours always is */
+.msg.me.seat { border-color: color-mix(in srgb, var(--seat) 50%, var(--border)); background: color-mix(in srgb, var(--seat) 15%, var(--surface)); }
+.msg.me.seat .who { color: color-mix(in srgb, var(--seat) 80%, var(--text)); }
+
+/* voices: everyone in a chat who is not a seat, with a face and a colour */
+.voice-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.voice-row .ghost { padding: 2px 7px; }
+.voice-name { font-weight: 600; color: color-mix(in srgb, var(--seat, var(--text)) 80%, var(--text)); }
+.seat-dot.none { background: none; border: 1px dashed var(--text-dim); }
+i.avatar.blank.none { background: var(--surface-2); color: var(--text-dim); border: 1px dashed var(--border); }
+
+.live-status .ls-stop { margin-left: 6px; padding: 1px 9px; font-size: 12px; }
+.live-status .ls-stop:hover { color: var(--danger); border-color: var(--danger); }
+
+/* the prompt stack of a room: one per seat */
+.st-seats { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.st-seats button { display: inline-flex; align-items: center; gap: 6px; }
+.st-seats button.on { border-color: var(--seat); color: color-mix(in srgb, var(--seat) 80%, var(--text)); }
+
+/* @ in the composer: who is in the room */
+form#composer { position: relative; }
+.at-pop { position: absolute; left: 16px; bottom: calc(100% + 4px); z-index: 20; min-width: 260px; max-width: min(460px, 90%);
+          padding: 4px; border-radius: 9px; background: var(--surface); border: 1px solid var(--border);
+          box-shadow: 0 8px 24px rgba(0, 0, 0, .35); display: flex; flex-direction: column; }
+.at-pop[hidden] { display: none; }
+.at-pop button { display: flex; align-items: center; gap: 8px; background: none; border: 0; text-align: left;
+                 padding: 6px 10px; border-radius: 6px; color: var(--text); font-size: 13px; }
+.at-pop button[aria-selected="true"], .at-pop button:hover { background: var(--sel); color: var(--sel-text); }
+.at-pop button .note { margin: 0 0 0 auto; padding-left: 14px; font-size: 12px; }
+.at-pop p.note { margin: 0; padding: 5px 10px 3px; font-size: 11px; }
 .seat-row .note { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .seat-add { display: flex; flex-wrap: wrap; gap: 6px; }
 .seat-add input { flex: 1 1 120px; min-width: 0; }

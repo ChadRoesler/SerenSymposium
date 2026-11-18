@@ -17,7 +17,7 @@ async function call(method, path, body) {
   return j;
 }
 
-const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty", "cwd"];
+const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty", "cwd", "queue"];
 const NUMBER = new Set(["temperature", "max_tokens", "repeat_penalty"]);
 // A chat's settings sit on top of its project's; the project calls one of
 // them by a shorter name.
@@ -50,11 +50,38 @@ let FOLLOWER = null;
 let ASKED_EL = null;
 const PLACEHOLDER = $("#input").placeholder;
 const chatBusy = () => drawing || (current != null && ANSWERING.has(current.id));
+// How what is sent mid-answer goes once the answer is in: this chat's own
+// setting, else every chat's (Settings, "sent mid-answer"), else meld.
+const QUEUE_NAMES = { meld: "together, as one message", each: "one at a time, an answer each", hold: "held until I let them go" };
+// What the picture panel's translate drafts a prompt from: this chat's own
+// setting, else every chat's (Settings, "picture prompts from"), else the chat.
+const TRANSLATE_NAMES = { plain: "my words only", chat: "my words and this chat", fork: "the whole conversation (a side copy, slower)" };
+const TRANSLATE_FROM = { plain: "your words", chat: "your words and this chat", fork: "the whole conversation" };
+const translateOwn = () => { const t = current ? current.settings?.translate : DRAFT.settings.translate; return TRANSLATE_NAMES[t] ? t : ""; };
+const translateMode = () => translateOwn() || (TRANSLATE_NAMES[CFG?.translate] ? CFG.translate : "chat");
+const queueMode = () => {
+  const own = current ? current.settings?.queue : DRAFT.settings.queue;
+  return QUEUE_NAMES[own] ? own : QUEUE_NAMES[CFG?.queue] ? CFG.queue : "meld";
+};
 function lockComposer() {
   const locked = chatBusy();
-  $("#send").disabled = locked;
-  $("#input").placeholder = locked && !drawing ? "answering… read or write in another chat meanwhile"
-    : current?.seats?.length ? `the room: ${current.seats.map(x => x.name).join(", ")} · @name asks just one` : PLACEHOLDER;
+  // An answer coming does not lock the box: what you send now waits its turn
+  // (QUEUE) and goes the moment this answer is in. A picture being drawn does.
+  $("#send").disabled = drawing;
+  $("#send").textContent = locked && !drawing ? "send after" : "send";
+  const how = queueMode();
+  $("#send").title = !locked || drawing ? ""
+    : how === "hold" ? "an answer is coming: this waits above the box until you let it go"
+    : how === "each" ? "an answer is coming: this is sent as soon as it is in"
+    : "an answer is coming: this goes when it is in, as one message with anything else waiting";
+  // The line is redrawn either way (its buttons read differently mid-answer);
+  // with no answer coming, whatever is waiting and not held goes.
+  setTimeout(() => { drawQueue(); if (!chatBusy()) drainQueue(); }, 0);
+  $("#input").placeholder = locked && !drawing
+    ? (how === "hold" ? "answering… what you send now waits until you let it go"
+       : how === "each" ? "answering… what you send now goes as soon as this answer is in"
+       : "answering… what you send now goes as one message when this answer is in")
+    : current?.seats?.length ? `the room: ${current.seats.map(x => x.name).join(", ")} · @ picks who answers first · @name! asks only them` : PLACEHOLDER;
 }
 
 const voiceName = v => v === "claude" ? (CFG.claude?.name || "claude") : "local model";
@@ -74,7 +101,8 @@ async function boot() {
   CFG = await (await fetch("/api/config")).json();
   await adoptOldProjects();
   folder = (CFG.folders[0] || {}).name || "";
-  drawVoices(); await refresh(); drawLog(); drawTray(); screenInit(); earsInit();
+  await loadAvatars();
+  drawVoices(); await refresh(); drawLog(); takeDraft(); screenInit(); earsInit();
   startWatching();
   show(local("symposium.tab", "chat"));
 }
@@ -130,16 +158,48 @@ async function newProject(body) {
 // A new chat in `name`: nothing on the server until its first message, and
 // whatever is set for it before then (⚙) waits in DRAFT and goes with it.
 function newChatIn(name) {
+  stashDraft();
   stopFollowing(); folder = name; current = null; DRAFT = { settings: {}, title: "" };
-  drawSide(); drawLog(); lockComposer();
+  takeDraft();
+  drawSide(); drawLog(); lockComposer(); drawQueue();
 }
+
+// ── What is typed belongs to the chat it was typed in ───────────────────
+// The box used to be the window's: half a message written in one chat was
+// sitting there in the next (Chad, 17 Nov 2026: "a filled text box in one chat
+// shouldnt travel to another"). Now leaving a chat puts its words - and the
+// files waiting in its tray - aside under that chat, and coming back brings
+// them out again. The words outlive a restart (this browser's storage); files
+// not yet sent do not. A chat not made yet goes by its project.
+const DRAFTS = new Map(Object.entries(local("symposium.drafts", {})).map(([k, text]) => [k, { text: String(text), pending: [] }]));
+const draftKey = () => current ? current.id : `new:${folder}`;
+const keepDrafts = () => keep("symposium.drafts",
+  Object.fromEntries([...DRAFTS].filter(([, d]) => d.text).slice(-40).map(([k, d]) => [k, d.text.slice(0, 20000)])));
+function stashDraft() {
+  const text = $("#input").value;
+  if (text || PENDING.length) DRAFTS.set(draftKey(), { text, pending: PENDING }); else DRAFTS.delete(draftKey());
+  keepDrafts();
+  stashPic();                                    // the picture panel is the chat's too
+}
+function takeDraft() {
+  const d = DRAFTS.get(draftKey());
+  DRAFTS.delete(draftKey()); keepDrafts();
+  $("#input").value = d?.text || "";
+  PENDING = d?.pending || [];
+  drawTray(); atClose();
+  takePic();
+}
+// Closing the window is leaving every chat at once: what is in the box is kept for the one it is in.
+window.addEventListener("pagehide", () => { if ($("#input").value) { DRAFTS.set(draftKey(), { text: $("#input").value, pending: [] }); keepDrafts(); } stashPic(); });
 
 // The session a message lands in: the open chat's, or a new one made now,
 // carrying what was set for it while it was only a draft.
 async function ensureSession() {
   if (!current) {
+    const was = draftKey();
     current = await call("POST", "/api/sessions", { folder, title: DRAFT.title || "", settings: DRAFT.settings });
     DRAFT = { settings: {}, title: "" };
+    if (PIC_TRANSLATING?.key === was) PIC_TRANSLATING.key = current.id;   // the prompt being drafted follows the chat it was asked in
     await refresh();
   }
   return current;
@@ -247,30 +307,57 @@ $("#pu-body").onclick = async e => {
 
 // ── A room's seats (seren_symposium.room), under the chat's ⚙ ───────────
 // Each seat its own claude conversation in its own folder; a message goes
-// round them in order, each hearing the ones before; @name asks just one.
+// round them in order, each hearing the ones before. @name puts a seat
+// first, @name! asks only the ones named. The order here is the order the
+// table goes round: ↑ ↓ move a seat, its name renames it, its dot recolours it.
 function drawSeats() {
   const box = $("#s-seats");
   if (!current) { box.innerHTML = `<p class="note">Send the first message, then invite seats.</p>`; return; }
   const seats = current.seats || [];
   box.innerHTML = (seats.length
-      ? `<div class="seat-list">` + seats.map(x => `<div class="seat-row"><b>${esc(seatWho(x.name))}</b>`
+      ? `<div class="seat-list">` + seats.map((x, i) => `<div class="seat-row" style="--seat:${seatColor(x.name)}">`
+          + `<button type="button" class="seat-face" data-face="${esc(x.name)}" title="${esc(x.name)}'s avatar: any picture you like">${avatarHtml(x.name)}</button>`
+          + `<button type="button" class="seat-dot" data-hue="${esc(x.name)}" title="another colour for ${esc(x.name)}"></button>`
+          + `<button type="button" class="seat-name" data-rename="${esc(x.name)}" title="rename ${esc(x.name)}">${esc(seatWho(x.name))}</button>`
           + `<span class="note" title="${esc(x.cwd || "")}">${esc(x.cwd ? lastPart(x.cwd) : "claude.cwd")}</span>`
+          + `<button type="button" class="ghost" data-move="${esc(x.name)}" data-by="-1" title="answer earlier"${i ? "" : " disabled"}>↑</button>`
+          + `<button type="button" class="ghost" data-move="${esc(x.name)}" data-by="1" title="answer later"${i < seats.length - 1 ? "" : " disabled"}>↓</button>`
           + `<button type="button" class="ghost" data-unseat="${esc(x.name)}" title="let ${esc(x.name)} go - what they said stays">✕</button></div>`).join("")
         + `</div>`
       : `<p class="note">One Claude here. Invite a seat and this becomes a room: each seat its own session in its own folder, `
-        + `answering in turn and hearing the others. @name asks just one.</p>`)
+        + `answering in turn and hearing the others. @name puts one first; @name! asks only them.</p>`)
     + `<div class="seat-add"><input id="seat-name" placeholder="name" maxlength="32" spellcheck="false">`
     + `<input id="seat-cwd" placeholder="folder it works in" spellcheck="false">`
     + `<button type="button" class="ghost" id="seat-invite">invite</button>`
-    + `<button type="button" class="ghost" id="seat-pickup">from a terminal…</button></div>`;
+    + `<button type="button" class="ghost" id="seat-pickup">from a terminal…</button>`
+    + `<button type="button" class="ghost" data-face="default" title="the picture worn by everyone who has not picked one">default avatar…</button></div>`;
 }
 $("#s-seats").onclick = async e => {
   if (!current) return;
   const sid = encodeURIComponent(current.id);
   try {
-    const gone = e.target.closest("[data-unseat]");
+    const gone = e.target.closest("[data-unseat]"), move = e.target.closest("[data-move]");
+    const rename = e.target.closest("[data-rename]"), hue = e.target.closest("[data-hue]");
+    const face = e.target.closest("[data-face]");
+    if (face) return openAvatar(face.dataset.face, "", true, face.dataset.face === "default" ? "all" : "chat");
     if (gone) {
       current = await call("DELETE", `/api/sessions/${sid}/seats/${encodeURIComponent(gone.dataset.unseat)}`);
+    } else if (move) {
+      const order = current.seats.map(x => x.name), at = order.indexOf(move.dataset.move), to = at + Number(move.dataset.by);
+      if (at < 0 || to < 0 || to >= order.length) return;
+      [order[at], order[to]] = [order[to], order[at]];
+      current = await call("PATCH", `/api/sessions/${sid}/seats`, { order });
+    } else if (rename) {
+      const was = rename.dataset.rename, name = (prompt("Seat name", was) || "").trim();
+      if (!name || name === was) return;
+      current = await call("PATCH", `/api/sessions/${sid}/seats/${encodeURIComponent(was)}`, { name });
+    } else if (hue) {
+      // The next hue round the wheel that no other seat is near.
+      const others = current.seats.filter(x => x.name !== hue.dataset.hue).map(x => seatHue(x.name));
+      const far = h => others.every(o => Math.min(Math.abs(o - h), 360 - Math.abs(o - h)) >= 25);
+      let next = seatHue(hue.dataset.hue);
+      for (let n = 0; n < 12; n++) { next = (next + 30) % 360; if (far(next)) break; }
+      current = await call("PATCH", `/api/sessions/${sid}/seats/${encodeURIComponent(hue.dataset.hue)}`, { hue: next });
     } else if (e.target.id === "seat-invite") {
       const name = $("#seat-name").value.trim(), cwd = $("#seat-cwd").value.trim();
       if (!name) return $("#seat-name").focus();
@@ -281,6 +368,160 @@ $("#s-seats").onclick = async e => {
     await refresh(); drawLog(); drawSeats(); lockComposer();
   } catch (ex) { alert(ex.message); }
 };
+
+// ── Voices: a face and a bubble colour for everyone who is not a seat ────
+// You, the chat's one Claude, each local model that has answered here, each
+// plugin that has spoken. Under the chat's ⚙, beside the seats: a face is
+// worn by name in every chat, a colour is this chat's own.
+function chatVoices() {
+  const out = new Map();
+  const add = (key, label, claude = false) => { if (!out.has(key)) out.set(key, { key, label, claude }); };
+  add("you", CFG.you || "you");
+  if (!current?.seats?.length && voiceOfChat() === "claude") add("default", CFG.claude?.name || "claude", true);
+  for (const m of current?.messages || []) {
+    if (m.seat) continue;
+    const key = voiceKey(m);
+    add(key, key === "you" ? (CFG.you || "you") : whoName(m), key === "default");
+  }
+  return [...out.values()];
+}
+function drawVoiceRows() {
+  const box = $("#s-voices");
+  if (!current) { box.innerHTML = `<p class="note">Send the first message, then give everyone a face and a colour.</p>`; return; }
+  box.innerHTML = `<div class="seat-list">` + chatVoices().map(v => {
+    const hue = voiceHue(v.key);
+    return `<div class="voice-row"${hue != null ? ` style="--seat:${hueColor(hue)}"` : ""}>`
+      + `<button type="button" class="seat-face" data-vface="${esc(v.key)}" data-label="${esc(v.label)}" data-claude="${v.claude ? 1 : ""}" `
+      + `title="${esc(v.label)}'s avatar: any picture you like">${faceHtml(v.key, { claude: v.claude, hue, label: v.label }) || `<i class="avatar blank none">+</i>`}</button>`
+      + `<button type="button" class="seat-dot${hue == null ? " none" : ""}" data-vhue="${esc(v.key)}" `
+      + `title="${hue == null ? `give ${esc(v.label)}'s bubbles a colour` : `another colour for ${esc(v.label)}'s bubbles`}"></button>`
+      + `<b class="voice-name">${esc(v.label)}</b>`
+      + (hue != null ? `<button type="button" class="ghost" data-vplain="${esc(v.key)}" title="back to the plain bubble">plain</button>` : `<span></span>`)
+      + `</div>`;
+  }).join("") + `</div>`
+    + `<p class="note">Click a face for any picture, the dot for a bubble colour. A face goes by name, so it is the same in every chat; `
+    + `a colour is this chat's. Seats have theirs under seats.</p>`;
+}
+$("#s-voices").onclick = async e => {
+  if (!current) return;
+  const face = e.target.closest("[data-vface]"), dot = e.target.closest("[data-vhue]"), plain = e.target.closest("[data-vplain]");
+  if (face) return openAvatar(face.dataset.vface, face.dataset.label, !!face.dataset.claude);
+  if (!dot && !plain) return;
+  const colors = { ...(current.settings?.colors || {}) };
+  if (plain) delete colors[plain.dataset.vplain];
+  else {
+    // The next hue round the wheel that nobody else in this chat is near.
+    const key = dot.dataset.vhue;
+    const others = [...Object.entries(colors).filter(([k]) => k !== key).map(([, h]) => h),
+                    ...(current.seats || []).map(x => seatHue(x.name))];
+    const far = h => others.every(o => Math.min(Math.abs(o - h), 360 - Math.abs(o - h)) >= 25);
+    let next = Number.isInteger(colors[key]) ? colors[key] : 170;
+    for (let n = 0; n < 12; n++) { next = (next + 30) % 360; if (far(next)) break; }
+    colors[key] = next;
+  }
+  try {
+    await call("PATCH", `/api/sessions/${encodeURIComponent(current.id)}`, { settings: { colors } });
+    current = await call("GET", `/api/sessions/${encodeURIComponent(current.id)}`);
+  } catch (ex) { return alert(ex.message); }
+  drawLog(); drawVoiceRows();
+};
+
+// The avatar sheet: who is wearing what, and three ways to change it - a
+// file, a link, or any picture already in this chat (which is how one drawn
+// in the picture panel gets worn).
+let FACE_FOR = null;
+// `label`: who it is, as the chat names them (a seat goes by its seat name);
+// `claude`: one who wears the default until it picks (a seat, the chat's Claude).
+// `scope`: "chat" - the face is this chat's own, over what is worn everywhere;
+// "all" - every chat's. With no chat open there is only every chat.
+let FACE_LABEL = "", FACE_CLAUDE = true, FACE_SCOPE = "chat";
+function openAvatar(name, label = "", claude = true, scope = "chat") {
+  FACE_FOR = name; FACE_LABEL = label; FACE_CLAUDE = claude;
+  FACE_SCOPE = current && scope === "chat" ? "chat" : "all";
+  $("#av-url").value = ""; drawAvatar(); $("#avatar-sheet").showModal();
+}
+function drawAvatar() {
+  const name = FACE_FOR, here = FACE_SCOPE === "chat";
+  const who = name === "default" ? (CFG.claude?.name || "claude") : name === "you" ? (CFG.you || "you") : (FACE_LABEL || seatWho(name));
+  $("#av-title").textContent = `${who}'s avatar`;
+  $("#av-scope").innerHTML = (current ? `<button type="button" data-scope="chat" class="${here ? "on" : ""}">this chat</button>` : "")
+    + `<button type="button" data-scope="all" class="${here ? "" : "on"}">every chat</button>`;
+  const chatFace = current?.settings?.faces?.[name];
+  const own = here ? !!chatFace : !!AVATARS[name];
+  // What is worn when this scope has none of its own, so the sheet never shows a blank where the chat shows a face.
+  const src = own ? (here ? fileUrl(current.id, chatFace) : avatarUrl(name))
+    : here ? (AVATARS[name] ? avatarUrl(name) : FACE_CLAUDE && AVATARS.default ? avatarUrl("default") : null)
+    : name !== "default" && FACE_CLAUDE && AVATARS.default ? avatarUrl("default") : null;
+  const why = own ? "" : here ? (src ? "none of its own in this chat: this is the every-chat one" : "none in this chat, and none for every chat")
+    : src ? "none of its own: this is the default" : FACE_CLAUDE ? "none: a seat wears its initial" : "none yet";
+  $("#av-now").innerHTML = (src ? `<img src="${esc(src)}" alt="">` : "") + (why ? `<span class="note">${esc(why)}</span>` : "");
+  const pics = [];
+  (current?.messages || []).forEach(m => (m.files || []).forEach(f => { if (isImage(f.type) && !isScreen(f)) pics.push(f); }));
+  $("#av-pics").innerHTML = pics.length
+    ? pics.reverse().slice(0, 60).map(f => `<button type="button" data-pic="${esc(f.name)}" title="${esc(f.orig || f.name)}">`
+        + `<img src="${esc(fileUrl(current.id, f.name))}" loading="lazy" alt=""></button>`).join("")
+    : `<p class="note">${current ? "No pictures in this chat yet: draw one with 🖼 picture, or attach one."
+        : "Open a chat to pick from its pictures or use a link; a file works from here."}</p>`;
+  $("#av-off").hidden = !own;
+  $("#av-off").textContent = here ? "take it off in this chat" : "take it off everywhere";
+}
+function redrawFaces() { drawAvatar(); drawLog(); drawSeats(); drawVoiceRows(); drawFaceDefaults(); }
+// `body`: {file} one of this chat's, {url} one from the web, or {data, filename} the picture itself (no chat needed).
+async function wearAvatar(body) {
+  if (!current && !body.data) return alert("Open a chat to use a link or one of its pictures; a file works from here.");
+  try {
+    const r = await call("POST", `/api/avatars/${encodeURIComponent(FACE_FOR)}`,
+                         body.data ? body : { session: current.id, ...body, ...(FACE_SCOPE === "chat" ? { scope: "chat" } : {}) });
+    AVATARS = r.avatars;
+    if (r.faces && current) current.settings = { ...current.settings, faces: r.faces };
+  } catch (ex) { return alert([ex.message, ex.body?.hint].filter(Boolean).join(" - ")); }
+  redrawFaces();
+}
+$("#av-scope").onclick = e => {
+  const pick = e.target.closest("[data-scope]");
+  if (pick) { FACE_SCOPE = pick.dataset.scope; drawAvatar(); }
+};
+$("#av-choose").onclick = () => $("#av-file").click();
+$("#av-file").onchange = async e => {
+  const file = e.target.files[0]; e.target.value = "";
+  if (!file) return;
+  try {
+    if (!current) return await wearAvatar({ data: await b64(file), filename: file.name });
+    const kept = await call("POST", `/api/sessions/${encodeURIComponent(current.id)}/files`, { name: file.name, data: await b64(file) });
+    await wearAvatar({ file: kept.name });
+  } catch (ex) { alert(ex.message); }
+};
+$("#av-use-url").onclick = () => { const url = $("#av-url").value.trim(); if (url) wearAvatar({ url }); };
+$("#av-url").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); $("#av-use-url").click(); } });
+$("#av-pics").onclick = e => { const pic = e.target.closest("[data-pic]"); if (pic) wearAvatar({ file: pic.dataset.pic }); };
+$("#av-off").onclick = async () => {
+  try {
+    if (FACE_SCOPE === "chat" && current) {
+      const faces = { ...(current.settings?.faces || {}) };
+      delete faces[FACE_FOR];
+      await call("PATCH", `/api/sessions/${encodeURIComponent(current.id)}`, { settings: { faces } });
+      current = await call("GET", `/api/sessions/${encodeURIComponent(current.id)}`);
+    } else AVATARS = (await call("DELETE", `/api/avatars/${encodeURIComponent(FACE_FOR)}`)).avatars;
+  } catch (ex) { return alert(ex.message); }
+  redrawFaces();
+};
+
+// The faces worn in every chat, on the Settings tab: the default (every
+// chat's Claude) and yours. A chat that wants its own sets it under its ⚙.
+function drawFaceDefaults() {
+  const rows = [["default", CFG.claude?.name || "claude", true], ["you", CFG.you || "you", false]];
+  $("#a-faces").innerHTML = `<div class="seat-list">` + rows.map(([key, label, claude]) =>
+      `<div class="voice-row"><button type="button" class="seat-face" data-aface="${key}" data-label="${esc(label)}" data-claude="${claude ? 1 : ""}" `
+      + `title="${esc(label)}'s avatar in every chat: any picture you like">`
+      + (AVATARS[key] ? `<img class="avatar" src="${esc(avatarUrl(key))}" alt="">` : `<i class="avatar blank none">+</i>`) + `</button>`
+      + `<span></span><b class="voice-name">${esc(label)}</b><span></span></div>`).join("") + `</div>`
+    + `<p class="note">Worn in every chat that has not picked its own. A chat's own faces, and its colours, are under its ⚙.</p>`;
+}
+$("#a-faces").onclick = e => {
+  const face = e.target.closest("[data-aface]");
+  if (face) openAvatar(face.dataset.aface, face.dataset.label, !!face.dataset.claude, "all");
+};
+$("#avatar-sheet").addEventListener("click", e => { if (e.target === $("#avatar-sheet")) $("#avatar-sheet").close(); });
 
 // Drag a chat onto a project - its name, or any chat in it - to move it there;
 // onto the strip at the bottom to take it out of every project.
@@ -341,6 +582,7 @@ $("#side").addEventListener("contextmenu", e => {
   if (row) {
     const id = row.dataset.s;
     openMenu(e.clientX, e.clientY, [["Rename", () => editInPlace(row.querySelector("span"), t => renameChat(id, t))],
+                                    ["Remove (nothing deleted)", () => removeChat(id)],
                                     ["Delete", () => deleteChat(id), "danger"]]);
   } else {
     const name = proj.dataset.folder;
@@ -403,6 +645,19 @@ async function deleteProject(name) {
   if (tab === "settings") drawSettings();
 }
 
+// Remove is not Delete: the chat leaves Symposium and nothing is thrown
+// away. Its file and attachments are set aside (sessions/removed), and a
+// Claude conversation it carried - one picked up from a terminal by accident,
+// say - is left exactly as it was, to be picked up again or carried on there.
+async function removeChat(id) {
+  const s = SESSIONS.find(x => x.id === id);
+  if (!sure(`Take "${s?.title || "untitled"}" out of Symposium?\n\nNothing is deleted: the chat is set aside, and a Claude `
+            + `conversation it carried can be picked up again or carried on in a terminal.`)) return;
+  try { await call("POST", `/api/sessions/${id}/remove`, {}); } catch (ex) { return alert(ex.message); }
+  if (current?.id === id) newChatIn(current.folder);
+  await refresh();
+}
+
 async function deleteChat(id) {
   const s = SESSIONS.find(x => x.id === id);
   if (!sure(`Delete "${s?.title || "untitled"}" and its files? This can't be undone.`)) return;
@@ -412,10 +667,15 @@ async function deleteChat(id) {
 }
 
 async function openSession(id) {
+  // Another chat: what was being typed stays behind with the one being left.
+  // The same chat drawn again (an answer just landed) keeps its box as it is.
+  const moving = current?.id !== id;
+  if (moving) stashDraft();
   stopFollowing();
   current = await call("GET", `/api/sessions/${id}`);
   folder = current.folder;
-  drawSide(); drawLog(); lockComposer();
+  if (moving) takeDraft();
+  drawSide(); drawLog(); lockComposer(); drawQueue();
   if ($("#chat-settings").open) drawChatSettings();
   // An answer still coming in this chat: pick it up where it is.
   if (current.answering) followLive(id);
@@ -466,6 +726,78 @@ function drawLog() {
 
 // A seat of a room, named the way the kitchen names a hand: wren·kitchen.
 const seatWho = s => CFG.claude?.name ? `${CFG.claude.name}·${s}` : s;
+// Its colour: the hue it was given when it sat down, so who said what reads
+// at a glance (17 Nov 2026: four seats, one colour). A seat that has left
+// keeps one worked out from its name.
+function seatHue(name) {
+  const seat = (current?.seats || []).find(x => x.name === name);
+  if (Number.isInteger(seat?.hue)) return seat.hue;
+  let h = 0;
+  for (const c of String(name)) h = (h * 31 + c.codePointAt(0)) % 360;
+  return h;
+}
+const seatColor = name => `hsl(${seatHue(name)} 68% 56%)`;
+// ── Avatars: the picture a voice wears (seren_symposium.avatars) ─────────
+// By name: a seat's, and `default` for whoever has not picked. Open on
+// purpose (Chad, 17 Nov 2026: "avatars should be more open and free"): the
+// one wearing it sets it by showing a picture captioned avatar, and you can
+// put any picture on anyone from ⚙ → seats.
+let AVATARS = {};
+async function loadAvatars() {
+  try { AVATARS = (await call("GET", "/api/avatars")).avatars || {}; } catch { AVATARS = {}; }
+}
+const avatarUrl = name => `/api/avatars/${encodeURIComponent(name)}?v=${AVATARS[name]?.at || 0}`;
+// A seat's own, else the default; a seat with neither wears its initial in
+// its colour, and a chat's one Claude nothing (`seat` null).
+// The picture a voice wears HERE, as an address: this chat's own for it
+// first (the chat's `faces` setting - Chad, 17 Nov 2026: "a specific avatar
+// for cheese tag, or whatever"), then the one it wears in every chat, then -
+// for a Claude - the default. null: none.
+function faceSrc(key, claude = false) {
+  const here = key && current?.settings?.faces?.[key];
+  if (here) return fileUrl(current.id, here);
+  if (key && AVATARS[key]) return avatarUrl(key);
+  return claude && AVATARS.default ? avatarUrl("default") : null;
+}
+function avatarHtml(seat) {
+  const src = faceSrc(seat || "default", true);
+  if (src) return `<img class="avatar" src="${esc(src)}" alt="">`;
+  return seat ? `<i class="avatar blank">${esc([...String(seat)][0].toUpperCase())}</i>` : "";
+}
+
+// ── Everyone who speaks has a key: what their face and colour go by ──────
+// `you` the person, `default` the chat's one Claude, a seat by its name, a
+// local model or a plugin by its name made safe for an address. Faces are by
+// key everywhere (/api/avatars); a colour is this chat's (settings.colors),
+// except a seat's, which is its own. Chad, 17 Nov 2026: "definitely avatars
+// for all, color bubbles for all, set up in the per chat settings".
+const voiceSlug = s => String(s || "").trim().replace(/\.(gguf|safetensors)$/i, "")
+  .replace(/[^\w·.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "voice";
+function voiceKey(m) {
+  if (m.role === "user") return m.source ? voiceSlug(m.by || m.source) : "you";
+  if (m.seat) return m.seat;
+  const name = whoName(m);
+  return name === CFG.claude?.name ? "default" : voiceSlug(name);
+}
+const hueColor = h => `hsl(${h} 68% 56%)`;
+function voiceHue(key, isSeat = false) {
+  if (isSeat) return seatHue(key);
+  const h = current?.settings?.colors?.[key];
+  return Number.isInteger(h) ? h : null;
+}
+// A voice's face: its own picture; a Claude (a seat, the chat's one) falls
+// back to the default; anyone with a colour and no picture wears an initial.
+function faceHtml(key, { claude = false, hue = null, label = "" } = {}) {
+  const src = faceSrc(key, claude);
+  if (src) return `<img class="avatar" src="${esc(src)}" alt="">`;
+  if (hue == null) return "";
+  return `<i class="avatar blank" style="--seat:${hueColor(hue)}">${esc([...String(label || key)][0].toUpperCase())}</i>`;
+}
+
+function wearSeat(el, name) {
+  el.classList.toggle("seat", !!name);
+  if (name) el.style.setProperty("--seat", seatColor(name)); else el.style.removeProperty("--seat");
+}
 
 // Who said it: you, the chat's Claude by name, or the local model that answered.
 function whoName(m) {
@@ -490,7 +822,8 @@ function receipt(meta) {
   return [meta.model, meta.node,
           meta.tools && meta.tools.length ? `tools: ${meta.tools.join(", ")}`
             : (meta.tool_rounds ? `tools: ${meta.tool_rounds}` : null),
-          meta.seconds != null ? `${meta.seconds}s` : null].filter(Boolean).join(" · ");
+          meta.seconds != null ? `${meta.seconds}s` : null,
+          meta.stopped ? "stopped by you before it finished" : null].filter(Boolean).join(" · ");
 }
 
 // One message. Its tools are the ones the mock drew - delete and retry on an
@@ -504,7 +837,16 @@ function bubble(m, i, count, opts = {}) {
   const asked = m.role === "user", fed = asked && !!m.source, mine = asked && !fed;
   d.className = "msg" + (mine ? " me" : "") + (fed ? " fed" : "") + (opts.cls ? " " + opts.cls : "");
   d.dataset.i = i;
-  d.innerHTML = `<div class="who">${esc(opts.who || whoName(m))}`
+  const said = opts.who || whoName(m);
+  // Whose bubble: its colour and its face. A bubble drawn before its message
+  // exists (an answer as it starts) goes by the name it was given.
+  const key = opts.cls?.includes("err") ? null
+    : opts.who && !asked && !m.seat ? (said === CFG.claude?.name ? "default" : voiceSlug(said)) : voiceKey(m);
+  const isSeat = !asked && !!m.seat;
+  const hue = key == null ? null : voiceHue(key, isSeat);
+  if (hue != null) { d.classList.add("seat"); d.style.setProperty("--seat", hueColor(hue)); }
+  const face = key == null ? "" : faceHtml(key, { claude: isSeat || key === "default", hue, label: isSeat ? m.seat : said });
+  d.innerHTML = `<div class="who">${face}${esc(said)}`
               + (fed ? `<span class="fed-tag" title="fed into the chat by ${esc(m.source)} - not typed by you">plugin</span>` : "")
               + `</div>`;
   if (!asked && (m.meta?.steps || []).some(s => s.kind === "said")) {
@@ -577,21 +919,40 @@ function stepsEl(steps, liveNow = false, el = null) {
 // instead of every step above and only the last words below. While it is
 // coming, the last group of steps says what is happening now. Folds keep
 // whether they are open across a redraw.
+// Drawn again and again while an answer comes (every frame it grows), so
+// only what CHANGED is drawn again: each piece of words and each run of
+// steps keeps its element until its own text or steps move. Before (17 Nov
+// 2026, Chad: "sections of text just bounce ... sometimes chunks of the main
+// message, sometimes bits of the tool calls") every frame threw the whole
+// answer away and built it new - every finished paragraph and tool list
+// re-laid out many times a second, for as long as the thinking went on.
+const stepsMark = (steps, live) => steps.map(s =>
+  s.kind === "thinking" ? `t${(s.text || "").length}` : JSON.stringify(s)).join("|") + (live ? "~" : "");
 function partsEl(parts, sid, liveNow = false, box = null) {
   box = box || Object.assign(document.createElement("div"), { className: "parts" });
-  const old = box._groups || [], groups = [], kids = [];
+  const old = box._slots || [], slots = [];
   let run = [];
   const flush = last => {
     if (!run.length) return;
-    const g = stepsEl(run, liveNow && last, old[groups.length] || null);
-    groups.push(g); kids.push(g); run = [];
+    const was = old[slots.length], live = liveNow && last, mark = stepsMark(run, live);
+    const same = was?.kind === "steps" && was.mark === mark;
+    slots.push({ kind: "steps", mark, el: same ? was.el : stepsEl(run, live, was?.kind === "steps" ? was.el : null) });
+    run = [];
   };
   for (const p of parts) {
-    if (p.kind === "said") { flush(false); kids.push(renderMd(p.text, sid)); } else run.push(p);
+    if (p.kind !== "said") { run.push(p); continue; }
+    flush(false);
+    const was = old[slots.length];
+    slots.push(was?.kind === "said" && was.text === p.text ? was : { kind: "said", text: p.text, el: renderMd(p.text, sid) });
   }
   flush(true);
-  box._groups = groups;
-  box.replaceChildren(...kids);
+  box._slots = slots;
+  // Put each element where it belongs, touching only the places that differ.
+  slots.forEach((slot, i) => {
+    const at = box.children[i];
+    if (at !== slot.el) at ? (slot.el.parentNode === box ? box.insertBefore(slot.el, at) : at.replaceWith(slot.el)) : box.append(slot.el);
+  });
+  while (box.children.length > slots.length) box.lastChild.remove();
   return box;
 }
 
@@ -901,21 +1262,200 @@ $("#clear").onclick = () => {
   drawTray(); $("#input").focus();
 };
 
+// ── The box's height: drag its top edge ─────────────────────────────────
+// Chad, 17 Nov 2026: "being able to also enlarge the typing area (click drag
+// handle) would be good too (sometimes im long winded)". The grip is the
+// strip along the top of the box: up for taller, double-click for the usual
+// height. This browser's to remember, like the bars' widths.
+function setInputHeight(px) {
+  if (px == null) { $("#composer").style.removeProperty("--input-h"); keep("symposium.inputH", null); return; }
+  const h = Math.round(Math.max(56, Math.min(px, window.innerHeight * 0.6)));
+  $("#composer").style.setProperty("--input-h", `${h}px`);
+  return h;
+}
+if (Number.isFinite(local("symposium.inputH", null))) setInputHeight(local("symposium.inputH", null));
+$("#input-grip").addEventListener("pointerdown", e => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const grip = e.currentTarget, from = $("#input").getBoundingClientRect().height, y0 = e.clientY;
+  grip.setPointerCapture(e.pointerId);
+  document.body.classList.add("gripping-row");
+  let h = from;
+  const move = ev => { h = setInputHeight(from + (y0 - ev.clientY)); toBottom(); };
+  const done = () => {
+    grip.removeEventListener("pointermove", move);
+    document.body.classList.remove("gripping-row");
+    keep("symposium.inputH", h);
+  };
+  grip.addEventListener("pointermove", move);
+  grip.addEventListener("pointerup", done, { once: true });
+  grip.addEventListener("pointercancel", done, { once: true });
+});
+$("#input-grip").addEventListener("dblclick", () => setInputHeight(null));
+
 // ── Sending: streamed, shown as it comes ────────────────────────────────
 
+// ── @ in a room: the seats, to pick from ────────────────────────────────
+// Typing @ lists who is at the table, so a name is picked, not spelled (Chad,
+// 17 Nov 2026: "a little pop up thinggy, that gives the list of whos in the
+// room"). What is typed after the @ narrows the list; when it fits no seat
+// the whole table is shown, because a typo is when the list is needed most.
+// ↑ ↓ move, Enter or Tab picks, Esc puts it away until the next @.
+const AT = { open: false, start: 0, pick: 0, rows: [], shut: -1 };
+function atToken() {
+  const box = $("#input"), upto = box.value.slice(0, box.selectionStart);
+  const m = upto.match(/(?:^|[^\w@])@([\w·.-]*)$/);
+  return m ? { start: upto.length - m[1].length - 1, typed: m[1] } : null;
+}
+function atClose() { AT.open = false; AT.pick = 0; $("#at-pop").hidden = true; }
+function atDraw() {
+  const seats = current?.seats || [], tok = seats.length ? atToken() : null;
+  if (!tok) { AT.shut = -1; return atClose(); }
+  // Put away with Esc, or a seat's whole name already typed: nothing to pick.
+  if (tok.start === AT.shut || seats.some(x => x.name === tok.typed)) return atClose();
+  const typed = tok.typed.toLowerCase();
+  const starts = seats.filter(x => x.name.toLowerCase().startsWith(typed));
+  const within = seats.filter(x => !starts.includes(x) && x.name.toLowerCase().includes(typed));
+  const rows = starts.length || within.length ? [...starts, ...within] : seats;
+  Object.assign(AT, { open: true, start: tok.start, rows: rows.map(x => x.name), pick: Math.min(AT.pick, rows.length - 1) });
+  $("#at-pop").innerHTML = rows.map((x, i) =>
+      `<button type="button" role="option" data-at="${esc(x.name)}" aria-selected="${i === AT.pick}" style="--seat:${seatColor(x.name)}">`
+      + `<i class="seat-dot"></i><b>${esc(x.name)}</b><span class="note">${esc(x.cwd ? lastPart(x.cwd) : "")}</span></button>`).join("")
+    + `<p class="note">↑ ↓ then Enter · they answer first, the rest follow · @name! asks only them</p>`;
+  $("#at-pop").hidden = false;
+}
+function atPick(name) {
+  const box = $("#input"), rest = box.value.slice(box.selectionStart).replace(/^ /, "");
+  box.value = `${box.value.slice(0, AT.start)}@${name} ${rest}`;
+  const caret = AT.start + name.length + 2;
+  box.focus(); box.setSelectionRange(caret, caret); atClose();
+}
+// A key the list takes for itself (true): the composer never sees it, so
+// Enter picks a seat instead of sending half a message.
+function atKey(e) {
+  if (!AT.open) return false;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    AT.pick = (AT.pick + (e.key === "ArrowDown" ? 1 : AT.rows.length - 1)) % AT.rows.length; atDraw();
+  } else if ((e.key === "Enter" && !e.shiftKey && !e.isComposing) || e.key === "Tab") atPick(AT.rows[AT.pick]);
+  else if (e.key === "Escape") { AT.shut = AT.start; atClose(); }
+  else return false;
+  e.preventDefault(); e.stopPropagation();
+  return true;
+}
+$("#input").addEventListener("input", atDraw);
+$("#input").addEventListener("click", atDraw);
+$("#input").addEventListener("blur", atClose);
+// mousedown, not click: the composer keeps the caret, so the pick lands where it was.
+$("#at-pop").addEventListener("mousedown", e => {
+  e.preventDefault();
+  const row = e.target.closest("[data-at]");
+  if (row) atPick(row.dataset.at);
+});
+
 $("#input").addEventListener("keydown", e => {
+  if (atKey(e)) return;
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#composer").requestSubmit(); }
 });
 
 $("#composer").addEventListener("submit", e => {
   e.preventDefault();
   const text = $("#input").value.trim();
-  if (text || PENDING.length) send({ prompt: text });
+  if (!text && !PENDING.length) return;
+  if (current && chatBusy() && !drawing) queueMessage(text); else send({ prompt: text });
 });
 
+// ── Said while an answer is coming: it waits its turn ───────────────────
+// Chad, 17 Nov 2026: "being able to send live would be good as well". A
+// message sent mid-answer is not lost and not refused: it is kept on a slip
+// above the box, by chat, and sent once the answer is in. It does not reach
+// Claude MID-thought; that needs the CLI's streaming input, which is its own
+// piece of work. × takes a slip back into the box.
+//
+// HOW they go is the chat's `queue` setting, over every chat's (queueMode).
+// The first build sent them one at a time, and three quick thoughts became
+// three replies, each blind to the other two - Chad, 17 Nov 2026: "taking
+// each message at once leaves a weird lag ... like a stutter"; "meld was the
+// word I was missing":
+//   meld  everything waiting goes as ONE message, in the order written
+//   each  one at a time, each after the one before it has been answered
+//   hold  they wait until you let them go, then go as one
+// And the line can be held by hand, whatever the setting (HOLD): slips are
+// written before the answer they follow has been read, so they can be stale.
+// Stopping an answer holds it, and so does an answer that failed - the first
+// build fired the next slip the moment you said stop, so stopping took two.
+// A hold lasts until you let the line go, or it empties.
+const QUEUE = new Map();                       // chat id -> [{prompt, files}]
+const HOLD = new Map();                        // chat id -> true (held by hand, a stop, a failure) | false (let go by hand)
+let DRAINING = false;
+const lineHeld = sid => HOLD.has(sid) ? HOLD.get(sid) : queueMode() === "hold";
+const holdLine = sid => { if (sid) HOLD.set(sid, true); };
+async function queueMessage(text) {
+  const sid = current.id, waiting = PENDING;
+  $("#input").value = ""; PENDING = []; drawTray(); atClose();
+  let files = [];
+  try {
+    // Uploaded now, so the slip holds what the chat already has, not files that may be gone by then.
+    for (const p of waiting) files.push(p.stored || (p.stored = await call("POST", `/api/sessions/${sid}/files`, { name: p.name, data: await b64(p.file) })));
+  } catch (ex) { alert(ex.message); }
+  waiting.forEach(p => p.url && URL.revokeObjectURL(p.url));
+  if (!QUEUE.has(sid)) QUEUE.set(sid, []);
+  QUEUE.get(sid).push({ prompt: text, files });
+  drawQueue();
+}
+function drawQueue() {
+  const sid = current?.id, slips = sid ? QUEUE.get(sid) || [] : [];
+  const busy = chatBusy();
+  // A hold is the line's, not the chat's: once nothing is waiting (and no
+  // answer is coming that something could still be queued behind) it is forgotten.
+  if (sid && !slips.length && !busy) HOLD.delete(sid);
+  $("#queue").hidden = !slips.length;
+  if (!slips.length) { $("#queue").innerHTML = ""; return; }
+  const held = lineHeld(sid), each = queueMode() === "each";
+  const head = held
+    ? `<span class="q-head held" title="nothing here is sent until you let it go"><b>held</b>`
+      + `<button type="button" class="ghost" data-qgo title="${busy ? "let them go when this answer is in" : "send what is waiting now"}">`
+      + `${busy ? "let go" : "send now"}</button></span>`
+    : `<span class="q-head" title="${each ? "sent one at a time, each after the one before it is answered"
+                                           : "sent as one message when this answer is in"}">`
+      + `<b>${each ? "one at a time" : slips.length > 1 ? "as one message" : "after this answer"}</b>`
+      + `<button type="button" class="ghost" data-qhold title="keep these here until you let them go">hold</button></span>`;
+  $("#queue").innerHTML = head + slips.map((q, i) =>
+      `<span class="slip" title="${esc(q.prompt)}"><b>${!i ? "next" : each ? "then" : "+"}</b><span>${esc(q.prompt || `${q.files.length} file(s)`)}</span>`
+      + (q.files.length && q.prompt ? `<i>+${q.files.length}</i>` : "")
+      + `<button type="button" data-unqueue="${i}" title="take it back into the box">×</button></span>`).join("");
+}
+$("#queue").onclick = e => {
+  if (!current) return;
+  const sid = current.id;
+  if (e.target.closest("[data-qhold]")) { HOLD.set(sid, true); return drawQueue(); }
+  if (e.target.closest("[data-qgo]")) { HOLD.set(sid, false); drawQueue(); return drainQueue(); }
+  const x = e.target.closest("[data-unqueue]");
+  if (!x) return;
+  const [q] = (QUEUE.get(sid) || []).splice(Number(x.dataset.unqueue), 1);
+  if (q && !$("#input").value) $("#input").value = q.prompt;
+  drawQueue(); $("#input").focus();
+};
+function drainQueue() {
+  if (DRAINING || !current || chatBusy()) return;
+  const sid = current.id, slips = QUEUE.get(sid);
+  if (!slips?.length || lineHeld(sid)) return;
+  // Melded: the lot, as one message, a blank line between what were separate
+  // sends, every slip's files with it. One at a time: only the first.
+  const going = queueMode() === "each" ? [slips.shift()] : slips.splice(0);
+  const next = { prompt: going.map(q => q.prompt).filter(Boolean).join("\n\n"), files: going.flatMap(q => q.files) };
+  drawQueue();
+  DRAINING = true;
+  send({ ...next, queued: true }).finally(() => { DRAINING = false; });
+}
+
+// `ask.queued`: a slip from the queue. It has its files already (ask.files),
+// and what is in the box and the tray right now is something else you are
+// writing, so neither is touched.
 async function send(ask) {
   if (chatBusy()) return;
-  const given = { prompt: ask.prompt, pending: PENDING };
+  const queued = !!ask.queued;
+  delete ask.queued;
+  const given = { prompt: ask.prompt, pending: queued ? [] : PENDING };
   // Only the newest answer can be retried, and nothing moves while one is coming.
   $("#log").querySelectorAll(".acts").forEach(b => b.remove());
   let sid = null, mine = null, live = null, sent = false;
@@ -930,10 +1470,10 @@ async function send(ask) {
       // Shown at once, before any round trip (22 Oct 2026: "it takes a bit to
       // roll up"): your words, and the files on their way up by name.
       $("#log").querySelector(".blank")?.remove();
-      mine = bubble({ role: "user", content: ask.prompt || "" }, -1, 0, { bare: true });
-      if (PENDING.length) mine.append(goingUp(PENDING));
+      mine = bubble({ role: "user", content: ask.prompt || "", files: queued ? ask.files : [] }, -1, 0, { bare: true });
+      if (PENDING.length && !queued) mine.append(goingUp(PENDING));
       $("#log").append(mine);
-      $("#input").value = "";
+      if (!queued) $("#input").value = "";
     }
     // ...and the answer starting, with a line saying what it is doing.
     live = liveBubble();
@@ -943,7 +1483,7 @@ async function send(ask) {
     await ensureSession();
     sid = current.id;
     ANSWERING.add(sid); lockComposer(); drawSide(); drawTitlebar();
-    if (!ask.retry) {
+    if (!ask.retry && !queued) {
       ask.files = await uploadPending(current.id);
       if (!ask.screen && screenRides()) ask.screen = true;
       if (ask.files.length) {
@@ -965,7 +1505,7 @@ async function send(ask) {
   } catch (ex) {
     if (live) { live.stop(); live.el.remove(); }
     if (!sent && mine) mine.remove();               // nothing went: the composer gets it back
-    if (sid) ANSWERING.delete(sid);
+    if (sid) { ANSWERING.delete(sid); holdLine(sid); }   // ...and nothing waiting is fired into whatever broke
     if (!sid || current?.id === sid) {
       $("#log").append(bubble({ role: "assistant", content: [ex.message, ex.body?.detail, ex.body?.hint].filter(Boolean).join(" - ") },
                               -1, 0, { cls: "err", bare: true, who: "symposium" }));
@@ -973,7 +1513,7 @@ async function send(ask) {
     }
   } finally {
     lockComposer(); drawSide();
-    if (!sid || current?.id === sid) $("#input").focus();
+    if ((!sid || current?.id === sid) && !document.activeElement?.closest?.("dialog")) $("#input").focus();
   }
 }
 
@@ -1017,7 +1557,7 @@ async function followLive(sid) {
 // `sid`; if you leave for another chat the follower is aborted (stopFollowing)
 // and nothing more is drawn or given back here - the turn itself goes on.
 async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
-  const status = pre || liveBubble();
+  const status = pre || liveBubble(current?.id === sid && current.started ? current.started * 1000 : 0);
   const live = status.el;
   FOLLOWER = { sid, ctrl, el: live, asked, retry };
   if (!live.isConnected) $("#log").append(live);
@@ -1058,11 +1598,23 @@ async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
       // The next seat's turn: the bubble is theirs now, and starts empty.
       parts.length = 0; steps.length = 0; raw = "";
       live.querySelectorAll(".permit").forEach(p => p.remove());
-      live.querySelector(".who").textContent = seatWho(ev.seat);
-      status.set(`${ev.seat}'s turn`); paint();
+      live.querySelector(".who").innerHTML = avatarHtml(ev.seat) + esc(seatWho(ev.seat));
+      wearSeat(live, ev.seat);
+      status.set(ev.called_by ? `${ev.seat}'s turn · ${ev.called_by} called on them` : `${ev.seat}'s turn`); paint();
       return;
     }
     if (ev.type === "pass") { status.set(`${ev.seat} passes`); return; }
+    // You said stop. What it had said and done is kept, marked stopped; the
+    // `saved` that follows redraws the chat with it (seren_symposium.app.keep_stopped).
+    // Whatever was waiting behind this answer is held: you stopped to say
+    // something, not to have the next slip fired in its place.
+    if (ev.type === "stopped") { holdLine(sid); status.set(ev.kept ? "stopped - keeping what it said" : "stopped"); return; }
+    // An answer put a new face on (a picture captioned avatar): wear it everywhere.
+    if (ev.type === "avatar") return Promise.all([loadAvatars(), call("GET", `/api/sessions/${encodeURIComponent(sid)}`)]).then(([, s]) => {
+      if (current?.id !== sid) return;
+      current = s;                                  // a face for this chat only is in the chat's own settings
+      drawLog(); drawSeats(); drawVoiceRows();
+    });
     if (ev.type === "chunk") {
       status.set("writing");
       if (interleave) {
@@ -1127,6 +1679,10 @@ async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
       return refresh().then(() => { if (current?.id === sid) return openSession(sid); });
     } else if (ev.type === "round") {
       ANSWERING.delete(sid);
+      // The seats were still calling on each other at the limit: said, so the
+      // quiet is not mistaken for agreement.
+      if (ev.capped) roomErrors.push(`The seats were still calling on each other after ${ev.volleys} turns of their own, `
+        + `so the round stopped there (claude.room_volleys). Say something to carry it on, or to settle it.`);
       if (!kept) return;
       return refresh().then(async () => {
         if (current?.id !== sid) return;
@@ -1164,6 +1720,7 @@ async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
   if (!kept && !failed) failed = { error: "the answer stopped before it was kept" };
   if (failed) {
     // Shown, never kept: the session file only ever gets turns that came back.
+    holdLine(sid);                                 // what is waiting is not fired into whatever broke
     ANSWERING.delete(sid); lockComposer(); drawSide();
     live.classList.add("err"); live.classList.remove("live"); tool?.remove();
     const why = [failed.error, failed.detail, failed.hint].filter(Boolean).join(" ");
@@ -1184,16 +1741,29 @@ const toolName = t => String(t || "a tool").split("__").pop();
 const goingUp = list => Object.assign(document.createElement("div"), {
   className: "going-up", textContent: `sending ${list.map(p => p.name).join(", ")}` });
 
-function liveBubble() {
+// `since`: when the turn began (ms), for a bubble drawn on coming back to a
+// chat mid-answer; it counts from there, not from this look at it.
+function liveBubble(since = 0) {
   const el = bubble({ role: "assistant", content: "" }, -1, 0,
                     { cls: "live", bare: true, who: voiceName(voiceOfChat()) });
   const line = Object.assign(document.createElement("div"), { className: "live-status" });
-  line.innerHTML = `<span class="ls-dots"><i></i><i></i><i></i></span><span class="ls-what">thinking</span><span class="ls-time">0s</span>`;
+  line.innerHTML = `<span class="ls-dots"><i></i><i></i><i></i></span><span class="ls-what">thinking</span><span class="ls-time">0s</span>`
+    + `<button type="button" class="ghost ls-stop" title="stop this answer - in a room, the round: what has come back is kept">stop</button>`;
+  // Stop: the turn running in the chat this bubble is drawn in. The server
+  // ends it and says so in the stream, so nothing is torn down here.
+  line.querySelector(".ls-stop").onclick = async e => {
+    const sid = FOLLOWER?.el === el ? FOLLOWER.sid : current?.id;
+    if (!sid) return;
+    e.target.disabled = true;
+    holdLine(sid); drawQueue();                    // stop holds the line too: one stop, not one per slip
+    try { await call("POST", `/api/sessions/${encodeURIComponent(sid)}/stop`, {}); }
+    catch (ex) { e.target.disabled = false; }
+  };
   el.append(line);
-  const t0 = Date.now();
-  const timer = setInterval(() => {
-    line.querySelector(".ls-time").textContent = `${Math.round((Date.now() - t0) / 1000)}s`;
-  }, 1000);
+  const t0 = since || Date.now();
+  const tick = () => { line.querySelector(".ls-time").textContent = `${Math.max(0, Math.round((Date.now() - t0) / 1000))}s`; };
+  tick();
+  const timer = setInterval(tick, 1000);
   LIVE_COUNT++; document.title = `\u25CF ${TITLE}`;
   let stopped = false;
   return {
@@ -1300,7 +1870,7 @@ $("#title").addEventListener("keydown", e => {
 // project's settings one click away without leaving the chat.
 function drawTitlebar() {
   const fresh = !current;
-  for (const id of ["#rename", "#copy-all", "#del"]) $(id).hidden = fresh;
+  for (const id of ["#rename", "#copy-all", "#remove", "#del"]) $(id).hidden = fresh;
   if (fresh) { setRenaming(false); $("#title").value = DRAFT.title || ""; $("#title").placeholder = "new chat"; }
   else $("#title").placeholder = "untitled";
   const where = current ? current.folder : folder, preset = presetFor(where);
@@ -1316,6 +1886,7 @@ $("#chat-project").onclick = () => {
   drawChatSettings(); $("#chat-settings").showModal();
 };
 
+$("#remove").onclick = () => { if (current) removeChat(current.id); };
 $("#del").onclick = async () => {
   if (!sure(`Delete "${current.title || "untitled"}" and its files? This can't be undone.`)) return;
   try { await call("DELETE", `/api/sessions/${current.id}`); } catch (ex) { return alert(ex.message); }
@@ -1473,6 +2044,45 @@ function foldBar(bar, open = BARS[bar] === false) {
 $("#side-toggle").onclick = () => foldBar("side");
 $("#rail-toggle").onclick = () => foldBar("rail");
 drawBars();
+
+// ...and each bar's width is yours to drag (Chad, 17 Nov 2026: "collapsing is
+// great! but to widen out a screen share or other parts would be awesome").
+// Each has a grip on its inner edge: drag it, double-click for the usual
+// width. The width is this browser's to remember, like the fold; a folded
+// bar keeps the width it will open to (--side-open / --rail-open sit under
+// the fold's --side-w / --rail-w, so folding still wins while it is folded).
+const WIDTHS = local("symposium.widths", {});
+const BAR_LIMITS = { side: [170, 560, 0.4], rail: [220, 1100, 0.65] };    // least, most, and most as a share of the window
+function setBarWidth(bar, px) {
+  if (px == null) { delete WIDTHS[bar]; $("#chat").style.removeProperty(`--${bar}-open`); return; }
+  const [least, most, share] = BAR_LIMITS[bar];
+  // ...and never so wide that the chat between the bars has no room left to read in.
+  const other = $(bar === "side" ? "#rail" : "#side").getBoundingClientRect().width;
+  const w = Math.round(Math.max(least, Math.min(px, most, window.innerWidth * share, window.innerWidth - other - 380)));
+  WIDTHS[bar] = w;
+  $("#chat").style.setProperty(`--${bar}-open`, `${w}px`);
+}
+for (const bar of ["side", "rail"]) if (Number.isFinite(WIDTHS[bar])) setBarWidth(bar, WIDTHS[bar]);
+document.querySelectorAll("#chat .grip").forEach(grip => {
+  const bar = grip.dataset.grip;
+  grip.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    document.body.classList.add("gripping");
+    const box = $("#chat").getBoundingClientRect();
+    const move = ev => setBarWidth(bar, bar === "side" ? ev.clientX - box.left : box.right - ev.clientX);
+    const done = () => {
+      grip.removeEventListener("pointermove", move);
+      document.body.classList.remove("gripping");
+      keep("symposium.widths", WIDTHS);
+    };
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", done, { once: true });
+    grip.addEventListener("pointercancel", done, { once: true });
+  });
+  grip.addEventListener("dblclick", () => { setBarWidth(bar, null); keep("symposium.widths", WIDTHS); });
+});
 
 // ── Screen share ────────────────────────────────────────────────────────
 // A source - a display (the main one unless you pick another) or, on Windows,
@@ -1671,6 +2281,10 @@ function drawChatSettings() {
     el.placeholder = inherited != null && inherited !== "" ? String(inherited) : "default";
   }
   $("#s-voice").options[0].textContent = `project's (${voiceName(preset.voice || "lodestar")})`;
+  const everyChats = QUEUE_NAMES[CFG.queue] ? CFG.queue : "meld";
+  $("#s-queue").innerHTML = `<option value="">every chat's (${esc(QUEUE_NAMES[everyChats])})</option>`
+    + Object.entries(QUEUE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+  $("#s-queue").value = own.queue ?? "";
   // The prompts add up (22 Oct 2026): its project's, then this chat's after it.
   const inherit = own.system_inherit !== false, theirs = String(preset.system_prompt || "").trim();
   $("#s-system_inherit").checked = inherit;
@@ -1682,7 +2296,7 @@ function drawChatSettings() {
   $("#s-model_override").setAttribute("list", claude ? "claude-models" : "models");
   if (claude && !preset.model) $("#s-model_override").placeholder = "the CLI's default";
   $("#s-cwd").placeholder = CFG.claude?.cwd || "Symposium's own folder (claude.cwd)";
-  drawSeats();
+  drawSeats(); drawVoiceRows();
   // Claude's permissions for this chat, over its project's, every chat's and
   // the carabiner's, and what a turn here would run with (22 Oct 2026).
   document.querySelectorAll("#set-chat-form .claude-only").forEach(el => { el.hidden = !claude; });
@@ -1708,9 +2322,9 @@ $("#chat-settings").addEventListener("click", e => { if (e.target === $("#chat-s
 function setChatSetting(k, v) {
   if (!current) {
     if (v === null) delete DRAFT.settings[k]; else DRAFT.settings[k] = v;
-    drawChatSettings(); return drawLog();
+    drawChatSettings(); lockComposer(); picDrawHow(); return drawLog();
   }
-  patch({ settings: { [k]: v } }).then(() => { drawChatSettings(); drawTitlebar(); })
+  patch({ settings: { [k]: v } }).then(() => { drawChatSettings(); drawTitlebar(); lockComposer(); picDrawHow(); })
     .catch(ex => { alert(ex.message); drawChatSettings(); });
 }
 $("#s-permission_mode").addEventListener("change", e => setChatSetting("permission_mode", e.target.value || null));
@@ -1767,7 +2381,12 @@ function drawSettings() {
   $("#a-you").value = CFG.you || "";
   $("#a-claude_name").value = CFG.claude?.name || "";
   $("#a-confirm_destructive").checked = !!CFG.confirm_destructive;
+  $("#a-queue").innerHTML = Object.entries(QUEUE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+  $("#a-queue").value = QUEUE_NAMES[CFG.queue] ? CFG.queue : "meld";
+  $("#a-translate").innerHTML = Object.entries(TRANSLATE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+  $("#a-translate").value = TRANSLATE_NAMES[CFG.translate] ? CFG.translate : "chat";
   $("#a-prefs-file").textContent = CFG.prefs_file || "";
+  drawFaceDefaults();
   drawProjects(); drawAbout(); drawClaude();
 }
 
@@ -1821,11 +2440,11 @@ for (const [box, key] of [["#c-tool-add", "claude_tools"], ["#c-dir-add", "claud
   });
 }
 
-for (const k of ["you", "claude_name", "confirm_destructive"]) {
+for (const k of ["you", "claude_name", "confirm_destructive", "queue", "translate"]) {
   $(`#a-${k}`).addEventListener("change", async e => {
     const v = e.target.type === "checkbox" ? e.target.checked : e.target.value.trim();
     try { await call("PATCH", "/api/prefs", { [k]: v }); } catch (ex) { alert(ex.message); }
-    await reloadConfig(); drawSettings(); drawSide(); if (current) drawLog();
+    await reloadConfig(); drawSettings(); drawSide(); lockComposer(); picDrawHow(); if (current) drawLog();
   });
 }
 
@@ -2132,8 +2751,63 @@ boot();
 const PIC = Object.assign({ model: "", size: "", loras: {} }, local("symposium.picture", {}));
 const savePic = () => keep("symposium.picture", { model: PIC.model, size: PIC.size, loras: PIC.loras });
 let PIC_OPTIONS = null, PIC_LORAS = [], PIC_PLAN = null;
-// The clock while a translate runs (null when none is): one at a time.
+// The translate running, if one is: {timer, key} - its clock, and the chat it
+// was asked in (a draftKey). One at a time.
 let PIC_TRANSLATING = null;
+
+// ── The panel is the chat's ─────────────────────────────────────────────
+// It used to be the window's: what you asked for in one chat, the prompt
+// drafted from it, the negative, the seed and the plan were all still sitting
+// there in the next (Chad, 17 Nov 2026: "should be a per chat panel, not have
+// a carry over on text"). Now it leaves and arrives with the box's own draft
+// (stashDraft / takeDraft): each chat has its own words, prompt, negative,
+// seed and count, and - once it has picked them for itself - its own model,
+// size and LoRAs. A chat that has not picked starts from the ones used last,
+// so a new chat is not a blank cluster to choose from again. This browser
+// remembers them (the last 40 chats); a plan is asked for again.
+const PIC_CHATS = new Map(Object.entries(local("symposium.pictures", {})));
+let PIC_OWN = false;                             // this chat picked its own model, size or LoRAs
+const keepPics = () => keep("symposium.pictures", Object.fromEntries([...PIC_CHATS].slice(-40)));
+const picMine = () => { PIC_OWN = true; savePic(); };
+function stashPic() {
+  const key = draftKey();
+  const d = { text: picEl("text").value.slice(0, 8000), prompt: picEl("prompt").value.slice(0, 8000),
+              negative: picEl("negative").value.slice(0, 4000), seed: picEl("seed").value, last: picEl("seed").placeholder,
+              count: picEl("count").value };
+  if (PIC_OWN) Object.assign(d, { model: PIC.model, size: PIC.size, loras: JSON.parse(JSON.stringify(PIC.loras)) });
+  PIC_CHATS.delete(key);                         // put back last, so the newest are the ones kept
+  if (d.text || d.prompt || d.negative || d.seed || PIC_OWN || Number(d.count || 1) > 1) PIC_CHATS.set(key, d);
+  keepPics();
+}
+// The chooser under the model: this chat's way of translating, or every chat's.
+function picDrawHow() {
+  const sel = picEl("how"), usual = TRANSLATE_NAMES[CFG?.translate] ? CFG.translate : "chat";
+  sel.innerHTML = `<option value="">every chat's (${esc(TRANSLATE_NAMES[usual])})</option>`
+    + Object.entries(TRANSLATE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+  sel.value = translateOwn();
+}
+function takePic() {
+  picDrawHow();
+  const key = draftKey(), d = PIC_CHATS.get(key);
+  PIC_CHATS.delete(key); keepPics();             // the panel holds it now, as the box holds a draft
+  picEl("text").value = d?.text || ""; picEl("prompt").value = d?.prompt || ""; picEl("negative").value = d?.negative || "";
+  picEl("seed").value = d?.seed || ""; picEl("seed").placeholder = d?.last || "random"; picEl("count").value = d?.count || 1;
+  PIC_PLAN = null; picEl("plan-box").hidden = true; picEl("plan-box").open = false;
+  // A translate still running was asked in one chat: only that chat's panel waits on it.
+  const waiting = PIC_TRANSLATING?.key === key;
+  picEl("prompt").readOnly = waiting; picEl("prompt").classList.toggle("waiting", waiting);
+  if (!waiting) picStatus("");
+  const before = PIC.model;
+  PIC_OWN = !!d && "model" in d;
+  Object.assign(PIC, { model: "", size: "", loras: {} },
+                PIC_OWN ? { model: d.model, size: d.size, loras: d.loras || {} } : local("symposium.picture", {}));
+  picEl("size").value = PIC.size || "";
+  if (!PIC_OPTIONS) return;
+  const sel = picEl("model");
+  sel.value = PIC.model && PIC_OPTIONS.models.some(m => m.name === PIC.model) ? PIC.model : "";
+  PIC.model = sel.value;
+  if (PIC.model !== before) picModelChanged(); else picDrawLoras();      // the same model: only what is worn differs
+}
 
 const picEl = id => $("#pic-" + id);
 const picNote = (text, bad = false) => { picEl("note").textContent = text || ""; picEl("note").classList.toggle("bad", !!bad); };
@@ -2178,16 +2852,24 @@ async function picModelChanged() {
   if (!m) return;
   try {
     const got = await call("GET", `/api/pictures/options?model=${encodeURIComponent(m.name)}`);
+    if (picModel() !== m) return;                  // another chat's model was put on meanwhile: its own answer draws it
     PIC_LORAS = got.loras || [];
     picEl("loras-hint").textContent = PIC_LORAS.length ? "click to wear one; the number is its weight" : "none fit this model";
-    const worn = PIC.loras[m.name] || {};
-    picEl("loras").innerHTML = PIC_LORAS.map(l => {
-      const on = worn[l.name] != null;
-      return `<span class="lora${on ? " on" : ""}" data-lora="${esc(l.name)}" title="${esc(l.fit || "")}">${esc(l.name.replace(/\.safetensors$/i, ""))}`
-        + `${l.fit ? ` <span class="fit">${esc(l.fit)}</span>` : ""}`
-        + `<input type="number" step="0.05" min="-2" max="2" value="${on ? worn[l.name] : (l.weight ?? 0.8)}" ${on ? "" : "hidden"}></span>`;
-    }).join("");
+    picDrawLoras();
   } catch (ex) { picEl("loras-hint").textContent = ex.body?.error || ex.message; }
+}
+
+// The LoRAs that fit the model, with the ones this chat wears switched on.
+function picDrawLoras() {
+  const m = picModel();
+  if (!m) return;
+  const worn = PIC.loras[m.name] || {};
+  picEl("loras").innerHTML = PIC_LORAS.map(l => {
+    const on = worn[l.name] != null;
+    return `<span class="lora${on ? " on" : ""}" data-lora="${esc(l.name)}" title="${esc(l.fit || "")}">${esc(l.name.replace(/\.safetensors$/i, ""))}`
+      + `${l.fit ? ` <span class="fit">${esc(l.fit)}</span>` : ""}`
+      + `<input type="number" step="0.05" min="-2" max="2" value="${on ? worn[l.name] : (l.weight ?? 0.8)}" ${on ? "" : "hidden"}></span>`;
+  }).join("");
 }
 
 function picRequest() {
@@ -2219,26 +2901,38 @@ async function picTranslate() {
   const m = picModel();
   const button = picEl("translate"), prompt = picEl("prompt"), started = Date.now();
   const who = voiceOfChat() === "claude" ? voiceName("claude") : "this chat's model";
-  const tick = () => picStatus(`translating with ${who}… ${Math.round((Date.now() - started) / 1000)}s`, false, true);
+  // Asked in this chat, and its answer is this chat's: if you are elsewhere
+  // when it comes, it is put with that chat's panel, not into the one open.
+  const job = PIC_TRANSLATING = { timer: null, key: draftKey() };
+  const here = () => draftKey() === job.key;
+  const how = translateMode();
+  const tick = () => { if (here()) picStatus(`translating with ${who}, from ${TRANSLATE_FROM[how]}… ${Math.round((Date.now() - started) / 1000)}s`, false, true); };
   button.disabled = true; button.setAttribute("aria-busy", "true");
   button.innerHTML = `<span class="spin" aria-hidden="true"></span>translating…`;
   prompt.readOnly = true; prompt.classList.add("waiting");
-  tick(); PIC_TRANSLATING = setInterval(tick, 1000);
+  tick(); job.timer = setInterval(tick, 1000);
   try {
     // whoever answers this chat writes the draft: Claude in a Claude chat, the chat's own model otherwise
-    const got = await call("POST", "/api/pictures/translate", { text, guide: m?.style?.guide || "", session: current?.id, folder });
-    prompt.value = got.prompt || "";
-    picEl("negative").value = got.negative || "";
-    const by = got.voice === "claude" ? voiceName("claude") : (got.model || "a local model");
-    picStatus(`drafted by ${by}${got.node && got.voice !== "claude" ? " on " + got.node : ""} in `
-      + `${Math.round((Date.now() - started) / 1000)}s - edit it as you like`);
+    const got = await call("POST", "/api/pictures/translate", { text, guide: m?.style?.guide || "", session: current?.id, folder, mode: how });
+    if (here()) {
+      prompt.value = got.prompt || "";
+      picEl("negative").value = got.negative || "";
+      const by = got.voice === "claude" ? voiceName("claude") : (got.model || "a local model");
+      picStatus(`drafted by ${by}${got.node && got.voice !== "claude" ? " on " + got.node : ""}`
+        + ` from ${TRANSLATE_FROM[got.mode] || "your words"} in ${Math.round((Date.now() - started) / 1000)}s`
+        + (got.instead_of && got.why ? ` (not ${TRANSLATE_FROM[got.instead_of] || got.instead_of}: ${got.why})` : "")
+        + ` - edit it as you like`);
+    } else {
+      PIC_CHATS.set(job.key, { ...(PIC_CHATS.get(job.key) || { text }), prompt: got.prompt || "", negative: got.negative || "" });
+      keepPics();
+    }
   } catch (ex) {
     const detail = typeof ex.body?.detail === "string" ? ex.body.detail : "";
-    picStatus(`translate failed: ${[ex.body?.error || ex.message, detail].filter(Boolean).join(" - ")}`, true);
+    if (here()) picStatus(`translate failed: ${[ex.body?.error || ex.message, detail].filter(Boolean).join(" - ")}`, true);
   } finally {
-    clearInterval(PIC_TRANSLATING); PIC_TRANSLATING = null;
+    clearInterval(job.timer); PIC_TRANSLATING = null;
     button.disabled = false; button.removeAttribute("aria-busy"); button.textContent = "translate";
-    prompt.readOnly = false; prompt.classList.remove("waiting");
+    if (here()) { prompt.readOnly = false; prompt.classList.remove("waiting"); }
   }
 }
 
@@ -2269,11 +2963,13 @@ async function picDraw() {
   drawing = true; lockComposer(); picEl("draw").disabled = true;
   $("#chat .pic").classList.add("busy"); picNote("drawing… this can take a minute or two");
   try {
-    await ensureSession();
-    const got = await call("POST", "/api/pictures/draw", { session: current.id, asked, why: asked, request: req });
-    await openSession(current.id);
+    const sid = (await ensureSession()).id;
+    const got = await call("POST", "/api/pictures/draw", { session: sid, asked, why: asked, request: req });
+    if (current?.id === sid) {
+      await openSession(sid);
+      if (got.seed != null) picEl("seed").placeholder = `last: ${got.seed}`;
+    } else if (got.seed != null && PIC_CHATS.has(sid)) { PIC_CHATS.get(sid).last = `last: ${got.seed}`; keepPics(); }
     picNote(`drawn on ${got.node} with ${got.model?.name || got.model || "?"} in ${got.seconds ?? "?"}s · seed ${got.seed}`);
-    if (got.seed != null) picEl("seed").placeholder = `last: ${got.seed}`;
   } catch (ex) {
     picNote([ex.body?.error, ex.body?.detail].filter(Boolean).join(" - ") || ex.message, true);
   } finally {
@@ -2292,10 +2988,11 @@ $("#picture-btn").onclick = () => {
 };
 $("#p-picture").addEventListener("toggle", () => { if ($("#p-picture").open && !PIC_OPTIONS) picLoadOptions(); });
 picEl("reload").onclick = picLoadOptions;
-picEl("model").onchange = async () => { PIC.model = picEl("model").value; savePic(); await picModelChanged(); };
-picEl("size").onchange = () => { PIC.size = picEl("size").value; savePic(); };
+picEl("model").onchange = async () => { PIC.model = picEl("model").value; picMine(); await picModelChanged(); };
+picEl("size").onchange = () => { PIC.size = picEl("size").value; picMine(); };
 picEl("size").value = PIC.size || "";
 picEl("translate").onclick = picTranslate;
+picEl("how").onchange = () => setChatSetting("translate", picEl("how").value || null);
 picEl("plan").onclick = picPlan;
 picEl("draw").onclick = picDraw;
 picEl("text").addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); picTranslate(); } });
@@ -2307,12 +3004,12 @@ picEl("loras").addEventListener("click", e => {
   const input = chip.querySelector("input");
   if (chip.classList.toggle("on")) { worn[chip.dataset.lora] = Number(input.value); input.hidden = false; }
   else { delete worn[chip.dataset.lora]; input.hidden = true; }
-  savePic();
+  picMine();
 });
 picEl("loras").addEventListener("change", e => {
   if (e.target.tagName !== "INPUT") return;
   const chip = e.target.closest(".lora"), m = picModel();
-  if (chip && m && chip.classList.contains("on")) { (PIC.loras[m.name] = PIC.loras[m.name] || {})[chip.dataset.lora] = Number(e.target.value); savePic(); }
+  if (chip && m && chip.classList.contains("on")) { (PIC.loras[m.name] = PIC.loras[m.name] || {})[chip.dataset.lora] = Number(e.target.value); picMine(); }
 });
 
 // ── Ears: push-to-talk ──────────────────────────────────────────────────
@@ -2425,28 +3122,40 @@ const STACK_STATES = { replaced: "replaced", off: "left out", empty: "empty", un
 const stackChars = n => `${Number(n).toLocaleString()} chars ≈ ${Math.ceil(n / 4).toLocaleString()} tokens (est.)`;
 const chips = list => list?.length ? `<div class="st-chips">${list.map(x => `<span>${esc(x)}</span>`).join("")}</div>` : "";
 
+// A room has a stack per seat: which one the sheet is showing ("" = the first).
+let STACK_SEAT = "";
 async function openStack(project) {
   STACK_FOR = project != null ? project : null;
+  STACK_SEAT = "";
   $("#st-body").innerHTML = `<p class="muted">Looking…</p>`;
   if (!$("#stack-sheet").open) $("#stack-sheet").showModal();
   await drawStack();
 }
 $("#st-refresh").onclick = () => drawStack();
+$("#st-body").addEventListener("click", e => {
+  const seat = e.target.closest("[data-seat]");
+  if (seat) { STACK_SEAT = seat.dataset.seat; drawStack(); }
+});
 $("#stack-sheet").addEventListener("click", e => { if (e.target === $("#stack-sheet")) $("#stack-sheet").close(); });
 
 async function drawStack() {
   const q = STACK_FOR != null ? `folder=${encodeURIComponent(STACK_FOR)}`
-    : current ? `session=${encodeURIComponent(current.id)}`
+    : current ? `session=${encodeURIComponent(current.id)}${STACK_SEAT ? `&seat=${encodeURIComponent(STACK_SEAT)}` : ""}`
     : `folder=${encodeURIComponent(folder)}&settings=${encodeURIComponent(JSON.stringify(DRAFT.settings))}`;
   let st;
   try { st = await call("GET", `/api/stack?${q}`); }
   catch (ex) { $("#st-body").innerHTML = `<p class="muted">${esc(ex.message)}</p>`; return; }
   $("#st-title").textContent = STACK_FOR != null ? `What chats in ${STACK_FOR} start with`
+    : st.seat ? `What ${seatWho(st.seat)} is given`
     : `What ${current?.title ? `“${current.title}”` : "this chat"} is given`;
   const sized = st.layers.filter(l => l.chars && !["off", "replaced", "unknown"].includes(l.state));
   const bar = st.total_chars ? sized.map(l =>
     `<span class="g-${l.group}" style="flex:${l.chars}" title="${esc(l.title)}: ${esc(stackChars(l.chars))}"></span>`).join("") : "";
-  let html = `<p class="st-total">${esc(voiceName(st.voice))}${st.folder ? ` · ${esc(st.folder)}` : ""} · `
+  // A room: one stack per seat, each its own folder, tools and what it has yet to hear.
+  const seats = st.seats?.length ? `<div class="st-seats">` + st.seats.map(n =>
+      `<button type="button" class="ghost${n === st.seat ? " on" : ""}" data-seat="${esc(n)}" style="--seat:${seatColor(n)}">`
+      + `<i class="seat-dot"></i>${esc(n)}</button>`).join("") + `</div>` : "";
+  let html = seats + `<p class="st-total">${esc(voiceName(st.voice))}${st.folder ? ` · ${esc(st.folder)}` : ""} · `
     + `${esc(stackChars(st.total_chars))} that can be counted here`
     + (st.voice === "claude" ? "; Claude Code's own prompt and its tools' descriptions come on top." : ".") + `</p>`
     + (bar ? `<div class="st-bar">${bar}</div>` : "");

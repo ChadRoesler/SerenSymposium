@@ -14,6 +14,10 @@ laid over the yaml when Symposium starts:
     ui.you                  your name on your messages
     claude.name             what the claude voice signs as
     ui.confirm_destructive  ask before a delete or a rewind
+    ui.queue                how what you sent mid-answer goes afterwards:
+                            meld, each or hold (every chat's default)
+    ui.translate            what a picture's translate is drafted from:
+                            plain, chat or fork (every chat's default)
     claude.permission_mode  how the claude voice is asked about tools,
     claude.ask              whether it is asked in the window,
     claude.allowed_tools    what it may use without asking (an "Always"
@@ -55,12 +59,17 @@ PROJECT_FIELDS = ("voice", "system_prompt", "model", "temperature", "max_tokens"
                   "permission_mode", "allowed_tools", "tools_inherit")
 APP_FIELDS = {"you": ("ui", "you"), "claude_name": ("claude", "name"),
               "confirm_destructive": ("ui", "confirm_destructive"),
+              "queue": ("ui", "queue"), "translate": ("ui", "translate"),
               "claude_mode": ("claude", "permission_mode"), "claude_ask": ("claude", "ask"),
               "claude_tools": ("claude", "allowed_tools"), "claude_dirs": ("claude", "add_dirs")}
 # Not bypassPermissions: a window that can switch every check off with one
 # click is not one to leave open. The yaml can still say it, on purpose.
 # (seren_symposium.permissions keeps the list for every layer.)
 MODES = WINDOW_MODES
+# How what was sent while an answer was coming goes afterwards (config.UiConfig.queue).
+QUEUE_MODES = ("meld", "each", "hold")
+# What a picture's translate is drafted from (config.UiConfig.translate).
+TRANSLATE_MODES = ("plain", "chat", "fork")
 MAX_RULES = 200
 
 
@@ -170,6 +179,14 @@ class Prefs:
         if key in ("confirm_destructive", "claude_ask"):
             if not isinstance(value, bool):
                 raise Invalid(f"{key} is true or false")
+            return value
+        if key == "queue":
+            if value not in QUEUE_MODES:
+                raise Invalid(f"queue is one of: {', '.join(QUEUE_MODES)}")
+            return value
+        if key == "translate":
+            if value not in TRANSLATE_MODES:
+                raise Invalid(f"translate is one of: {', '.join(TRANSLATE_MODES)}")
             return value
         if key == "claude_mode":
             if value not in MODES:

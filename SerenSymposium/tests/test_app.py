@@ -122,6 +122,13 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                # a room's seats: the chat's own file, and a terminal's transcript
                # for a seat picked up from one (seren_symposium.room)
                "/api/sessions/{sid}/seats", "/api/sessions/{sid}/seats/{name}",
+               # stop the turn running in a chat: a task of this process, cancelled
+               "/api/sessions/{sid}/stop",
+               # take a chat out without deleting it: its files moved aside, on this box
+               "/api/sessions/{sid}/remove",
+               # the pictures voices wear: files beside the chats (a link is
+               # fetched from the web as an answer's image is, never from a leaf)
+               "/api/avatars", "/api/avatars/{name}",
                # -> the prefs file beside the chats
                "/api/prefs", "/api/projects", "/api/projects/remove", "/api/claude",
                # -> Margin, for the preface (seren_symposium.preface): the one page the

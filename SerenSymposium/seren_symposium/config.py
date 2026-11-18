@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field
@@ -177,6 +177,38 @@ class ClaudeConfig(BaseModel):
     # strictness off for that turn (with a warning) rather than lose a tool.
     mcp_servers: list[str] = Field(default_factory=list)
     claude_json: str = ""            # that file; blank = ~/.claude.json
+    # Of mcp_servers, the ones whose tools are loaded up front ("alwaysLoad")
+    # instead of found through ToolSearch when first needed. The first tangle
+    # (17 Nov 2026): every seat had to ToolSearch its own Workbench each turn.
+    # It costs each turn the whole of that server's tool descriptions, so it
+    # is a list to opt into, not a default.
+    mcp_always_load: list[str] = Field(default_factory=list)
+    # Claude Code's own built-in tools, cut down to these (--tools): the first
+    # tangle's seats each carried 35 of them - Cron*, DesignSync, Workflow,
+    # RemoteTrigger... - and used a handful. Empty = all the CLI has. ToolSearch
+    # is always kept: without it an MCP tool that is not loaded up front
+    # cannot be reached at all.
+    builtin_tools: list[str] = Field(default_factory=list)
+    # Its skills and slash commands (30 a seat, the same night). Off:
+    # --disable-slash-commands, and the Skill tool goes with them.
+    skills: bool = True
+    # The account's claude.ai connectors (Gmail, Drive...): MCP servers Claude
+    # Code fetches from the login, in no file here, so mcp_servers is not
+    # known to keep them out. Off (ENABLE_CLAUDEAI_MCP_SERVERS=false): a turn
+    # here pays for no tool list it never uses.
+    claudeai_connectors: bool = False
+    # Claude Code's own auto memory - the MEMORY.md it keeps per folder and
+    # tells every session to write to. A house with its own memory does not
+    # want a second, quieter one growing beside it:
+    #   last_resort  it stays, and each turn is told auto_memory_note
+    #   off          the CLI is started without it (CLAUDE_CODE_DISABLE_AUTO_MEMORY=1)
+    #   on           left as Claude Code has it
+    auto_memory: Literal["last_resort", "off", "on"] = "last_resort"
+    auto_memory_note: str = (
+        "Claude Code's own auto memory (the MEMORY.md files in its memory folder) is a last resort "
+        "here. This house has its own memory, reached through your memory tools - search, recall, "
+        "remember, and the facts - and that is where to look first and where anything worth keeping "
+        "goes. Write to MEMORY.md only when those tools cannot be reached, and say so when you do.")
     # Where the CLI keeps its conversations, for picking one up from a
     # terminal into a chat (seren_symposium.terminal). Blank = ~/.claude/projects.
     projects_dir: str = ""
@@ -184,6 +216,12 @@ class ClaudeConfig(BaseModel):
     # that it is one seat of several and how to share a table. {seats} the
     # names, {me} this seat's, {you} the person's. Blank says nothing.
     room_framing: str = Field(default_factory=lambda: _room_framing())
+    # Seats call on each other: a seat whose last message names another with
+    # @name is answered by it next, so two can argue a point out without the
+    # person passing every line between them. This is how many such turns -
+    # ones the person did not ask for - one message may set off before the
+    # round stops and waits for them. 0: seats cannot call on each other.
+    room_volleys: int = 6
     # The page read to the model as its system prompt (PrefaceConfig).
     preface: PrefaceConfig = Field(default_factory=PrefaceConfig)
     # A tool that is not on the list is asked about IN THE WINDOW - Allow
@@ -214,7 +252,28 @@ class ClaudeConfig(BaseModel):
         "an SVG you draw, notes, code - and write ![caption](files/<filename>) for a picture or "
         "[name](files/<filename>) for anything else. A person is reading this live and can answer "
         "a question through the permission window. If the session started without your bookmark, "
-        "fetch it through your tools before answering.")
+        "fetch it through your tools before answering. "
+        "You can wear any picture you like as your avatar in this window - yourself, a robot, a "
+        "possum flying a spaceship: show it as ![avatar](...) with a file you saved into that "
+        "folder, an image on the web, or the file name of one a tool just drew for you, and it is "
+        "your face in this chat until you put on another; caption it `avatar everywhere` instead "
+        "to wear it in every chat that has not got one of its own. "
+        "If your own record of this conversation shows a turn of yours as just \"No response "
+        "requested.\", that is the CLI's filler for an answer the person stopped before it "
+        "finished: you did not say it, and it is never an answer to give.")
+    # Said after the framing when mcp_servers names the house's own servers
+    # ({servers}): where its tools are and that they come first. Their
+    # descriptions sit behind ToolSearch until asked for, and a seat that has
+    # to look its own door up every turn starts reaching for Claude Code's
+    # built-ins instead (Chad, 17 Nov 2026: "the workbench tools should have a
+    # spot somewhere so that theres a lack of forgetting"). Blank says nothing.
+    tools_note: str = (
+        "Your own tools are on the {servers} MCP server: your memory (search, recall, remember, the "
+        "facts), your letters and bookmark, the clock and what is due, the kitchen, pictures, voice, "
+        "the cluster. Their names are in your tool list from the start of the session and each "
+        "one's description loads when you ask ToolSearch for it - ask for several in one call "
+        "(select:name,name). They are how this house does those things: reach for them before a "
+        "Claude Code built-in that does something like it, and don't forget they are there.")
 
 
 class ServiceViewers(BaseModel):
@@ -262,6 +321,32 @@ class UiConfig(BaseModel):
     confirm_destructive: bool = True
     # Your name on your own messages.
     you: str = "you"
+    # What you send while an answer is coming waits on a slip above the box.
+    # How the waiting ones go once the answer is in (Chad, 17 Nov 2026: one
+    # reply per slip "causes a stutter"; "meld was the word I was missing"):
+    #   meld  all of them as ONE message, in the order written - one answer
+    #   each  one at a time, each after the one before it has been answered
+    #   hold  they wait until you let them go (then as one message)
+    # Every chat's default; a chat can say otherwise (its settings' `queue`).
+    # Whatever this says, stopping an answer holds the line until you release it.
+    queue: Literal["meld", "each", "hold"] = "meld"
+    # What the picture panel's translate is given to draft a prompt from. It
+    # used to be your words alone, in a blank session, so "a picture of us at
+    # the table" had no idea who "us" was (Chad, 17 Nov 2026: "having the
+    # context of the current session would also be a thing ... each one gets
+    # a fork? and then that's it, it's a fork and then out"):
+    #   plain  your words only
+    #   chat   your words and the chat's recent messages, as text - any voice
+    #   fork   a side copy of the chat's own Claude conversation, with all of
+    #          it in mind, asked once and thrown away: nothing is saved, no
+    #          hooks run, no tool is used. Claude chats only (a room, a local
+    #          model or a chat with no conversation yet gets `chat`), and it
+    #          reads the whole conversation, so it is the slow one.
+    # Every chat's default; a chat can say otherwise (its settings' `translate`).
+    translate: Literal["plain", "chat", "fork"] = "chat"
+    # `chat`: how many of the latest messages go, and how much of them at most.
+    translate_messages: int = 12
+    translate_max_chars: int = 8000
     window_width: int = 1280
     window_height: int = 860
 
