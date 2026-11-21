@@ -144,6 +144,16 @@ button.chip { font: inherit; font-size: 12.5px; cursor: zoom-in; }
 .chip.shot { color: var(--text-dim); }
 .chip.shot:hover { color: var(--text); border-color: var(--accent); }
 .chip small { color: var(--faint); }
+/* a file and its save button: beside a chip, on a picture's corner */
+.att { display: inline-flex; align-items: center; gap: 4px; position: relative; }
+.save { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px;
+        border-radius: 6px; color: var(--text-dim); text-decoration: none; vertical-align: middle; }
+.save .i { width: 15px; height: 15px; }
+.save:hover { color: var(--text); background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.att.pic .save { position: absolute; top: 6px; right: 6px; opacity: 0; transition: opacity .15s;
+                 background: color-mix(in srgb, var(--bg) 80%, transparent); border: 1px solid var(--border); }
+.att.pic:hover .save, .att.pic .save:focus { opacity: 1; }
+.md a + .save { margin-left: 2px; }
 
 .meta { display: flex; align-items: center; gap: 4px; margin-top: 6px; font: 11px var(--mono); color: var(--text-dim); }
 .meta .receipt { margin-right: 6px; }
@@ -183,9 +193,18 @@ body.gripping-row { user-select: none; cursor: row-resize; }
 /* what was sent while an answer was coming, waiting its turn */
 /* on the right, where your own messages sit: they are yours, on their way */
 .queue { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin: 0 16px 6px; }
+/* what is running behind the chat: on the left, where the voices that started it sit */
+.behind { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 16px 6px; }
+.behind .task { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 4px 3px 9px; border-radius: 8px;
+                font-size: 12.5px; border: 1px dashed var(--line, #3a3f55); color: var(--text-dim); }
+.behind .task b { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); }
+.behind .task span { max-width: 460px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.behind .task button { background: none; border: 0; padding: 0 5px; color: var(--text-dim); font-size: 14px; line-height: 1; }
+.behind .task button:hover { color: var(--danger); }
 .queue .slip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 4px 3px 9px; border-radius: 8px; font-size: 12.5px;
                border: 1px dashed var(--mine-line); background: color-mix(in srgb, var(--mine) 55%, transparent); }
 #pic-how { width: 100%; }
+#send-when { max-width: 190px; font-size: 12.5px; padding: 4px 6px; }
 /* how the line goes (as one message / one at a time / held), and the switch that holds it or lets it go */
 .queue .q-head { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-dim); }
 .queue .q-head b { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }

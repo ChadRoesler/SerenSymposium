@@ -41,6 +41,11 @@ ui:
   # is in: meld (all of it as one message), each (one at a time) or hold (it waits
   # for you). Every chat's default; a chat can say otherwise. Set from Settings too.
   queue: "meld"
+  # ...and WHEN it goes: round (when the answer, or a room's whole round, is in),
+  # seat (a room: when the seat speaking is done; the rest are not asked) or now
+  # (the answer is stopped and it goes). Every chat's default; a chat can say
+  # otherwise, and so can a single message, beside the send button.
+  interrupt: "round"
   # What the picture panel's translate drafts a prompt from: plain (your words),
   # chat (your words and the chat's recent messages) or fork (a throwaway copy of
   # the chat's own Claude conversation - it knows everything, and is the slow one).
@@ -110,6 +115,11 @@ claude:
   handover_max_chars: 100000  # how much of the chat a NEW claude conversation is handed
   # framing: "..."          # what each turn is told about the window ({files} = the chat's folder)
   # room_framing: "..."     # what each seat of a room is told ({seats} {me} {you})
+  # A command Claude starts in the background outlives the answer: the chat goes
+  # on, it can still be asked things, and it comes back to say when the task ends.
+  # false: the old way - the process, and anything it left running, ends with its answer.
+  background: true
+  background_max_seconds: 7200   # the longest a set-aside process is left running
   room_volleys: 6           # a room: turns seats may take by calling on each other (@name) per message; 0 = they can't
   mcp_servers: []           # only these MCP servers (names from ~/.claude.json) are loaded, e.g. ["wren-workbench"];
                             # empty = every server the CLI knows

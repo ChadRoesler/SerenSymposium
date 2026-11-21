@@ -222,6 +222,30 @@ class ClaudeConfig(BaseModel):
     # ones the person did not ask for - one message may set off before the
     # round stops and waits for them. 0: seats cannot call on each other.
     room_volleys: int = 6
+    # A task set aside. A command a turn starts in the background (the CLI's
+    # own Bash run_in_background) outlives the answer: the turn ends, the
+    # chat - or the round - goes on, the conversation can still be asked
+    # things, and when the task finishes it comes back on its own and says so.
+    # Chad, 19 Nov 2026, after seats froze a room waiting on firmware builds:
+    # "a task is kicked off, and set to the side, similar to what is done in
+    # the harness, it runs in the background, and then alerts when done.
+    # because a frozen seat not being able to answer a question would suck".
+    #
+    # How: the CLI is fed over stdin a message at a time (--input-format
+    # stream-json) and is NOT ended at its first answer while it lists a task
+    # in flight (claude_voice, "A process that outlives its answer").
+    # false: the old way - the prompt on stdin, the process ended with its
+    # answer, and anything it left running ended with it.
+    background: bool = True
+    # The longest a set-aside process is left running, from when it started.
+    background_max_seconds: float = 7200.0
+    # What every turn is told about it, after the framing ("" tells nothing).
+    background_note: str = (
+        "A command you would otherwise wait on (a build, a flash, a long test run, a download): start it in the "
+        "background (Bash with run_in_background) and END YOUR TURN, saying what you started. Do not sit and wait for "
+        "it, and do not poll it with sleep. It keeps running after your answer, the conversation is not held up "
+        "meanwhile and you can still be asked things; when it finishes you are woken to say how it went."
+    )
     # The page read to the model as its system prompt (PrefaceConfig).
     preface: PrefaceConfig = Field(default_factory=PrefaceConfig)
     # A tool that is not on the list is asked about IN THE WINDOW - Allow
@@ -330,6 +354,18 @@ class UiConfig(BaseModel):
     # Every chat's default; a chat can say otherwise (its settings' `queue`).
     # Whatever this says, stopping an answer holds the line until you release it.
     queue: Literal["meld", "each", "hold"] = "meld"
+    # WHEN what you send mid-answer goes. Stop cuts a seat off mid-word and
+    # waiting sits through the whole round; Chad, 18 Nov 2026, asked which it
+    # should be: "It depends ... main settings for default, per chat for chat,
+    # and then being able to override on the message sent":
+    #   round  when the answer is in - in a room, when the whole round is
+    #   seat   a room: the seat speaking finishes, the seats still waiting are
+    #          not asked, and your message starts a new round (elsewhere: round)
+    #   now    the answer is stopped where it is (what it said is kept) and
+    #          your message goes at once
+    # Every chat's default; a chat can say otherwise (its settings'
+    # `interrupt`), and a message can say otherwise as it is sent.
+    interrupt: Literal["round", "seat", "now"] = "round"
     # What the picture panel's translate is given to draft a prompt from. It
     # used to be your words alone, in a blank session, so "a picture of us at
     # the table" had no idea who "us" was (Chad, 17 Nov 2026: "having the

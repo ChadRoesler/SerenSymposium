@@ -65,8 +65,20 @@ LIST_LIMIT = 40
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 # What the CLI writes as a "user" message that the person never typed: a
-# slash command's bookkeeping and its local output.
-_NOT_SAID = ("<command-name>", "<command-message>", "<local-command-", "<bash-input>", "<bash-stdout>")
+# slash command's bookkeeping and its local output - and the harness's own
+# notices, a background task finishing and a subagent's report (18 Nov 2026,
+# the first tangle on 5.7.0: a picked-up chat had eight of them stored as the
+# person's, and a seat was handed them as "[Chad]" lines, one a block of
+# instruction-shaped text he never wrote).
+_NOT_SAID = ("<command-name>", "<command-message>", "<local-command-", "<bash-input>", "<bash-stdout>",
+             "<task-notification>", "<agent-message")
+
+
+def harness_notice(m: Any) -> bool:
+    """A stored message that is the harness's notice and not anyone's words:
+    one a pickup kept before it knew better. Not handed on as the person's."""
+    return (isinstance(m, dict) and m.get("role") == "user" and not m.get("source")
+            and str(m.get("content") or "").lstrip().startswith(_NOT_SAID[-2:]))
 MAX_TITLE = 120
 
 
@@ -137,7 +149,9 @@ def _queued_text(r: dict[str, Any]) -> str:
     if r.get("isSidechain") or not isinstance(a, dict) or a.get("type") != "queued_command":
         return ""
     text = a.get("prompt")
-    return _REMINDER.sub("", text).strip() if isinstance(text, str) else ""
+    text = _REMINDER.sub("", text).strip() if isinstance(text, str) else ""
+    # A task finishing mid-answer is queued the same way, and is nobody's words.
+    return "" if text.startswith(_NOT_SAID) else text
 
 
 def _assistant_text(r: dict[str, Any]) -> str:

@@ -113,6 +113,30 @@ def test_nothing_comes_back_as_a_page_that_could_drive_us(make_client):
     assert r.headers["content-type"] == "application/octet-stream" and r.headers["content-disposition"] == "attachment"
 
 
+def test_a_file_can_be_taken_away(make_client):
+    """?download=1 hands a file over to be saved, under the name it came with
+    and with the same sandbox; without it, a text file still opens to read
+    (20 Nov 2026: the txt Wren sent could be looked at and never kept)."""
+    tc = make_client(config())
+    sid = tc.post("/api/sessions", json={}).json()["id"]
+    note = upload(tc, sid, "for-chad.txt", b"I DO.\n").json()
+    r = tc.get(f"/api/sessions/{sid}/files/{note['name']}", params={"download": 1})
+    assert r.status_code == 200 and r.content == b"I DO.\n"
+    assert r.headers["content-disposition"] == 'attachment; filename="for-chad.txt"'
+    assert r.headers["content-security-policy"].startswith("sandbox;")
+    assert "content-disposition" not in tc.get(f"/api/sessions/{sid}/files/{note['name']}").headers
+    pic = upload(tc, sid, "My Meme!.png", PNG).json()
+    r = tc.get(f"/api/sessions/{sid}/files/{pic['name']}", params={"download": 1})
+    assert r.headers["content-type"] == "image/png"
+    assert r.headers["content-disposition"] == 'attachment; filename="My_Meme_.png"'
+
+
+def test_save_as_names_a_file_as_it_came():
+    assert attachments.save_as("1875e47d-for-chad.txt") == 'attachment; filename="for-chad.txt"'
+    assert attachments.save_as("not-stored.txt") == 'attachment; filename="not-stored.txt"'
+    assert attachments.save_as("") == 'attachment; filename="file"'
+
+
 def test_file_refusals(make_client):
     cfg = config()
     cfg.files.max_mb = 0.001
@@ -235,6 +259,35 @@ def test_with_fetching_off_an_image_stays_a_link(make_client, runs, monkeypatch)
     lines(tc.post("/api/chat/stream", json={"session": sid, "prompt": "cat"}))
     said = tc.get(f"/api/sessions/{sid}").json()["messages"][1]
     assert said["content"] == "![a cat](https://img.example/cat.png)" and "files" not in said
+
+
+def test_a_picture_a_turn_only_looked_at_is_not_kept_as_one_it_made(make_client):
+    """Opening a picture (Read) sends it back as image content, the same way
+    a drawn one arrives from make_image - and every screenshot a seat read
+    was kept again as a new picture on its answer. 18 Nov 2026, the first
+    tangle on 5.7.0: the Workbench seat hashed the chat's folder and found
+    Chad's screenshots twice, byte for byte."""
+    tc = make_client(config())
+    store = tc.app.state.sessions
+    sid = tc.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    shot = upload(tc, sid, "pasted-screenshot.png", PNG).json()
+    folder = store.files_dir(sid)
+    other = PNG + b"\x00"                                              # a picture the chat does not have
+    steps = [{"kind": "tool", "id": "t1", "tool": "Read", "summary": str(folder / shot["name"]), "result": "ok"},
+             {"kind": "tool", "id": "t2", "tool": "Read", "summary": "C:/somewhere/else/test-run.png", "result": "ok"},
+             {"kind": "tool", "id": "t3", "tool": "mcp__workbench__make_image", "summary": "{}", "result": "ok"}]
+    keep = lambda images: [f["orig"] for f in attachments.keep_tool_images(images, store, sid, 10_000_000, steps)]
+    before = store.listing(sid)
+    # read out of this chat's folder: not kept, even squeezed by the CLI on the way (other bytes)
+    assert keep([{"tool_use_id": "t1", "data": PNG}]) == []
+    assert keep([{"tool_use_id": "t1", "data": other}]) == []
+    # the same bytes by any other road (a tool handing the chat's own picture back): not kept
+    assert keep([{"tool_use_id": "t3", "data": PNG}]) == []
+    assert store.listing(sid) == before, "no second copy in the folder"
+    # read from somewhere else, or drawn: the chat had not seen it, so it is kept
+    (kept,) = keep([{"tool_use_id": "t2", "data": other}])
+    assert kept.startswith("picture-") and kept.endswith(".png")
+    assert len(keep([{"tool_use_id": "t3", "data": PNG + b"\x01"}])) == 1
 
 
 def test_a_file_claude_saved_into_the_chat_is_adopted(make_client, runs, monkeypatch):

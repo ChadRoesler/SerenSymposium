@@ -47,6 +47,25 @@ def a_chat(client):
 
 # ── The rule, alone ───────────────────────────────────────────────────────
 
+def test_a_picture_named_as_the_tool_named_it_is_found_under_the_extension_the_chat_kept():
+    """make_image tells Claude the file it saved (a .png) and sends back a
+    JPEG, which the chat keeps as .jpg. The name Claude was given is the one
+    it writes, so it has to find the chat's copy: 18 Nov 2026, three seats in
+    the first tangle on 5.7.0 drew a face and wrote that name, none was put
+    on, and each answer showed a broken picture."""
+    kept = [{"name": "9b9e8d22-124207-my-avatar-for-the-starwright-seat.jpg", "orig": "124207-my-avatar-for-the-starwright-seat.jpg"},
+            {"name": "aaaa1111-other.png", "orig": "other.png"}]
+    said = "![avatar](124207-my-avatar-for-the-starwright-seat.png)\n\n*drops in off the scaffolding*"
+    assert avatars.wanted(said, kept) == ("124207-my-avatar-for-the-starwright-seat.png", kept[0]["name"], False)
+    # a full path, as a tool may give it; and every chat's
+    said = "![avatar everywhere](/mnt/nvme/gallery/2026-11-18/124207-my-avatar-for-the-starwright-seat.png)"
+    assert avatars.wanted(said, kept)[1:] == (kept[0]["name"], True)
+    # the exact name still wins over a look-alike, and a stranger's name finds nothing
+    both = [{"name": "bbbb2222-other.jpg", "orig": "other.jpg"}, *kept]
+    assert avatars.wanted("![avatar](other.png)", both)[1] == "aaaa1111-other.png"
+    assert avatars.wanted("![avatar](nobody.png)", kept) is None
+
+
 def test_an_answer_names_its_avatar_by_caption():
     files = [{"name": "ab12-a-wren.png", "orig": "a-wren.png"}]
     assert avatars.wanted("look ![avatar](files/ab12-a-wren.png)", []) == ("files/ab12-a-wren.png", "ab12-a-wren.png", False)

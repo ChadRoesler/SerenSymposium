@@ -92,8 +92,14 @@ SETTINGS = {
     # every chat's (ui.translate): plain (your words), chat (and the recent
     # messages) or fork (a throwaway copy of the chat's Claude conversation)
     "translate": str,
+    # when what you send mid-answer goes, over every chat's (ui.interrupt):
+    # round (when the answer or the whole round is in), seat (when the seat
+    # speaking is done; the rest of the round is not asked) or now (the answer
+    # is stopped and it goes). A message can say otherwise as it is sent.
+    "interrupt": str,
 }
 QUEUE_MODES = ("meld", "each", "hold")
+INTERRUPT_MODES = ("round", "seat", "now")
 TRANSLATE_MODES = ("plain", "chat", "fork")
 ROLES = ("user", "assistant")
 VOICES = ("lodestar", "claude")
@@ -163,6 +169,8 @@ def clean_settings(raw: Any) -> dict[str, Any]:
                 raise Invalid(f"permission_mode is one of {', '.join(m for m in WINDOW_MODES if m)}")
         if key == "queue" and value not in QUEUE_MODES:
             raise Invalid(f"queue is one of {', '.join(QUEUE_MODES)}")
+        if key == "interrupt" and value not in INTERRUPT_MODES:
+            raise Invalid(f"interrupt is one of {', '.join(INTERRUPT_MODES)}")
         if key == "translate" and value not in TRANSLATE_MODES:
             raise Invalid(f"translate is one of {', '.join(TRANSLATE_MODES)}")
         if key == "voice" and value not in VOICES:
@@ -233,6 +241,10 @@ def summary(s: dict[str, Any]) -> dict[str, Any]:
 class SessionStore:
     def __init__(self, root: Path):
         self.root = Path(root)
+        # The files this Symposium put in each chat's folder itself (add_file),
+        # by stored name: so a file that turns up during a turn is only taken
+        # for the answer's when nothing here put it there (adopt).
+        self._put: dict[str, set[str]] = {}
 
     def _path(self, sid: str) -> Optional[Path]:
         # The id names a file, so it is checked before it is used as one.
@@ -259,6 +271,7 @@ class SessionStore:
         d.mkdir(parents=True, exist_ok=True)
         name = safe_name(orig)
         (d / name).write_bytes(data)
+        self._put.setdefault(sid, set()).add(name)
         return file_entry(name, orig, mime, len(data))
 
     def listing(self, sid: str) -> set[str]:
@@ -267,13 +280,20 @@ class SessionStore:
 
     def adopt(self, sid: str, before: set[str]) -> list[tuple[str, str]]:
         """Files that appeared in the session's folder since `before` (the
-        answer saved them there), renamed into stored names: [(old, new)]."""
+        answer saved them there), renamed into stored names: [(old, new)].
+
+        Not the ones Symposium put there itself meanwhile (add_file): what you
+        attach while an answer is coming is uploaded at once, to wait its turn
+        with your message, and "new in the folder" took it for the answer's.
+        18 Nov 2026, the first tangle on 5.7.0 - Chad: "an interruption with
+        an image gives it to the next answerer"."""
         d = self.files_dir(sid)
         if d is None or not d.is_dir():
             return []
+        ours = self._put.get(sid, ())
         out = []
         for p in sorted(d.iterdir()):
-            if p.name in before or not p.is_file():
+            if p.name in before or p.name in ours or not p.is_file():
                 continue
             new = p.name if _FILE.match(p.name) else safe_name(p.name)
             if new != p.name:
@@ -477,24 +497,56 @@ class SessionStore:
         if room.seat(s, name) is not None:
             raise Invalid(f"there is already a seat called {name}")
         seat: dict[str, Any] = {"name": name, "cwd": cwd, "hue": room.next_hue(seats)}
+        # Someone who sat here before, invited back by name, is herself again:
+        # the conversation she left with, what she had heard by then (so she
+        # is handed only what she missed), her folder and her colour.
+        back = next((g for g in s.get("left") or [] if g.get("name") == name), None)
+        if back is not None:
+            s["left"] = [g for g in s["left"] if g.get("name") != name]
+            if not s["left"]:
+                s.pop("left")
         if conversation:
             seat["claude"] = {"session": conversation, "seen": 0, **({"fork": True} if fork else {})}
+        elif back is not None:
+            seat["cwd"] = cwd or back.get("cwd") or ""
+            if isinstance(back.get("claude"), dict):
+                seat["claude"] = dict(back["claude"])
+            if isinstance(back.get("hue"), int) and back["hue"] not in {x.get("hue") for x in seats}:
+                seat["hue"] = back["hue"]
         seats.append(seat)
         s["updated"] = _now()
         self._write(s)
         return s
 
     def drop_seat(self, sid: str, name: str) -> Optional[dict[str, Any]]:
-        """The seat leaves; what it said stays in the chat, under its name."""
+        """The seat leaves; what it said stays in the chat, under its name,
+        with its files and its face.
+
+        And she is not forgotten. The chat's only record of WHICH conversation
+        a seat is was on the seat itself, so removing her threw that away: the
+        transcript still on disk, nothing pointing at it, and the same name
+        invited again was a stranger handed the whole chat (found 19 Nov 2026,
+        before Chad's "what happens if I remove a wren" test). Now who left is
+        kept (`left`: name, folder, colour, conversation, what she had heard),
+        and add_seat brings her back by name. The LAST seat to leave hands her
+        conversation to the chat itself - the mirror of the first invitation,
+        which made the chat's own Claude a seat - so a room that empties is a
+        plain chat with someone still in it."""
         s = self.get(sid)
         if s is None:
             return None
-        before = len(s.get("seats") or [])
-        s["seats"] = [x for x in s.get("seats") or [] if x.get("name") != name]
-        if len(s["seats"]) == before:
+        gone = next((x for x in s.get("seats") or [] if x.get("name") == name), None)
+        if gone is None:
             raise Invalid(f"no seat called {name}")
+        s["seats"] = [x for x in s["seats"] if x.get("name") != name]
+        s["left"] = [g for g in s.get("left") or [] if g.get("name") != name][-15:] + [
+            {k: gone[k] for k in ("name", "cwd", "hue", "claude") if k in gone}]
         if not s["seats"]:
             s.pop("seats")
+            if isinstance(gone.get("claude"), dict) and gone["claude"].get("session") and not s.get("claude"):
+                s["claude"] = dict(gone["claude"])
+                if gone.get("cwd") and not s["settings"].get("cwd"):
+                    s["settings"]["cwd"] = gone["cwd"]
         s["updated"] = _now()
         self._write(s)
         return s
@@ -592,6 +644,41 @@ class SessionStore:
                               "seen": len(s["messages"]) - (1 if stopped and answer is not None else 0)}
         if claude_init:
             seat["claude_init"] = {**claude_init, "at": now}
+        s["updated"] = now
+        self._write(s)
+        return s
+
+    def record_woken(self, sid: str, seat: Optional[str], answer: str, meta: dict[str, Any], claude_session: str,
+                     answer_files: Optional[list[dict[str, Any]]] = None,
+                     final: Optional[str] = None) -> Optional[dict[str, Any]]:
+        """What a conversation said when it came back ON ITS OWN - a task it
+        had left running ended (claude_voice, "A process that outlives its
+        answer"). Nobody asked, so there is no message of the person's with
+        it: only the answer, under the seat's name (or the chat's one voice).
+
+        It has seen its own words. Whether it has seen the rest: only if it
+        had heard everything in the chat up to now, in which case it still
+        has; otherwise what it missed is still handed to it next time, its
+        own late answer among it."""
+        s = self.get(sid)
+        if s is None:
+            return None
+        from . import room
+        now = _now()
+        holder = room.seat(s, seat) if seat else s
+        known = holder.get("claude") if isinstance(holder, dict) else None
+        caught_up = (isinstance(known, dict) and known.get("session") == claude_session
+                     and known.get("seen") == len(s["messages"]))
+        said: dict[str, Any] = {"role": "assistant", "content": answer, "at": now, "meta": meta or {}}
+        if seat:
+            said["seat"] = seat
+        if answer_files:
+            said["files"] = answer_files
+        if final and final != answer:
+            said["final"] = final
+        s["messages"].append(said)
+        if caught_up:
+            known["seen"] = len(s["messages"])
         s["updated"] = now
         self._write(s)
         return s

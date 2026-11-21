@@ -147,6 +147,9 @@ def open_window(cfg, url: str) -> None:
     own_taskbar_button()
     # text_select: pywebview turns selection off unless asked, and a chat you
     # cannot copy a line out of is not much of a chat.
+    # Downloads: pywebview cancels every one unless asked, so a file's save
+    # button did nothing at all. Allowed, Edge asks where with a Save dialog.
+    webview.settings["ALLOW_DOWNLOADS"] = True
     webview.create_window("Seren Symposium", url, text_select=True,
                           width=cfg.ui.window_width, height=cfg.ui.window_height)
     # pywebview starts private by default, which empties localStorage every

@@ -20,6 +20,33 @@ SEATS = [{"name": "lodestar"}, {"name": "kitchen"}, {"name": "soma"}]
 
 # ── The rules, alone ──────────────────────────────────────────────────────
 
+def test_an_at_name_quoted_as_code_calls_nobody():
+    """20 Nov 2026: workbench reported the @ test as `@starwright hi` and
+    starwright was called back into a round that was over. A name in code -
+    inline or fenced - is quoted, not said."""
+    names = ["symposium", "workbench", "starwright"]
+    assert room.mentioned(names, "That's `@starwright hi` working as the table says.") == ([], False)
+    assert room.mentioned(names, "| `@starwright! @workbench` | starwright, workbench only |") == ([], False)
+    assert room.mentioned(names, "Try this:\n```\n@workbench! run it\n```\nthen tell me.") == ([], False)
+    assert room.mentioned(names, "```\n@workbench never closed") == ([], False)
+    # the holes starwright found in the first try: a double-backtick span (a backtick inside code),
+    # a ~~~ fence, a four-backtick fence around three, and a fence closed by a longer one
+    assert room.mentioned(names, "I quoted it as `` `@starwright hi` `` above") == ([], False)
+    assert room.mentioned(names, "~~~\n@starwright hi\n~~~\nthat was the test") == ([], False)
+    assert room.mentioned(names, "````\n```\n@workbench! x\n```\n@starwright still code\n````\nend") == ([], False)
+    assert room.mentioned(names, "```\n@starwright\n`````\n@workbench outside") == (["workbench"], False)
+    # an @ in a link's path or an email address is not a call (workbench's table, 20 Nov 2026)
+    assert room.mentioned(names, "see https://x.com/@starwright/status and chad@workbench.local") == ([], False)
+    assert room.mentioned(names, "(@starwright) and **@workbench**") == (["starwright", "workbench"], False)
+    # a lone backtick is only a backtick: it does not swallow what follows
+    assert room.mentioned(names, "it's a ` stray, @workbench") == (["workbench"], False)
+    # inline backticks after a fence-looking start are a span, not a fence
+    assert room.mentioned(names, "```@starwright``` but @workbench") == (["workbench"], False)
+    # said outright, beside a quote, it still calls
+    assert room.mentioned(names, "`@starwright` was quoted; @workbench, over to you") == (["workbench"], False)
+    assert room.who_answers([{"name": n} for n in names], "see `@starwright!` - @workbench! only") == ["workbench"]
+
+
 def test_everyone_answers_unless_someone_is_named():
     assert room.who_answers(SEATS, "what do we think?") == ["lodestar", "kitchen", "soma"]
     # @name goes first, in the order named; the rest follow in seat order
@@ -274,6 +301,42 @@ def test_seats_come_and_go_and_what_they_said_stays(client, repos, runs):
     assert "seats" not in s                                            # a plain chat again
 
 
+def test_a_seat_that_leaves_comes_back_as_herself_and_the_last_one_out_stays_with_the_chat(client, repos, runs):
+    """Removing a seat used to throw away the chat's only note of which
+    conversation she was: her words stayed, she did not, and the same name
+    invited again was a stranger handed the whole chat. Now she is kept as
+    having left, and comes back by name with her conversation and what she
+    had already heard. Found 19 Nov 2026, before Chad's "what happens if I
+    remove a wren" test; Margin's "send a seat home ... called back by name"."""
+    sid = a_room(client, repos, "lodestar", "kitchen")
+    stream(client, {"session": sid, "prompt": "hi"})
+    before = {x["name"]: x for x in client.get(f"/api/sessions/{sid}").json()["seats"]}
+    hers = before["kitchen"]["claude"]["session"]
+
+    s = client.delete(f"/api/sessions/{sid}/seats/kitchen").json()
+    assert [x["name"] for x in s["seats"]] == ["lodestar"]
+    assert [m.get("seat") for m in s["messages"]] == [None, "lodestar", "kitchen"], "what she said stays"
+    assert s["left"] == [{k: before["kitchen"][k] for k in ("name", "cwd", "hue", "claude")}]
+
+    stream(client, {"session": sid, "prompt": "while she was out"})            # a round she misses
+    s = client.post(f"/api/sessions/{sid}/seats", json={"name": "kitchen"}).json()
+    kit = next(x for x in s["seats"] if x["name"] == "kitchen")
+    assert kit["claude"]["session"] == hers and kit["cwd"] == before["kitchen"]["cwd"] and kit["hue"] == before["kitchen"]["hue"]
+    assert "left" not in s
+    stream(client, {"session": sid, "prompt": "welcome back"})
+    back = runs()[-1]
+    assert flag(back["argv"], "--resume") == hers, "her own conversation, resumed"
+    assert "[Chad] while she was out" in back["prompt"] and "[Chad] hi" not in back["prompt"], "only what she missed"
+
+    # the last one out: her conversation stays with the chat, which is a plain chat again
+    client.delete(f"/api/sessions/{sid}/seats/kitchen")
+    s = client.delete(f"/api/sessions/{sid}/seats/lodestar").json()
+    assert "seats" not in s and s["claude"]["session"] == before["lodestar"]["claude"]["session"]
+    assert s["settings"]["cwd"] == before["lodestar"]["cwd"]
+    stream(client, {"session": sid, "prompt": "just us now"})
+    assert flag(runs()[-1]["argv"], "--resume") == before["lodestar"]["claude"]["session"]
+
+
 def test_the_table_can_be_reseated(client, repos, runs):
     sid = a_room(client, repos, "lodestar", "kitchen")
     s = client.patch(f"/api/sessions/{sid}/seats", json={"order": ["kitchen", "lodestar"]}).json()
@@ -442,3 +505,72 @@ def test_what_a_room_cant_do_yet_it_says(client, repos, runs):
     assert r.status_code == 409 and "retry" in r.json()["error"]
     r = client.post("/api/chat", json={"session": sid, "prompt": "two"})
     assert r.status_code == 400 and "streams" in r.json()["error"]
+
+
+def test_a_round_can_be_asked_to_end_with_the_seat_speaking(client, repos, runs, monkeypatch, tmp_path):
+    """Between stop (a seat cut off mid-word) and waiting out the whole round:
+    {after: seat} lets the seat speaking finish and asks nobody after it, so
+    what the person has to say next starts a new round. Chad, 18 Nov 2026,
+    on which of the three it should be: "It depends ... main settings for
+    default, per chat for chat, and then being able to override on the
+    message sent". Nobody is stopped, so nothing is marked stopped."""
+    import threading
+    import time
+    gate = tmp_path / "let-it-finish"
+    monkeypatch.setenv("FAKE_CLAUDE_WAIT", str(gate))
+    sid = a_room(client, repos, "lodestar", "kitchen", "symposium")
+    got = {}
+    asker = threading.Thread(target=lambda: got.update(r=client.post("/api/chat/stream",
+                                                                    json={"session": sid, "prompt": "go round"})))
+    asker.start()
+    live, end = client.app.state.live, time.time() + 10
+    while time.time() < end and not (sid in live and any(e["type"] == "thinking" for e in live[sid].events)):
+        time.sleep(0.05)
+    assert client.post(f"/api/sessions/{sid}/stop", json={"after": "seat"}).json() == {"ok": True, "after": "seat"}
+    gate.write_text("go")
+    asker.join(15)
+    assert not asker.is_alive()
+
+    events = [json.loads(l) for l in got["r"].text.splitlines() if l.strip()]
+    assert seats_of(events) == [("lodestar", None)], "the two still due were never asked"
+    assert events[-1] == {"type": "round", "seats": ["lodestar"], "volleys": 0, "cut": True,
+                          "not_asked": ["kitchen", "symposium"]}
+    assert not any(e["type"] == "stopped" for e in events), "nobody was cut off"
+    s = client.get(f"/api/sessions/{sid}").json()
+    assert [(m["role"], m.get("seat"), m["content"]) for m in s["messages"]] == [
+        ("user", None, "go round"), ("assistant", "lodestar", "lodestar here, from SerenLodestar")]
+    assert "stopped" not in s["messages"][1]["meta"] and s["answering"] is False
+
+    # the next round is a round like any other: the ones not asked hear what they missed
+    stream(client, {"session": sid, "prompt": "and now this"})
+    k2 = runs()[-2]
+    assert "[Chad] go round" in k2["prompt"] and "[lodestar] lodestar here, from SerenLodestar" in k2["prompt"] and "[Chad] and now this" in k2["prompt"]
+
+
+def test_a_chat_with_one_voice_has_no_round_to_cut_and_the_setting_is_checked(client, tmp_path, monkeypatch):
+    import threading
+    import time
+    gate = tmp_path / "let-it-finish"
+    monkeypatch.setenv("FAKE_CLAUDE_WAIT", str(gate))
+    tc = client
+    sid = tc.post("/api/sessions", json={"settings": {"voice": "claude"}}).json()["id"]
+    got = {}
+    asker = threading.Thread(target=lambda: got.update(r=tc.post("/api/chat/stream", json={"session": sid, "prompt": "think"})))
+    asker.start()
+    end = time.time() + 10
+    while time.time() < end and sid not in tc.app.state.live:
+        time.sleep(0.05)
+    assert tc.post(f"/api/sessions/{sid}/stop", json={"after": "seat"}).json() == {"ok": True, "after": "answer"}
+    gate.write_text("go")
+    asker.join(15)
+    said = tc.get(f"/api/sessions/{sid}").json()["messages"][1]
+    assert said["content"] == "Hello there" and "stopped" not in said["meta"], "the answer simply finished"
+
+    # the setting: every chat's (kept in the prefs), and a chat's own over it
+    assert tc.get("/api/config").json()["interrupt"] == "round"
+    assert tc.patch("/api/prefs", json={"interrupt": "seat"}).status_code == 200
+    assert tc.get("/api/config").json()["interrupt"] == "seat"
+    assert tc.patch("/api/prefs", json={"interrupt": "soon"}).status_code == 400
+    assert tc.patch(f"/api/sessions/{sid}", json={"settings": {"interrupt": "now"}}).json()["settings"]["interrupt"] == "now"
+    assert tc.patch(f"/api/sessions/{sid}", json={"settings": {"interrupt": "soon"}}).status_code == 400
+    assert "interrupt" not in tc.patch(f"/api/sessions/{sid}", json={"settings": {"interrupt": None}}).json()["settings"]

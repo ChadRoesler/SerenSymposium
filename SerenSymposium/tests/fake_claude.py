@@ -9,6 +9,15 @@ FAKE_CLAUDE_LOG, when set, gets one JSON line per run: {argv, prompt, cwd, env}
 whose id `init` gives (the resumed one is left as it was).
 FAKE_CLAUDE_REPLY, when set, is the answer instead of "Hello there".
 FAKE_CLAUDE_NO_TOOLS=1: answer without the two tool calls every other run makes.
+--input-format stream-json: as the real one, the prompt is ONE line of JSON on a
+stdin that stays open ({"type": "user", "message": {"content": ...}}).
+FAKE_CLAUDE_BACKGROUND=seconds: the answer leaves a task running behind it (a
+`background_tasks_changed` naming it, before the answer). The process then stays:
+a further message on stdin is answered "meanwhile: <it>"; after `seconds` the
+task ends (`task_notification`, `background_tasks_changed` with none) and a turn
+nobody asked for says "The build finished: exit 0." - and then it exits.
+FAKE_CLAUDE_BACKGROUND_GATE=path: the task ends when that file exists (or after
+the seconds, whichever is first), so a test decides when.
 FAKE_CLAUDE_SEATS='{"name": "words"}': the answer of that seat of a room (cued
 "Your turn, name."); {cwd} in the words is the folder it ran in.
 FAKE_CLAUDE_SAVE=name: the answer first writes a small PNG of that name into
@@ -69,7 +78,11 @@ def ask_permission(args, ask):
 
 def main():
     args = sys.argv[1:]
-    prompt = sys.stdin.read()
+    streaming = "--input-format" in args and args[args.index("--input-format") + 1] == "stream-json"
+    if streaming:
+        prompt = json.loads(sys.stdin.readline() or "{}").get("message", {}).get("content", "")
+    else:
+        prompt = sys.stdin.read()
     if log := os.environ.get("FAKE_CLAUDE_LOG"):
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps({"argv": args, "prompt": prompt, "cwd": os.getcwd(),
@@ -150,11 +163,49 @@ def main():
             reply = said.replace("{cwd}", os.path.basename(os.getcwd()))
     if (want := os.environ.get("FAKE_CLAUDE_ASK")) and "--permission-prompt-tool" in args:
         reply = f"asked: {ask_permission(args, json.loads(want))['behavior']}"
-    for word in (reply[:5], reply[5:]):
-        event({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": word}})
-    out({"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}})
-    out({"type": "result", "subtype": "success", "is_error": False, "result": reply,
-         "num_turns": 3, "session_id": sid})
+    behind = os.environ.get("FAKE_CLAUDE_BACKGROUND") if streaming else None
+    task = {"task_id": "bg1", "run_id": "r1", "task_type": "local_bash", "description": "Build the firmware"}
+    if behind:
+        out({"type": "system", "subtype": "background_tasks_changed", "tasks": [task]})
+        out({"type": "system", "subtype": "task_started", **task, "is_backgrounded": True})
+
+    def answer(words):
+        for word in (words[:5], words[5:]):
+            event({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": word}})
+        out({"type": "assistant", "message": {"content": [{"type": "text", "text": words}]}})
+        out({"type": "result", "subtype": "success", "is_error": False, "result": words,
+             "num_turns": 3, "session_id": sid})
+
+    answer(reply)
+    if not behind:
+        return
+    # Set aside with its task: asked things meanwhile, and back on its own when the task ends.
+    import queue
+    import threading
+    asked = queue.Queue()
+
+    def listen():
+        for line in sys.stdin:
+            if line.strip():
+                asked.put(json.loads(line).get("message", {}).get("content", ""))
+    threading.Thread(target=listen, daemon=True).start()
+    gate, end = os.environ.get("FAKE_CLAUDE_BACKGROUND_GATE"), time.time() + float(behind)
+    while time.time() < end and not (gate and os.path.exists(gate)):
+        try:
+            more = asked.get(timeout=0.05)
+        except queue.Empty:
+            continue
+        if log := os.environ.get("FAKE_CLAUDE_LOG"):
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"argv": args, "prompt": more, "cwd": os.getcwd(), "meanwhile": True}) + "\n")
+        out({"type": "system", "subtype": "init", "session_id": sid, "model": "fake-model"})
+        answer(f"meanwhile: {more.strip().splitlines()[-1] if more.strip() else ''}")
+    out({"type": "system", "subtype": "task_updated", "task_id": "bg1", "patch": {"status": "completed"}})
+    out({"type": "system", "subtype": "task_notification", "task_id": "bg1", "status": "completed",
+         "summary": 'Background command "Build the firmware" completed (exit code 0)'})
+    out({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
+    out({"type": "system", "subtype": "init", "session_id": sid, "model": "fake-model"})
+    answer("The build finished: exit 0.")
 
 
 if __name__ == "__main__":

@@ -279,7 +279,7 @@ def test_the_shell_follows_a_live_turn_and_only_locks_that_chat():
     assert "function followLive(sid)" in script and "/live`" in script
     assert "function stopFollowing()" in script and "AbortController" in script
     assert "ANSWERING.has(current.id)" in script, "locked per chat, not one switch for the window"
-    assert "if (current.answering) followLive(id);" in script
+    assert "if (current.answering && !SENDING.has(id) && FOLLOWER?.sid !== id) followLive(id);" in script
     assert "let busy" not in script and "busy = true" not in script, "the one global lock is gone"
 
 
@@ -313,3 +313,156 @@ def test_a_chat_opened_mid_answer_says_what_it_is_answering(make_client, tmp_pat
     gate.write_text("go")
     asker.join(15)
     assert len(tc.get(f"/api/sessions/{sid}").json()["messages"]) == 2, "the retry replaced the answer"
+
+
+def test_what_you_attach_while_an_answer_is_coming_is_yours_not_the_answers(make_client, tmp_path, monkeypatch):
+    """A message sent mid-answer waits its turn, and its files are uploaded at
+    once so the slip holds what the chat already has. The answer under way
+    takes the files that turned up in the chat's folder during its turn for
+    ones it saved - and took yours. 18 Nov 2026, the first tangle on 5.7.0:
+    two screenshots Chad pasted mid-round were kept on the seat's answer -
+    "an interruption with an image gives it to the next answerer"."""
+    import base64
+    from fake_claude import PNG
+    gate = tmp_path / "let-it-finish"
+    monkeypatch.setenv("FAKE_CLAUDE_WAIT", str(gate))
+    monkeypatch.setenv("FAKE_CLAUDE_SAVE", "drawn.png")            # and the answer saves one of its own
+    tc = make_client(config())
+    sid = tc.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    asker = _InThread(lambda: tc.post("/api/chat/stream", json={"session": sid, "prompt": "think about it"}))
+    asker.start()
+    assert _until(lambda: tc.get(f"/api/sessions/{sid}").json()["answering"])
+    time.sleep(0.3)                                                  # the turn has taken its look at the folder
+    r = tc.post(f"/api/sessions/{sid}/files", json={"name": "my-screenshot.png", "data": base64.b64encode(PNG).decode()})
+    assert r.status_code == 201
+    mine = r.json()
+    gate.write_text("go")
+    asker.join(15)
+    assert not asker.is_alive()
+
+    asked, said = tc.get(f"/api/sessions/{sid}").json()["messages"]
+    assert [f["orig"] for f in said["files"]] == ["drawn.png"], "its own picture, and not yours"
+    # yours is still there, and goes with the message it was waiting on
+    lines = _events(tc.post("/api/chat/stream", json={"session": sid, "prompt": "look at this", "files": [mine]}).text)
+    assert lines[-1]["type"] == "saved"
+    later = tc.get(f"/api/sessions/{sid}").json()["messages"][2]
+    assert later["content"] == "look at this" and [f["name"] for f in later["files"]] == [mine["name"]]
+
+
+# ── A task set aside: the answer comes, the task goes on, and it comes back to say so ──
+
+def _said(tc, sid):
+    return [(m["role"], m.get("seat"), m["content"]) for m in tc.get(f"/api/sessions/{sid}").json()["messages"]]
+
+
+def test_a_task_left_running_outlives_the_answer_and_comes_back_to_say_so(make_client, tmp_path, monkeypatch):
+    """Chad, 19 Nov 2026, after seats froze a room waiting on firmware builds:
+    "a task is kicked off, and set to the side, similar to what is done in the
+    harness, it runs in the background, and then alerts when done. because a
+    frozen seat not being able to answer a question would suck". The answer
+    is kept and the chat is free; the process is set aside with its task; the
+    next message goes to THAT process, not to a second one beside it; and
+    when the task ends, what it says is kept as its own, marked as such."""
+    from seren_symposium import claude_voice
+    gate, log = tmp_path / "the-build-is-done", tmp_path / "runs.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_BACKGROUND", "30")
+    monkeypatch.setenv("FAKE_CLAUDE_BACKGROUND_GATE", str(gate))
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    tc = make_client(config())
+    sid = tc.post("/api/sessions", json={"folder": "den"}).json()["id"]
+
+    events = _events(tc.post("/api/chat/stream", json={"session": sid, "prompt": "build the firmware"}).text)
+    assert {"type": "background", "tasks": ["Build the firmware"]} in events and events[-1]["type"] == "saved"
+    s = tc.get(f"/api/sessions/{sid}").json()
+    assert s["answering"] is False, "the chat is not held by what is running behind it"
+    conversation = s["claude"]["session"]
+    assert [(b["seat"], b["conversation"], b["tasks"]) for b in s["background"]] == [(None, conversation, ["Build the firmware"])]
+    assert _said(tc, sid) == [("user", None, "build the firmware"), ("assistant", None, "Hello there")]
+
+    # asked something while it runs: the same process answers, with the task still going
+    events = _events(tc.post("/api/chat/stream", json={"session": sid, "prompt": "how long will it take?"}).text)
+    assert events[-1]["type"] == "saved"
+    assert _said(tc, sid)[-1] == ("assistant", None, "meanwhile: how long will it take?")
+    runs = [json.loads(l) for l in log.read_text(encoding="utf-8").splitlines()]
+    assert len(runs) == 2 and runs[1].get("meanwhile") is True, "one process, handed the second message"
+    assert "--input-format" in runs[0]["argv"] and runs[0]["prompt"] == "build the firmware"
+    assert tc.get(f"/api/sessions/{sid}").json()["background"], "still set aside, still running"
+
+    # the task ends: it comes back on its own
+    gate.write_text("go")
+    assert _until(lambda: len(_said(tc, sid)) == 5), "what it said when the build ended is in the chat"
+    s = tc.get(f"/api/sessions/{sid}").json()
+    woke = s["messages"][-1]
+    assert (woke["role"], woke["content"]) == ("assistant", "The build finished: exit 0.")
+    assert woke["meta"]["woke"] == ['Background command "Build the firmware" completed (exit code 0)']
+    assert s["claude"] == {"session": conversation, "seen": 5}, "it has seen its own words, and all before them"
+    assert _until(lambda: not tc.get(f"/api/sessions/{sid}").json()["background"]), "nothing left running"
+    assert _until(lambda: conversation not in claude_voice.PARKED)
+
+
+def test_a_seat_with_a_task_running_does_not_hold_the_round(make_client, tmp_path, monkeypatch):
+    """The room: the seat who started the build has answered, so the next
+    seat is asked; neither waits on the build. When it ends, each says so
+    under her own name - and has NOT thereby heard what the other said
+    meanwhile, which she is still handed next round."""
+    gate, log = tmp_path / "the-build-is-done", tmp_path / "runs.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_BACKGROUND", "30")
+    monkeypatch.setenv("FAKE_CLAUDE_BACKGROUND_GATE", str(gate))
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    cfg = config()
+    cfg.ui.you = "Chad"
+    tc = make_client(cfg)
+    sid = tc.post("/api/sessions", json={"settings": {"voice": "claude"}}).json()["id"]
+    for name in ("soma", "psycheion"):
+        assert tc.post(f"/api/sessions/{sid}/seats", json={"name": name, "cwd": str(tmp_path)}).status_code == 201
+    started = time.time()
+    events = _events(tc.post("/api/chat/stream", json={"session": sid, "prompt": "flash the board"}).text)
+    assert time.time() - started < 15, "the round did not wait thirty seconds for anyone's build"
+    assert [e["seat"] for e in events if e["type"] == "seat"] == ["soma", "psycheion"]
+    assert _said(tc, sid) == [("user", None, "flash the board"), ("assistant", "soma", "Hello there"),
+                              ("assistant", "psycheion", "Hello there")]
+    s = tc.get(f"/api/sessions/{sid}").json()
+    assert sorted(b["seat"] for b in s["background"]) == ["psycheion", "soma"] and s["answering"] is False
+
+    gate.write_text("go")
+    assert _until(lambda: len(_said(tc, sid)) == 5)
+    late = tc.get(f"/api/sessions/{sid}").json()
+    assert sorted((m["seat"], m["content"]) for m in late["messages"][3:]) == [
+        ("psycheion", "The build finished: exit 0."), ("soma", "The build finished: exit 0.")]
+    assert all(m["meta"]["woke"] for m in late["messages"][3:])
+    soma = next(x for x in late["seats"] if x["name"] == "soma")
+    assert soma["claude"]["seen"] == 2, "she spoke before psycheion did: what was said since is still hers to hear"
+
+
+def test_what_is_running_behind_a_chat_can_be_stopped_and_some_turns_never_leave_anything(make_client, tmp_path, monkeypatch):
+    from seren_symposium import claude_voice
+    monkeypatch.setenv("FAKE_CLAUDE_BACKGROUND", "30")
+    tc = make_client(config())
+    sid = tc.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    _events(tc.post("/api/chat/stream", json={"session": sid, "prompt": "build the firmware"}).text)
+    conversation = tc.get(f"/api/sessions/{sid}").json()["claude"]["session"]
+    held = claude_voice.PARKED[conversation]
+    r = tc.post(f"/api/sessions/{sid}/background/stop", json={}).json()
+    assert r == {"ok": True, "stopped": [None], "background": []}
+    assert _until(lambda: not held.alive()), "the process, and its task with it, is ended"
+    time.sleep(0.4)
+    assert len(_said(tc, sid)) == 2, "and nobody is woken to report a task that was stopped"
+    assert tc.post("/api/sessions/nope/background/stop", json={}).status_code == 404
+
+    # a one-shot (the picture panel's translate) is one answer and nothing after it
+    before = set(claude_voice.PARKED)
+    out = asyncio.run(claude_voice.one_shot(config().claude, prompt="a bird"))
+    assert out["ok"] and set(claude_voice.PARKED) == before
+
+    # and with claude.background off it is the old way: the prompt, then the end of the process
+    log = tmp_path / "runs.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    cfg = config()
+    cfg.claude.background = False
+    cfg.sessions.dir = str(tmp_path / "old-way")
+    tc2 = make_client(cfg)
+    sid2 = tc2.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    _events(tc2.post("/api/chat/stream", json={"session": sid2, "prompt": "build the firmware"}).text)
+    run = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert "--input-format" not in run["argv"] and run["prompt"] == "build the firmware"
+    assert tc2.get(f"/api/sessions/{sid2}").json()["background"] == []

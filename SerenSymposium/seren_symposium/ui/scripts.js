@@ -17,7 +17,7 @@ async function call(method, path, body) {
   return j;
 }
 
-const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty", "cwd", "queue"];
+const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty", "cwd", "queue", "interrupt"];
 const NUMBER = new Set(["temperature", "max_tokens", "repeat_penalty"]);
 // A chat's settings sit on top of its project's; the project calls one of
 // them by a shorter name.
@@ -48,11 +48,83 @@ let ANSWERING = new Set();
 let FOLLOWER = null;
 // The question drawn for a turn found running when its chat was opened.
 let ASKED_EL = null;
+
+// ── What a chat has running behind it ───────────────────────────────────
+// A command a turn started in the background outlives the answer (the
+// server's claude.background): the chat is free, the conversation can still
+// be asked things, and when the task ends it says so in a turn of its own.
+// Chad, 19 Nov 2026: "a task is kicked off, and set to the side ... it runs
+// in the background, and then alerts when done. because a frozen seat not
+// being able to answer a question would suck". Here: a line of what is
+// running and whose it is, with × to end one; and while anything is, the
+// chat is looked at again every few seconds, so what it says when it ends
+// turns up without being asked for.
+let BEHIND_TIMER = null;
+function drawBehind() {
+  const running = current?.background || [];
+  $("#behind").hidden = !running.length;
+  $("#behind").innerHTML = running.map(b => {
+    const who = b.seat ? seatWho(b.seat) : voiceName("claude");
+    const what = (b.tasks || []).join(" · ") || "a task";
+    return `<span class="task" title="${esc(who)} left this running; the chat is not held by it, and ${esc(who)} says so when it ends">`
+      + `<b>running</b><span>${esc(who)}: ${esc(what)}</span>`
+      + `<button type="button" data-bstop="${esc(b.seat || "")}" title="end it now - nobody is woken">×</button></span>`;
+  }).join("");
+  if (running.length && !BEHIND_TIMER) BEHIND_TIMER = setInterval(lookBehind, 4000);
+  if (!running.length && BEHIND_TIMER) { clearInterval(BEHIND_TIMER); BEHIND_TIMER = null; }
+}
+async function lookBehind() {
+  if (!current || chatBusy() || FOLLOWER || OPENING) return;       // an answer coming redraws the chat itself
+  const sid = current.id;
+  let s;
+  try { s = await call("GET", `/api/sessions/${encodeURIComponent(sid)}`); } catch { return; }
+  if (current?.id !== sid || chatBusy() || FOLLOWER || OPENING) return;
+  const was = JSON.stringify(current.background || []), now = JSON.stringify(s.background || []);
+  if (s.messages.length !== current.messages.length || s.answering) return openSession(sid);   // it came back, or someone is answering
+  if (was !== now) { current.background = s.background; drawBehind(); }
+}
+$("#behind").onclick = async e => {
+  const x = e.target.closest("[data-bstop]");
+  if (!x || !current) return;
+  x.disabled = true;
+  try {
+    const r = await call("POST", `/api/sessions/${encodeURIComponent(current.id)}/background/stop`, { seat: x.dataset.bstop || null });
+    current.background = r.background;
+  } catch (ex) { alert(ex.message); }
+  drawBehind();
+};
+// One follower per answer. 18 Nov 2026, the first tangle on 5.7.0: a message
+// sent while a round was running waited its turn, and went the instant the
+// round ended - while the window was still reopening the chat for that round.
+// The reopen came back, found an answer coming (the one just sent) and
+// followed it too: two live bubbles for one turn, both ticking. So: nothing
+// waiting is sent while a chat is being reopened (OPENING), and a chat this
+// window is itself sending into, or already following, is never followed
+// a second time (SENDING, FOLLOWER).
+let OPENING = 0;
+const SENDING = new Set();
 const PLACEHOLDER = $("#input").placeholder;
 const chatBusy = () => drawing || (current != null && ANSWERING.has(current.id));
 // How what is sent mid-answer goes once the answer is in: this chat's own
 // setting, else every chat's (Settings, "sent mid-answer"), else meld.
 const QUEUE_NAMES = { meld: "together, as one message", each: "one at a time, an answer each", hold: "held until I let them go" };
+// WHEN what is sent mid-answer goes (Chad, 18 Nov 2026: "It depends ... main
+// settings for default, per chat for chat, and then being able to override on
+// the message sent"): this chat's own setting, else every chat's, else the
+// round - and WHEN_ONCE, the choice made beside the send button for the one
+// message being written. A chat with one voice has no seats to wait on.
+const INTERRUPT_NAMES = { round: "when the answer, or the whole round, is in", seat: "when the seat speaking is done",
+                          now: "at once: the answer is stopped" };
+const interruptLabels = () => current?.seats?.length
+  ? { round: "after the round", seat: "after this seat", now: "stop and send now" }
+  : { round: "after this answer", now: "stop and send now" };
+let WHEN_ONCE = null;
+const interruptMode = () => {
+  const own = current ? current.settings?.interrupt : DRAFT.settings.interrupt;
+  const usual = INTERRUPT_NAMES[own] ? own : INTERRUPT_NAMES[CFG?.interrupt] ? CFG.interrupt : "round";
+  const when = WHEN_ONCE || usual;
+  return interruptLabels()[when] ? when : "round";
+};
 // What the picture panel's translate drafts a prompt from: this chat's own
 // setting, else every chat's (Settings, "picture prompts from"), else the chat.
 const TRANSLATE_NAMES = { plain: "my words only", chat: "my words and this chat", fork: "the whole conversation (a side copy, slower)" };
@@ -70,13 +142,21 @@ function lockComposer() {
   $("#send").disabled = drawing;
   $("#send").textContent = locked && !drawing ? "send after" : "send";
   const how = queueMode();
+  const when = $("#send-when"), labels = interruptLabels();
+  when.hidden = !locked || drawing;
+  if (!when.hidden) {
+    const now = interruptMode();
+    const html = Object.entries(labels).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+    if (when.innerHTML !== html) when.innerHTML = html;
+    when.value = now;
+  } else WHEN_ONCE = null;                         // a choice for one message does not outlive the answer it was made in
   $("#send").title = !locked || drawing ? ""
     : how === "hold" ? "an answer is coming: this waits above the box until you let it go"
     : how === "each" ? "an answer is coming: this is sent as soon as it is in"
     : "an answer is coming: this goes when it is in, as one message with anything else waiting";
   // The line is redrawn either way (its buttons read differently mid-answer);
   // with no answer coming, whatever is waiting and not held goes.
-  setTimeout(() => { drawQueue(); if (!chatBusy()) drainQueue(); }, 0);
+  setTimeout(() => { drawQueue(); drawBehind(); if (!chatBusy()) drainQueue(); }, 0);
   $("#input").placeholder = locked && !drawing
     ? (how === "hold" ? "answering… what you send now waits until you let it go"
        : how === "each" ? "answering… what you send now goes as soon as this answer is in"
@@ -86,6 +166,10 @@ function lockComposer() {
 
 const voiceName = v => v === "claude" ? (CFG.claude?.name || "claude") : "local model";
 const fileUrl = (sid, name) => `/api/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(name)}`;
+// The same file handed over to be saved (the server names it as it came).
+const saveUrl = (sid, name) => `${fileUrl(sid, name)}?download=1`;
+const saveEl = (sid, f) => `<a class="save" href="${esc(saveUrl(sid, f.name))}" download="${esc(f.orig || f.name)}"`
+  + ` title="save ${esc(f.orig || f.name)}">${icon("save")}</a>`;
 const isImage = t => /^image\/(png|jpeg|gif|webp|bmp|svg\+xml)$/.test(t || "");
 // A screen-share frame: marked by the server; older ones known by their name.
 const isScreen = f => f.screen === true || /^screen-\d{8}-\d{6}\.jpg$/.test(f.orig || "");
@@ -672,13 +756,20 @@ async function openSession(id) {
   const moving = current?.id !== id;
   if (moving) stashDraft();
   stopFollowing();
-  current = await call("GET", `/api/sessions/${id}`);
-  folder = current.folder;
-  if (moving) takeDraft();
-  drawSide(); drawLog(); lockComposer(); drawQueue();
-  if ($("#chat-settings").open) drawChatSettings();
-  // An answer still coming in this chat: pick it up where it is.
-  if (current.answering) followLive(id);
+  OPENING++;
+  try {
+    current = await call("GET", `/api/sessions/${id}`);
+    folder = current.folder;
+    if (moving) takeDraft();
+    drawSide(); drawLog(); lockComposer(); drawQueue();
+    if ($("#chat-settings").open) drawChatSettings();
+    // An answer still coming in this chat: pick it up where it is - unless
+    // this window sent it, or is following it already.
+    if (current.answering && !SENDING.has(id) && FOLLOWER?.sid !== id) followLive(id);
+  } finally {
+    // What was waiting behind the answer goes now, with the chat as it stands.
+    if (!--OPENING) setTimeout(drainQueue, 0);
+  }
 }
 
 // ── The conversation ────────────────────────────────────────────────────
@@ -728,9 +819,11 @@ function drawLog() {
 const seatWho = s => CFG.claude?.name ? `${CFG.claude.name}·${s}` : s;
 // Its colour: the hue it was given when it sat down, so who said what reads
 // at a glance (17 Nov 2026: four seats, one colour). A seat that has left
-// keeps one worked out from its name.
+// keeps hers (the chat's `left`): one worked out from the name landed where
+// it liked, and 19 Nov 2026 starwright, removed, "adopted workbench's
+// colours". Only a name the chat never seated gets a worked-out one.
 function seatHue(name) {
-  const seat = (current?.seats || []).find(x => x.name === name);
+  const seat = [...(current?.seats || []), ...(current?.left || [])].find(x => x.name === name);
   if (Number.isInteger(seat?.hue)) return seat.hue;
   let h = 0;
   for (const c of String(name)) h = (h * 31 + c.codePointAt(0)) % 360;
@@ -823,7 +916,13 @@ function receipt(meta) {
           meta.tools && meta.tools.length ? `tools: ${meta.tools.join(", ")}`
             : (meta.tool_rounds ? `tools: ${meta.tool_rounds}` : null),
           meta.seconds != null ? `${meta.seconds}s` : null,
-          meta.stopped ? "stopped by you before it finished" : null].filter(Boolean).join(" · ");
+          meta.stopped ? "stopped by you before it finished" : null,
+          // nobody asked: a task it had left running ended, and it came back to say so
+          // The CLI's line says "completed (exit code 0)", and that is the LAST command's code: a test run piped
+          // through grep, or ended with an echo, is 0 whether it passed or not (20 Nov 2026: two of three were, and
+          // one had failed). So the code is left out; whether it worked is in what the seat says.
+          meta.woke ? `came back on its own · ${String(meta.woke[0] || "a task ended").replace(/\s*\(exit code -?\d+\)/i, "").slice(0, 120)}`
+            : null].filter(Boolean).join(" · ");
 }
 
 // One message. Its tools are the ones the mock drew - delete and retry on an
@@ -858,7 +957,7 @@ function bubble(m, i, count, opts = {}) {
     if (steps.length) d.append(stepsEl(steps));
     d.append(renderMd(words, current?.id));
   }
-  const atts = attachmentsEl(m.files, current?.id, asked ? "" : m.content);
+  const atts = attachmentsEl(m.files, current?.id, m.content);
   if (atts) d.append(atts);
   if (!opts.bare) {
     const meta = document.createElement("div"); meta.className = "meta";
@@ -1062,6 +1161,15 @@ function renderMd(text, sid) {
         href: src, textContent: `🖼 ${label}`, target: "_blank", rel: "noopener noreferrer" }));
     } else img.replaceWith(document.createTextNode(label ? `[${label}]` : ""));
   });
+  // A link to one of this chat's files goes to the file, not to /files/... on
+  // the window's own address, which is nothing (20 Nov 2026: the txt Wren
+  // linked was a 404). The save button beside it takes it away.
+  box.querySelectorAll("a").forEach(a => {
+    const ours = (a.getAttribute("href") || "").match(OURS);
+    if (!ours || !sid) return;
+    a.href = fileUrl(sid, ours[1]);
+    a.insertAdjacentHTML("afterend", saveEl(sid, { name: ours[1], orig: ours[1].replace(/^[0-9a-f]{8}-/, "") }));
+  });
   box.querySelectorAll("pre > code").forEach(code => {
     const lang = (code.className.match(/language-([\w+#-]+)/) || [])[1];
     if (typeof hljs !== "undefined" && (!lang || hljs.getLanguage(lang))) { try { hljs.highlightElement(code); } catch {} }
@@ -1094,23 +1202,32 @@ $("#copy-all").onclick = () => {
   copyText(text, $("#copy-all"), "Copy all");
 };
 
-// What a message carried: pictures as pictures, the rest as chips. An
-// answer's picture that its Markdown already shows is not shown twice.
+// Is this file a picture the words already show - `![…](files/name)`? Only
+// that counts as shown: a plain link to it still leaves its chip, or the one
+// working handle on it is hidden behind the link (20 Nov 2026).
+const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const shownAsPicture = (text, name) =>
+  !!text && new RegExp(`!\\[[^\\]]*\\]\\(\\s*<?files/${escRe(name)}[\\s>)]`).test(text);
+
+// What a message carried: pictures as pictures, the rest as chips, each with
+// a save button. A picture its Markdown already shows is not shown twice.
 // A screen-share frame is not shown in the conversation - it would bury it -
 // only a chip that opens it; they all sit in the screen-share panel.
 function attachmentsEl(files, sid, shownIn = "") {
-  const list = (files || []).filter(f => !(shownIn && shownIn.includes(`files/${f.name}`)));
+  const list = (files || []).filter(f => !shownAsPicture(shownIn, f.name));
   if (!list.length || !sid) return null;
   const box = document.createElement("div"); box.className = "atts";
   box.innerHTML = list.map(f => isScreen(f)
     ? `<button type="button" class="chip shot" data-shot="${esc(fileUrl(sid, f.name))}" title="open the frame">${icon("screen")}`
       + `<span>screen · ${esc(f.source || "shared")}</span></button>`
     : isImage(f.type)
-    ? `<img src="${esc(fileUrl(sid, f.name))}" alt="${esc(f.orig || f.name)}" title="${esc(f.orig || f.name)}" loading="lazy">`
+    ? `<span class="att pic"><img src="${esc(fileUrl(sid, f.name))}" alt="${esc(f.orig || f.name)}" title="${esc(f.orig || f.name)}" loading="lazy">`
+      + `${saveEl(sid, f)}</span>`
     : (f.type || "").startsWith("audio/")
-    ? `<audio class="clip" controls preload="none" src="${esc(fileUrl(sid, f.name))}" title="${esc(f.orig || f.name)}"></audio>`
-    : `<a class="chip" href="${esc(fileUrl(sid, f.name))}" target="_blank" rel="noopener">${icon("file")}`
-      + `<span>${esc(f.orig || f.name)}</span><small>${size(f.size || 0)}</small></a>`).join("");
+    ? `<span class="att"><audio class="clip" controls preload="none" src="${esc(fileUrl(sid, f.name))}" title="${esc(f.orig || f.name)}"></audio>`
+      + `${saveEl(sid, f)}</span>`
+    : `<span class="att"><a class="chip" href="${esc(fileUrl(sid, f.name))}" target="_blank" rel="noopener">${icon("file")}`
+      + `<span>${esc(f.orig || f.name)}</span><small>${size(f.size || 0)}</small></a>${saveEl(sid, f)}</span>`).join("");
   return box;
 }
 
@@ -1222,9 +1339,35 @@ $("#tray").addEventListener("click", e => {
 });
 $("#tray").addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("#picker").click(); } });
 $("#picker").onchange = () => { addFiles($("#picker").files); $("#picker").value = ""; };
+// A picture pasted or dropped INTO THE BOX goes where the cursor is, as
+// `![name](pending:<id>)`, and rides the tray like any file; on sending, once
+// it is uploaded, the reference becomes `files/<stored name>` and the message
+// shows it right there, between your words - as an answer's pictures already
+// are (Chad, 20 Nov 2026: "images intermingled in text ... I would like to be
+// able to do too"). Delete the line and it goes as a plain attachment. Other
+// files, and anything dropped elsewhere on the room, go to the tray as before.
+const PENDING_REF = /\]\(pending:([a-z0-9]{1,12})\)/g;
+function addInline(list) {
+  const files = [...list], pics = files.filter(f => isImage(f.type)), rest = files.filter(f => !isImage(f.type));
+  const input = $("#input"), at = input.selectionStart ?? input.value.length, end = input.selectionEnd ?? at;
+  const before = PENDING.length;
+  addFiles(pics);
+  const refs = PENDING.slice(before).map(p => `![${p.name.replace(/[[\]]/g, "")}](pending:${p.id})`);
+  if (refs.length) {
+    const lead = at > 0 && !input.value.slice(0, at).endsWith("\n") ? "\n" : "";
+    input.setRangeText(`${lead}${refs.join("\n")}\n`, at, end, "end");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (rest.length) addFiles(rest);
+}
+// The words as they go: each pending picture named by where the chat keeps it.
+const withStored = (text, pending) => (text || "").replace(PENDING_REF, (whole, id) => {
+  const p = (pending || []).find(x => x.id === id);
+  return p?.stored ? `](files/${p.stored.name})` : whole;
+});
 $("#input").addEventListener("paste", e => {
   const files = [...(e.clipboardData?.files || [])];
-  if (files.length) { e.preventDefault(); addFiles(files); }
+  if (files.length) { e.preventDefault(); addInline(files); }
 });
 
 // Drag and drop anywhere on the room.
@@ -1236,7 +1379,7 @@ $("#room").addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDep
 $("#room").addEventListener("drop", e => {
   if (!hasFiles(e)) return;
   e.preventDefault(); dragDepth = 0; $("#room").classList.remove("dragging");
-  addFiles(e.dataTransfer.files);
+  if (e.target.closest("#input")) addInline(e.dataTransfer.files); else addFiles(e.dataTransfer.files);
 });
 
 const b64 = file => new Promise((ok, no) => {
@@ -1361,8 +1504,13 @@ $("#composer").addEventListener("submit", e => {
   e.preventDefault();
   const text = $("#input").value.trim();
   if (!text && !PENDING.length) return;
-  if (current && chatBusy() && !drawing) queueMessage(text); else send({ prompt: text });
+  if (current && chatBusy() && !drawing) {
+    const when = interruptMode();
+    WHEN_ONCE = null;                              // the choice was for this message
+    queueMessage(text, when);
+  } else send({ prompt: text });
 });
+$("#send-when").onchange = e => { WHEN_ONCE = e.target.value; $("#input").focus(); };
 
 // ── Said while an answer is coming: it waits its turn ───────────────────
 // Chad, 17 Nov 2026: "being able to send live would be good as well". A
@@ -1387,9 +1535,14 @@ $("#composer").addEventListener("submit", e => {
 const QUEUE = new Map();                       // chat id -> [{prompt, files}]
 const HOLD = new Map();                        // chat id -> true (held by hand, a stop, a failure) | false (let go by hand)
 let DRAINING = false;
+// Chats whose answer this window stopped FOR a message ("stop and send now"): that stop lets the line go.
+const CUTTING = new Set();
 const lineHeld = sid => HOLD.has(sid) ? HOLD.get(sid) : queueMode() === "hold";
 const holdLine = sid => { if (sid) HOLD.set(sid, true); };
-async function queueMessage(text) {
+// `when`: round - it waits for the answer, or the whole round; seat - the
+// round is asked to end with the seat speaking; now - the answer is stopped.
+// Either of the last two is you saying "send this", so the line is let go.
+async function queueMessage(text, when = "round") {
   const sid = current.id, waiting = PENDING;
   $("#input").value = ""; PENDING = []; drawTray(); atClose();
   let files = [];
@@ -1399,7 +1552,10 @@ async function queueMessage(text) {
   } catch (ex) { alert(ex.message); }
   waiting.forEach(p => p.url && URL.revokeObjectURL(p.url));
   if (!QUEUE.has(sid)) QUEUE.set(sid, []);
-  QUEUE.get(sid).push({ prompt: text, files });
+  QUEUE.get(sid).push({ prompt: withStored(text, waiting), files });
+  const stop = body => call("POST", `/api/sessions/${encodeURIComponent(sid)}/stop`, body);
+  if (when === "seat") { HOLD.set(sid, false); stop({ after: "seat" }).catch(() => {}); }
+  else if (when === "now") { HOLD.set(sid, false); CUTTING.add(sid); stop({}).catch(() => CUTTING.delete(sid)); }
   drawQueue();
 }
 function drawQueue() {
@@ -1436,7 +1592,7 @@ $("#queue").onclick = e => {
   drawQueue(); $("#input").focus();
 };
 function drainQueue() {
-  if (DRAINING || !current || chatBusy()) return;
+  if (DRAINING || OPENING || !current || chatBusy()) return;
   const sid = current.id, slips = QUEUE.get(sid);
   if (!slips?.length || lineHeld(sid)) return;
   // Melded: the lot, as one message, a blank line between what were separate
@@ -1482,9 +1638,10 @@ async function send(ask) {
     // have somewhere to land; one whose first turn fails is left empty.
     await ensureSession();
     sid = current.id;
-    ANSWERING.add(sid); lockComposer(); drawSide(); drawTitlebar();
+    ANSWERING.add(sid); SENDING.add(sid); lockComposer(); drawSide(); drawTitlebar();
     if (!ask.retry && !queued) {
       ask.files = await uploadPending(current.id);
+      ask.prompt = withStored(ask.prompt, given.pending);
       if (!ask.screen && screenRides()) ask.screen = true;
       if (ask.files.length) {
         const full = bubble({ role: "user", content: ask.prompt || "", files: ask.files }, -1, 0, { bare: true });
@@ -1504,6 +1661,22 @@ async function send(ask) {
     } else if (kept === false) giveBack(ask, given);
   } catch (ex) {
     if (live) { live.stop(); live.el.remove(); }
+    // Refused because the chat is answering after all (409): this window did
+    // not know - the message was sent from another window, or a seat is
+    // still at it. It is not an error and nothing is lost: what you sent
+    // waits its turn on a slip, as if you had sent it a moment later, and
+    // the answer under way is followed. 20 Nov 2026, the first room with
+    // tasks in the background: Chad's message drew as sent, then a red
+    // "this chat is still answering the last message", and went back to the box.
+    if (ex.status === 409 && sid) {
+      mine?.remove();
+      ANSWERING.add(sid);
+      if (!QUEUE.has(sid)) QUEUE.set(sid, []);
+      QUEUE.get(sid).push({ prompt: ask.prompt || "", files: ask.files || [] });
+      if (!queued) { given.pending.forEach(p => p.url && URL.revokeObjectURL(p.url)); }
+      if (current?.id === sid && !FOLLOWER) followLive(sid);
+      return;
+    }
     if (!sent && mine) mine.remove();               // nothing went: the composer gets it back
     if (sid) { ANSWERING.delete(sid); holdLine(sid); }   // ...and nothing waiting is fired into whatever broke
     if (!sid || current?.id === sid) {
@@ -1512,6 +1685,7 @@ async function send(ask) {
       giveBack(ask, given);
     }
   } finally {
+    if (sid) SENDING.delete(sid);
     lockComposer(); drawSide();
     if ((!sid || current?.id === sid) && !document.activeElement?.closest?.("dialog")) $("#input").focus();
   }
@@ -1537,7 +1711,7 @@ async function stream(body, live = null, asked = null, retry = false) {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: ctrl.signal });
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
-    throw Object.assign(new Error(j.error || `HTTP ${r.status}`), { body: j });
+    throw Object.assign(new Error(j.error || `HTTP ${r.status}`), { body: j, status: r.status });
   }
   return follow(body.session, r, ctrl, live, asked, retry);
 }
@@ -1550,6 +1724,8 @@ async function followLive(sid) {
   try { r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/live`, { signal: ctrl.signal }); } catch { return null; }
   if (r.status === 404) { ANSWERING.delete(sid); lockComposer(); drawSide(); return null; }
   if (!r.ok) return null;
+  // Followed already by the time this came back (a message sent meanwhile): one bubble, not two.
+  if (SENDING.has(sid) || FOLLOWER?.sid === sid) { ctrl.abort(); return null; }
   return follow(sid, r, ctrl, null, ASKED_EL, !!current?.pending?.retry);
 }
 
@@ -1608,7 +1784,7 @@ async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
     // `saved` that follows redraws the chat with it (seren_symposium.app.keep_stopped).
     // Whatever was waiting behind this answer is held: you stopped to say
     // something, not to have the next slip fired in its place.
-    if (ev.type === "stopped") { holdLine(sid); status.set(ev.kept ? "stopped - keeping what it said" : "stopped"); return; }
+    if (ev.type === "stopped") { if (!CUTTING.delete(sid)) holdLine(sid); status.set(ev.kept ? "stopped - keeping what it said" : "stopped"); return; }
     // An answer put a new face on (a picture captioned avatar): wear it everywhere.
     if (ev.type === "avatar") return Promise.all([loadAvatars(), call("GET", `/api/sessions/${encodeURIComponent(sid)}`)]).then(([, s]) => {
       if (current?.id !== sid) return;
@@ -2285,6 +2461,10 @@ function drawChatSettings() {
   $("#s-queue").innerHTML = `<option value="">every chat's (${esc(QUEUE_NAMES[everyChats])})</option>`
     + Object.entries(QUEUE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
   $("#s-queue").value = own.queue ?? "";
+  const usualWhen = INTERRUPT_NAMES[CFG.interrupt] ? CFG.interrupt : "round";
+  $("#s-interrupt").innerHTML = `<option value="">every chat's (${esc(INTERRUPT_NAMES[usualWhen])})</option>`
+    + Object.entries(INTERRUPT_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+  $("#s-interrupt").value = own.interrupt ?? "";
   // The prompts add up (22 Oct 2026): its project's, then this chat's after it.
   const inherit = own.system_inherit !== false, theirs = String(preset.system_prompt || "").trim();
   $("#s-system_inherit").checked = inherit;
@@ -2383,6 +2563,8 @@ function drawSettings() {
   $("#a-confirm_destructive").checked = !!CFG.confirm_destructive;
   $("#a-queue").innerHTML = Object.entries(QUEUE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
   $("#a-queue").value = QUEUE_NAMES[CFG.queue] ? CFG.queue : "meld";
+  $("#a-interrupt").innerHTML = Object.entries(INTERRUPT_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+  $("#a-interrupt").value = INTERRUPT_NAMES[CFG.interrupt] ? CFG.interrupt : "round";
   $("#a-translate").innerHTML = Object.entries(TRANSLATE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
   $("#a-translate").value = TRANSLATE_NAMES[CFG.translate] ? CFG.translate : "chat";
   $("#a-prefs-file").textContent = CFG.prefs_file || "";
@@ -2440,7 +2622,7 @@ for (const [box, key] of [["#c-tool-add", "claude_tools"], ["#c-dir-add", "claud
   });
 }
 
-for (const k of ["you", "claude_name", "confirm_destructive", "queue", "translate"]) {
+for (const k of ["you", "claude_name", "confirm_destructive", "queue", "translate", "interrupt"]) {
   $(`#a-${k}`).addEventListener("change", async e => {
     const v = e.target.type === "checkbox" ? e.target.checked : e.target.value.trim();
     try { await call("PATCH", "/api/prefs", { [k]: v }); } catch (ex) { alert(ex.message); }

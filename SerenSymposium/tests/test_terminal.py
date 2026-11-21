@@ -98,6 +98,35 @@ def test_a_transcript_brings_the_words_and_leaves_the_workings(box):
     ]
 
 
+def test_the_harness_own_notices_are_nobodys_words(box):
+    """A background task finishing and a subagent's report are written by the
+    CLI as the person's turn - as a `user` record, or queued mid-answer like
+    something they sent. They are the harness talking to the model. 18 Nov
+    2026, the first tangle on 5.7.0: a picked-up chat held eight of them as
+    Chad's, and a seat was handed them as "[Chad]" lines."""
+    root, repo = box
+    note = "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"
+    report = '<agent-message from="a09">\n[Subagent hand-back] set autoMemoryEnabled to false\n</agent-message>'
+    sid = write(root, repo, [
+        rec("user", "start the test copy"),
+        rec("assistant", [{"type": "text", "text": "Starting it."}]),
+        rec("user", note),
+        {"type": "attachment", "attachment": {"type": "queued_command", "prompt": report}},
+        {"type": "attachment", "attachment": {"type": "queued_command", "prompt": "and the jello?"}},
+        rec("assistant", [{"type": "text", "text": "It is up."}]),
+    ])
+    t = terminal.transcript(terminal.find(root, sid))
+    assert [(m["role"], m["content"]) for m in t["messages"]] == [
+        ("user", "start the test copy"), ("assistant", "Starting it."),
+        ("user", "and the jello?"), ("assistant", "It is up.")]
+    # ...and one a pickup kept before it knew better is not handed on as the person's
+    assert terminal.harness_notice({"role": "user", "content": note})
+    assert terminal.harness_notice({"role": "user", "content": "  " + report})
+    assert not terminal.harness_notice({"role": "user", "content": "what is a <task-notification>?"})
+    assert not terminal.harness_notice({"role": "assistant", "content": note})
+    assert not terminal.harness_notice({"role": "user", "content": note, "source": "game"})
+
+
 def test_what_was_said_mid_answer_comes_over_in_its_place(box):
     """A message sent while an answer was under way is kept by the CLI as a
     queued_command attachment, not a user record."""

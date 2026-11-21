@@ -70,10 +70,11 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from contextlib import aclosing
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator, Optional
 
 from .config import ClaudeConfig
 
@@ -269,6 +270,10 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
     exe = shutil.which(cfg.command[0]) or cfg.command[0]
     out = [exe, *cfg.command[1:], "-p", "--output-format", "stream-json", "--verbose",
            "--include-partial-messages"]
+    # Fed a message at a time, so the process can outlive its first answer
+    # (claude.background; see Cli).
+    if cfg.background:
+        out += ["--input-format", "stream-json"]
     out += ["--resume", resume] if resume else ["--session-id", new_id]
     if resume and fork:
         out += ["--fork-session"]
@@ -327,52 +332,216 @@ def _env(permit: Optional[dict[str, str]] = None, cfg: Optional[ClaudeConfig] = 
     return env
 
 
-async def _raw_lines(cmd: list[str], prompt: str, cwd: str, timeout: float,
-                     stderr: list[str], env: Optional[dict[str, str]] = None) -> AsyncIterator[str]:
-    """The child's stdout, line by line. Popen and a reader thread rather
-    than asyncio's subprocess support: that needs the Proactor loop on
-    Windows, and which loop uvicorn picks is not ours to count on.
+class Cli:
+    """One claude CLI process: started, handed a prompt, read line by line.
 
-    The child is killed if it outlives `timeout`, or if whoever is reading
-    stops (the shell closed mid-answer)."""
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
-    proc = subprocess.Popen(
-        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        cwd=cwd or None, env=env or _env(),
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    A process that outlives its answer (claude.background). The CLI can run
+    a command in the background and, in its streaming-input mode, keeps
+    going after it has answered: it can be asked something else meanwhile,
+    and when the task ends it starts a turn of its own to say so. Symposium
+    used to end the process at the first answer, which killed the task with
+    it - so a seat either lost her build or held her turn open on it and
+    froze the room (Chad, 19 Nov 2026, the soma and psycheion firmware
+    builds). Measured on the real CLI, 2.1.326, the same day:
 
-    def feed() -> None:
+        the task outlived the first `result`                       (3.9s / 43s)
+        a second message, sent at 4.1s, was answered at 4.8s
+        at 43s `system task_notification`, then a turn nobody asked for
+        `system background_tasks_changed` lists what is in flight ({tasks})
+        `--resume` works the same fed this way
+        stdin closed with a task running: the CLI waits for it, reports, exits
+
+    So with claude.background the prompt goes as one stream-json line and
+    stdin is left open; without it, the old way - the prompt, then EOF.
+
+    Popen and reader threads rather than asyncio's subprocess support: that
+    needs the Proactor loop on Windows, and which loop uvicorn picks is not
+    ours to count on."""
+
+    def __init__(self, cmd: list[str], cwd: str, env: dict[str, str], stream: bool, ticket: Optional[str] = None):
+        self.loop = asyncio.get_running_loop()
+        self.queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+        self.stderr: list[str] = []
+        self.stream = stream
+        self.ticket = ticket                # where this process's permission asks go (its first turn's)
+        self.tasks: list[dict[str, Any]] = []       # background tasks in flight, as the CLI last listed them
+        self.notes: list[str] = []                  # what the CLI said of tasks that ended, since the last answer
+        self.started = time.time()
+        self.idle = asyncio.Event()         # clear while it is in a turn it began on its own
+        self.idle.set()
+        self.watcher: Optional[asyncio.Task] = None
+        self.proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=cwd or None, env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        for fn in (self._read_out, self._read_err):
+            threading.Thread(target=fn, daemon=True).start()
+
+    def _read_out(self) -> None:
         try:
-            proc.stdin.write(prompt.encode("utf-8"))
-            proc.stdin.close()
-        except OSError:
-            pass
+            for raw in self.proc.stdout:
+                self.loop.call_soon_threadsafe(self.queue.put_nowait, raw.decode("utf-8", "replace"))
+            self.loop.call_soon_threadsafe(self.queue.put_nowait, None)
+        except RuntimeError:
+            pass                            # the loop it was read for has closed: nobody is listening
 
-    def read_out() -> None:
-        for raw in proc.stdout:
-            loop.call_soon_threadsafe(queue.put_nowait, raw.decode("utf-8", "replace"))
-        loop.call_soon_threadsafe(queue.put_nowait, None)
+    def _read_err(self) -> None:
+        for raw in self.proc.stderr:
+            self.stderr.append(raw.decode("utf-8", "replace"))
 
-    def read_err() -> None:
-        for raw in proc.stderr:
-            stderr.append(raw.decode("utf-8", "replace"))
+    def send(self, prompt: str) -> None:
+        """Hand it a message. Written from a thread: a long handover can fill
+        the pipe, and the loop must not wait on the CLI reading it."""
+        if self.stream:
+            data = (json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n").encode("utf-8")
+        else:
+            data = prompt.encode("utf-8")
 
-    def watch() -> None:
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            stderr.append(f"killed after {timeout:.0f}s\n")
-            proc.kill()
+        def feed() -> None:
+            try:
+                self.proc.stdin.write(data)
+                if self.stream:
+                    self.proc.stdin.flush()
+                else:
+                    self.proc.stdin.close()
+            except (OSError, ValueError):
+                pass
+        threading.Thread(target=feed, daemon=True).start()
 
-    for fn in (feed, read_out, read_err, watch):
-        threading.Thread(target=fn, daemon=True).start()
+    def alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def kill(self) -> None:
+        if self.alive():
+            self.proc.kill()
+
+    def deadline(self, seconds: float) -> threading.Timer:
+        """Kill it if the turn now starting outlives `seconds` (cancel the timer when the turn ends)."""
+        def late() -> None:
+            if self.alive():
+                self.stderr.append(f"killed after {seconds:.0f}s\n")
+                self.proc.kill()
+        timer = threading.Timer(seconds, late)
+        timer.daemon = True
+        timer.start()
+        return timer
+
+
+# Processes set aside with a task still running, by the conversation they are
+# (the CLI's session id): fed the next message for that conversation instead
+# of a second process being started beside them, and watched meanwhile (_watch).
+PARKED: dict[str, Cli] = {}
+# What a set-aside conversation calls when it answers on its own:
+# (the `done` or `error` event, the turn's ClaudeTurn, what the CLI said of the tasks that ended).
+Wake = Callable[[dict[str, Any], "ClaudeTurn", list[str]], Awaitable[None]]
+
+
+def parked(key: Optional[str]) -> Optional[dict[str, Any]]:
+    """What conversation `key` has running in the background, for the window: {tasks: [words], since}."""
+    cli = PARKED.get(key or "")
+    if cli is None or not cli.alive():
+        return None
+    return {"tasks": [str(t.get("description") or t.get("task_type") or "a task")[:200] for t in cli.tasks],
+            "since": cli.started}
+
+
+def parked_ticket(key: Optional[str]) -> Optional[str]:
+    """Where a set-aside process's permission asks go: its first turn's ticket, which the turn now using it answers."""
+    cli = PARKED.get(key or "")
+    return cli.ticket if cli is not None and cli.alive() else None
+
+
+def stop_parked(key: Optional[str]) -> bool:
+    """End a set-aside process, and what it was running. False when there was none."""
+    cli = PARKED.pop(key or "", None)
+    if cli is None:
+        return False
+    if cli.watcher is not None:
+        cli.watcher.cancel()
+    cli.kill()
+    return True
+
+
+def stop_all_parked() -> None:
+    for key in list(PARKED):
+        stop_parked(key)
+
+
+async def _take_parked(key: str) -> Optional[Cli]:
+    """The set-aside process for conversation `key`, to be handed a message:
+    out of the registry and no longer watched. A turn it had begun on its own
+    (its task just ended) is let finish first, so that answer is not taken
+    for the reply to what is about to be asked."""
+    cli = PARKED.get(key)
+    if cli is None:
+        return None
     try:
-        while (line := await queue.get()) is not None:
-            yield line
+        await asyncio.wait_for(cli.idle.wait(), timeout=120.0)
+    except asyncio.TimeoutError:
+        pass                                # said it was waking and never did: ask it anyway
+    if PARKED.get(key) is not cli:
+        return None                         # it ended, or was stopped, meanwhile
+    PARKED.pop(key, None)
+    if cli.watcher is not None:
+        cli.watcher.cancel()
+        try:
+            await cli.watcher
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - only waiting for it to let go
+            pass
+        cli.watcher = None
+    return cli if cli.alive() else None
+
+
+def _park(cli: Cli, key: str, cfg: ClaudeConfig, on_wake: Wake) -> None:
+    PARKED[key] = cli
+    cli.watcher = asyncio.get_running_loop().create_task(_watch(cli, key, cfg, on_wake))
+
+
+async def _watch(cli: Cli, key: str, cfg: ClaudeConfig, on_wake: Wake) -> None:
+    """A set-aside process, read while nobody is asking it anything. When a
+    task of its ends the CLI starts a turn of its own; that turn's answer is
+    handed to `on_wake`. With nothing left in flight after an answer, or
+    after claude.background_max_seconds, the process is ended."""
+    turn, blocks = ClaudeTurn(key), {}
+    taken = False
+    try:
+        while True:
+            left = cli.started + cfg.background_max_seconds - time.time()
+            if left <= 0:
+                log.info("claude conversation %s: set aside for %.0fs, ended", key, cfg.background_max_seconds)
+                return
+            try:
+                line = await asyncio.wait_for(cli.queue.get(), timeout=left)
+            except asyncio.TimeoutError:
+                continue
+            if line is None:
+                return                      # the process ended by itself
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") != "system" or ev.get("subtype") in ("init", "task_notification"):
+                cli.idle.clear()            # it has begun a turn of its own (a task ending starts one)
+            for out in _digest(ev, turn, blocks, cfg, cli):
+                if out["type"] not in ("done", "error"):
+                    continue
+                why, cli.notes = list(cli.notes), []
+                try:
+                    await on_wake(out, turn, why)
+                except Exception:  # noqa: BLE001 - what it said must not end the watch
+                    log.exception("claude conversation %s came back on its own and could not be kept", key)
+                turn, blocks = ClaudeTurn(key), {}
+                cli.idle.set()
+                if not cli.tasks:
+                    return                  # nothing left running: it can go
+    except asyncio.CancelledError:
+        taken = True                        # handed a message (_take_parked) or stopped: not ours to end
+        raise
     finally:
-        if proc.poll() is None:
-            proc.kill()
+        cli.idle.set()
+        if not taken:
+            if PARKED.get(key) is cli:
+                PARKED.pop(key, None)
+            cli.kill()
 
 
 class ClaudeTurn:
@@ -482,6 +651,91 @@ def _result_text(content: Any) -> str:
     return ""
 
 
+def _digest(ev: dict[str, Any], turn: ClaudeTurn, blocks: dict[Any, dict[str, Any]], cfg: ClaudeConfig,
+            cli: Optional[Cli] = None) -> Iterator[dict[str, Any]]:
+    """One line of the CLI's stream, as Symposium's events (none, for most).
+    `blocks`: content block index -> what it is so far, across lines. A
+    `done` or an `error` ends the turn; the process may go on (Cli)."""
+    kind = ev.get("type")
+    if kind == "system" and ev.get("subtype") == "init":
+        turn.model = ev.get("model")
+        # The conversation this turn is in, as the CLI has it: the
+        # one asked for, or - forked - a new one.
+        if isinstance(ev.get("session_id"), str) and ev["session_id"]:
+            turn.session_id = ev["session_id"]
+        turn.init = digest_init(ev)
+    elif kind == "system" and ev.get("subtype") == "background_tasks_changed" and cli is not None:
+        # What it has running in the background, whole, each time it changes.
+        cli.tasks = [t for t in ev.get("tasks") or [] if isinstance(t, dict)]
+        yield {"type": "background", "tasks": [str(t.get("description") or t.get("task_type") or "a task")[:200]
+                                               for t in cli.tasks]}
+    elif kind == "system" and ev.get("subtype") == "task_notification" and cli is not None:
+        if ev.get("is_backgrounded") is not False and isinstance(ev.get("summary"), str) and ev["summary"]:
+            cli.notes.append(ev["summary"][:300])
+    elif kind == "stream_event" and not ev.get("parent_tool_use_id"):
+        inner = ev.get("event") or {}
+        block = inner.get("content_block") or {}
+        delta = inner.get("delta") or {}
+        at = inner.get("index")
+        if inner.get("type") == "content_block_start":
+            blocks[at] = {"type": block.get("type"), "id": block.get("id"),
+                          "name": block.get("name"), "json": ""}
+            if block.get("type") == "text":
+                turn.close_said()               # a new block of words is a new piece
+            if block.get("type") == "tool_use":
+                name = block.get("name") or "a tool"
+                if name not in QUIET_TOOLS:
+                    turn.tools.append(name)
+                    yield {"type": "tool_status", "tool": name}
+        elif inner.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
+            turn.say(delta.get("text", ""))
+            yield {"type": "chunk", "content": delta.get("text", "")}
+        elif inner.get("type") == "content_block_delta" and delta.get("type") == "thinking_delta":
+            turn.think(delta.get("thinking", ""))
+            yield {"type": "thinking", "content": delta.get("thinking", "")}
+        elif inner.get("type") == "content_block_delta" and delta.get("type") == "input_json_delta":
+            if at in blocks:
+                blocks[at]["json"] += delta.get("partial_json", "")
+        elif inner.get("type") == "content_block_stop":
+            b = blocks.pop(at, None) or {}
+            if b.get("type") == "text":
+                turn.close_said()
+            if b.get("type") == "thinking" and turn.steps and turn.steps[-1]["kind"] == "thinking":
+                turn.steps[-1]["closed"] = True
+            elif b.get("type") == "tool_use" and (b.get("name") or "") not in QUIET_TOOLS:
+                try:
+                    given = json.loads(b["json"] or "{}")
+                except ValueError:
+                    given = {}
+                call = {"id": b.get("id"), "tool": b.get("name") or "a tool",
+                        "summary": summarize(b.get("name") or "", given, 200)}
+                turn.step({"kind": "tool", **call})
+                yield {"type": "tool_call", **call}
+    elif kind == "user" and not ev.get("parent_tool_use_id"):
+        content = (ev.get("message") or {}).get("content")
+        for c in content if isinstance(content, list) else []:
+            if not (isinstance(c, dict) and c.get("type") == "tool_result"):
+                continue
+            got = _result_images(c.get("content"), c.get("tool_use_id"))
+            turn.images += got[:max(0, MAX_TOOL_IMAGES - len(turn.images))]
+            step = next((s for s in turn.steps if s.get("id") == c.get("tool_use_id")), None)
+            if step is None:
+                continue
+            step["ok"] = not c.get("is_error")
+            step["result"] = _result_text(c.get("content")).strip()[:MAX_RESULT]
+            yield {"type": "tool_result", "id": step["id"], "ok": step["ok"], "preview": step["result"]}
+    elif kind == "result":
+        if ev.get("is_error") or ev.get("subtype") != "success":
+            errors = ev.get("errors") or []
+            yield {"type": "error", "error": "claude did not finish the answer",
+                   "detail": "; ".join(map(str, errors)) or ev.get("result") or ev.get("subtype")}
+        else:
+            result = ev.get("result") or ""
+            yield {"type": "done", "response": turn.answer(result), "final": turn.final(result),
+                   "model": turn.model, "node": cfg.name,
+                   "tool_rounds": max(0, int(ev.get("num_turns") or 1) - 1)}
+
+
 async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model: str = "",
                  system_prompt: str = "", add_dirs: Optional[list[str]] = None,
                  allow: Optional[list[str]] = None,
@@ -489,103 +743,63 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                  permit: Optional[dict[str, str]] = None,
                  replace: bool = False, mode: Optional[str] = None,
                  own_tools: bool = True, cwd: str = "", fork: bool = False,
-                 ephemeral: bool = False) -> AsyncIterator[dict[str, Any]]:
+                 ephemeral: bool = False, on_wake: Optional[Wake] = None) -> AsyncIterator[dict[str, Any]]:
     """One turn, as Symposium stream events (see the module docstring).
     Always ends with exactly one `done` or `error`. `permit` ({url, ticket})
     is where the CLI's permission asks go; without it, unlisted tools are
     refused as before. `cwd`: where this turn runs, over claude.cwd (a chat
-    picked up from a terminal runs where its conversation was started)."""
+    picked up from a terminal runs where its conversation was started).
+
+    `on_wake`: this conversation may leave a task running behind its answer
+    (claude.background). Then the process is not ended with the turn but set
+    aside (PARKED) under the conversation's id; the next turn that resumes
+    that conversation is handed to it rather than to a second process, and
+    what it says when the task ends goes to `on_wake`. Without `on_wake` (a
+    one-shot, a side copy) the process ends with its answer, as it always did."""
     turn = turn or ClaudeTurn(resume or str(uuid.uuid4()))
-    cmd = argv(cfg, resume=resume, new_id=turn.session_id, model=model, system_prompt=system_prompt,
-               add_dirs=add_dirs, allow=allow, ask=bool(permit), replace=replace,
-               mode=mode, own_tools=own_tools, fork=fork, ephemeral=ephemeral)
-    stderr: list[str] = []
     blocks: dict[Any, dict[str, Any]] = {}      # content block index -> what it is so far
     where = cwd or cfg.cwd
+    cli: Optional[Cli] = None
+    kept = False                                # set aside rather than ended
     try:
-        lines = _raw_lines(cmd, prompt, where and os.path.expanduser(where), cfg.timeout_seconds, stderr,
-                           env=_env(permit, cfg))
-        async with aclosing(lines):
-            async for line in lines:
+        if resume and not fork and cfg.background:
+            cli = await _take_parked(resume)
+        if cli is None:
+            cmd = argv(cfg, resume=resume, new_id=turn.session_id, model=model, system_prompt=system_prompt,
+                       add_dirs=add_dirs, allow=allow, ask=bool(permit), replace=replace,
+                       mode=mode, own_tools=own_tools, fork=fork, ephemeral=ephemeral)
+            cli = Cli(cmd, where and os.path.expanduser(where), _env(permit, cfg), stream=cfg.background,
+                      ticket=(permit or {}).get("ticket"))
+        cli.notes.clear()
+        timer = cli.deadline(cfg.timeout_seconds)
+        try:
+            cli.send(prompt)
+            while (line := await cli.queue.get()) is not None:
                 try:
                     ev = json.loads(line)
                 except ValueError:
                     continue
-                kind = ev.get("type")
-                if kind == "system" and ev.get("subtype") == "init":
-                    turn.model = ev.get("model")
-                    # The conversation this turn is in, as the CLI has it: the
-                    # one asked for, or - forked - a new one.
-                    if isinstance(ev.get("session_id"), str) and ev["session_id"]:
-                        turn.session_id = ev["session_id"]
-                    turn.init = digest_init(ev)
-                elif kind == "stream_event" and not ev.get("parent_tool_use_id"):
-                    inner = ev.get("event") or {}
-                    block = inner.get("content_block") or {}
-                    delta = inner.get("delta") or {}
-                    at = inner.get("index")
-                    if inner.get("type") == "content_block_start":
-                        blocks[at] = {"type": block.get("type"), "id": block.get("id"),
-                                      "name": block.get("name"), "json": ""}
-                        if block.get("type") == "text":
-                            turn.close_said()               # a new block of words is a new piece
-                        if block.get("type") == "tool_use":
-                            name = block.get("name") or "a tool"
-                            if name not in QUIET_TOOLS:
-                                turn.tools.append(name)
-                                yield {"type": "tool_status", "tool": name}
-                    elif inner.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
-                        turn.say(delta.get("text", ""))
-                        yield {"type": "chunk", "content": delta.get("text", "")}
-                    elif inner.get("type") == "content_block_delta" and delta.get("type") == "thinking_delta":
-                        turn.think(delta.get("thinking", ""))
-                        yield {"type": "thinking", "content": delta.get("thinking", "")}
-                    elif inner.get("type") == "content_block_delta" and delta.get("type") == "input_json_delta":
-                        if at in blocks:
-                            blocks[at]["json"] += delta.get("partial_json", "")
-                    elif inner.get("type") == "content_block_stop":
-                        b = blocks.pop(at, None) or {}
-                        if b.get("type") == "text":
-                            turn.close_said()
-                        if b.get("type") == "thinking" and turn.steps and turn.steps[-1]["kind"] == "thinking":
-                            turn.steps[-1]["closed"] = True
-                        elif b.get("type") == "tool_use" and (b.get("name") or "") not in QUIET_TOOLS:
-                            try:
-                                given = json.loads(b["json"] or "{}")
-                            except ValueError:
-                                given = {}
-                            call = {"id": b.get("id"), "tool": b.get("name") or "a tool",
-                                    "summary": summarize(b.get("name") or "", given, 200)}
-                            turn.step({"kind": "tool", **call})
-                            yield {"type": "tool_call", **call}
-                elif kind == "user" and not ev.get("parent_tool_use_id"):
-                    for c in (ev.get("message") or {}).get("content") or []:
-                        if not (isinstance(c, dict) and c.get("type") == "tool_result"):
-                            continue
-                        got = _result_images(c.get("content"), c.get("tool_use_id"))
-                        turn.images += got[:max(0, MAX_TOOL_IMAGES - len(turn.images))]
-                        step = next((s for s in turn.steps if s.get("id") == c.get("tool_use_id")), None)
-                        if step is None:
-                            continue
-                        step["ok"] = not c.get("is_error")
-                        step["result"] = _result_text(c.get("content")).strip()[:MAX_RESULT]
-                        yield {"type": "tool_result", "id": step["id"], "ok": step["ok"], "preview": step["result"]}
-                elif kind == "result":
-                    if ev.get("is_error") or ev.get("subtype") != "success":
-                        errors = ev.get("errors") or []
-                        yield {"type": "error", "error": "claude did not finish the answer",
-                               "detail": "; ".join(map(str, errors)) or ev.get("result") or ev.get("subtype")}
-                    else:
-                        result = ev.get("result") or ""
-                        yield {"type": "done", "response": turn.answer(result), "final": turn.final(result),
-                               "model": turn.model, "node": cfg.name,
-                               "tool_rounds": max(0, int(ev.get("num_turns") or 1) - 1)}
+                ended = False
+                for out in _digest(ev, turn, blocks, cfg, cli):
+                    ended = ended or out["type"] in ("done", "error")
+                    yield out
+                if ended:
+                    if on_wake is not None and cfg.background and not ephemeral and cli.tasks and cli.alive():
+                        _park(cli, turn.session_id, cfg, on_wake)
+                        kept = True
                     return
+        finally:
+            timer.cancel()
     except OSError as ex:
         yield {"type": "error", "error": "could not start claude", "detail": f"{type(ex).__name__}: {ex}"}
         return
+    finally:
+        # Ended with its answer - or by whoever was reading stopping (the
+        # person's stop, the shell closed mid-answer) - unless it was set aside.
+        if cli is not None and not kept:
+            cli.kill()
     yield {"type": "error", "error": "claude stopped before answering",
-           "detail": "".join(stderr)[-STDERR_TAIL:].strip() or "no output"}
+           "detail": "".join(cli.stderr if cli is not None else [])[-STDERR_TAIL:].strip() or "no output"}
 
 
 async def one_shot(cfg: ClaudeConfig, prompt: str, system_prompt: str = "", model: str = "") -> dict[str, Any]:

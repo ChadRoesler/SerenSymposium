@@ -200,6 +200,8 @@ class Turn:
         # A room (seren_symposium.room): the seats this message goes round,
         # in order. Then claude is planned seat by seat, as the round goes.
         self.room: Optional[list[str]] = None
+        # ...and the person asked for the round to end with the seat speaking.
+        self.cut = False
         self.layered: dict[str, Any] = {}
         # One seat's turn in that round: whose, and whether it writes the
         # person's message in (the first seat to come back does).
@@ -243,7 +245,7 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
     folder = store.files_dir(s["id"])
     told = [{**(t := as_told(m)), "content": attachments.with_files(
                 t["content"], attachments.for_claude(m.get("files") or [], folder))}
-            for m in missed]
+            for m in missed if not terminal.harness_notice(m)]
     model = layered.get("model_override") or (
         preset.model if preset and preset.voice == "claude" else "")
     system, replace = claude_system(cfg, stack.own_prompt(preset, layered), str(folder))
@@ -284,7 +286,7 @@ def plan_seat(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], seat
     folder = store.files_dir(s["id"])
     told = [{**(t := as_told(m, room.heard(m))), "content": attachments.with_files(
                 t["content"], attachments.for_claude(m.get("files") or [], folder))}
-            for m in missed]
+            for m in missed if not terminal.harness_notice(m)]
     plan["prompt"] = room.handover(_trim_history(told, cfg.claude.handover_max_chars, also=("seat", "by", "stopped")),
                                    seat["name"], cfg.ui.you, cfg.claude.name, resumed)
     names = [x["name"] for x in s.get("seats") or []]
@@ -311,7 +313,9 @@ def claude_framing(cfg: SymposiumConfig, files: str) -> str:
     tools = (cfg.claude.tools_note.replace("{servers}", ", ".join(cfg.claude.mcp_servers))
              if cfg.claude.tools_note and cfg.claude.mcp_servers else "")
     note = cfg.claude.auto_memory_note if cfg.claude.auto_memory == "last_resort" else ""
-    return "\n\n".join(p for p in (framing, tools, note) if p)
+    # A long command goes in the background and the turn ends (claude.background).
+    behind = cfg.claude.background_note if cfg.claude.background else ""
+    return "\n\n".join(p for p in (framing, tools, note, behind) if p)
 
 
 _FENCE = re.compile(r"```.*?```", re.S)
@@ -647,6 +651,45 @@ def _permit_url(cfg: SymposiumConfig) -> str:
     return f"http://{f'[{host}]' if ':' in host else host}:{cfg.ui.port}/api/permit"
 
 
+def waker(cfg: SymposiumConfig, store: SessionStore, session: str, seat: Optional[str]):
+    """What a set-aside conversation calls when it answers on its own - a
+    task it left running has ended (claude_voice.events, `on_wake`): the
+    answer is kept in the chat like any other, under the seat's name, marked
+    as having come back by itself and with what the CLI said of the task. A
+    seat with nothing to say about it (a pass) puts nothing in."""
+    async def woke(event: dict[str, Any], heard: "claude_voice.ClaudeTurn", why: list[str]) -> None:
+        if event["type"] != "done":
+            log.info("a set-aside turn in %s (%s) ended without an answer: %s", session, seat or "the chat", event.get("error"))
+            return
+        if seat is not None and room.passed(event.get("final") or event.get("response") or ""):
+            return
+        late = Turn({}, session, "")
+        late.seat = seat
+        store.files_dir(session).mkdir(parents=True, exist_ok=True)
+        answer, found = await bring_back_said(cfg, store, late, heard, event.get("response") or "", None)
+        found += attachments.keep_tool_images(heard.images, store, session,
+                                              int(cfg.files.max_mb * 1024 * 1024), heard.steps)
+        meta = late.receipt(event, heard.tools, heard.kept_steps())
+        meta.pop("seconds", None)                   # nobody was waiting, so there is nothing to time
+        meta["woke"] = why or ["a task it had left running ended"]
+        pieces = heard.said()
+        store.record_woken(session, seat, answer, meta, heard.session_id, answer_files=found,
+                           final=pieces[-1]["text"].strip() if len(pieces) > 1 else None)
+    return woke
+
+
+def background_of(s: dict[str, Any]) -> list[dict[str, Any]]:
+    """What this chat's conversations have running in the background, for the
+    window: [{seat (None: the chat's one voice), conversation, tasks, since}]."""
+    out = []
+    for name, holder in [(None, s), *[(x.get("name"), x) for x in s.get("seats") or []]]:
+        known = holder.get("claude") if isinstance(holder.get("claude"), dict) else {}
+        got = claude_voice.parked(known.get("session"))
+        if got:
+            out.append({"seat": name, "conversation": known["session"], **got})
+    return out
+
+
 async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                         busy: set[str], permits: Optional[dict[str, PermitDesk]] = None):
     """A claude turn, as stream events, written to the session when it
@@ -665,8 +708,13 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
     ask = turn.claude
     desk = (PermitDesk(turn.session, (store.get(turn.session) or {}).get("folder") or "", ask.get("allow"))
             if permits is not None and cfg.claude.ask else None)
+    # A conversation set aside with a task running is the process this turn
+    # is handed to; its permission asks still carry its first turn's ticket.
+    old_ticket = claude_voice.parked_ticket(ask["resume"]) if desk is not None else None
     if desk is not None:
         permits[desk.ticket] = desk
+        if old_ticket:
+            permits[old_ticket] = desk
     heard: Optional[claude_voice.ClaudeTurn] = None
     try:
         heard = claude_voice.ClaudeTurn(ask["resume"] or str(uuid.uuid4()))
@@ -681,7 +729,8 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                                      permit={"url": _permit_url(cfg), "ticket": desk.ticket} if desk else None,
                                      replace=bool(ask.get("system_replace")),
                                      mode=ask.get("mode"), own_tools="mode" not in ask,
-                                     cwd=ask.get("cwd") or "", fork=bool(ask.get("fork")))
+                                     cwd=ask.get("cwd") or "", fork=bool(ask.get("fork")),
+                                     on_wake=waker(cfg, store, turn.session, turn.seat) if turn.session else None)
         async for event in (_with_asks(spoken, desk) if desk else spoken):
             # A seat of a room with nothing to add says so (room.passed): it
             # has heard the round, and nothing of its goes in the chat. Judged
@@ -745,6 +794,8 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
         busy.discard(turn.session)
         if desk is not None:
             permits.pop(desk.ticket, None)
+            if old_ticket:
+                permits.pop(old_ticket, None)
             desk.close("the turn ended before anyone answered")
 
 
@@ -794,6 +845,14 @@ async def room_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
         answered.append(name)
         if halted:
             yield {"type": "round", "seats": answered, "volleys": volleys, "stopped": True}
+            return
+        # The person has something to say and asked for it to go when this
+        # seat was done (POST .../stop {after: seat}): the seats still due are
+        # not asked, and whoever this seat called on is not called. Only once
+        # the person's first message is in the chat - it is written with the
+        # first seat to come back, and a round cut before that would lose it.
+        if turn.cut and written and queue:
+            yield {"type": "round", "seats": answered, "volleys": volleys, "cut": True, "not_asked": list(queue)}
             return
         if not (said and limit):
             continue
@@ -1077,6 +1136,9 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             log.info("update checking unavailable (%s)", exc)
 
         yield
+        # Anything a conversation had left running goes with us: a process
+        # nobody is reading would run on, unseen, with no one to tell.
+        claude_voice.stop_all_parked()
         await app.state.client.aclose()
 
     app = FastAPI(title="SerenSymposium", version=APP_VERSION, lifespan=lifespan)
@@ -1135,6 +1197,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             "confirm_destructive": cfg.ui.confirm_destructive,
             "queue": cfg.ui.queue,
             "translate": cfg.ui.translate,
+            "interrupt": cfg.ui.interrupt,
             "updates": await updates_payload(
                 getattr(request.app.state, "updates", None),
                 distribution="seren-symposium", installed=APP_VERSION),
@@ -1278,7 +1341,9 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             # A room: the round is one LiveTurn, holding the chat from the
             # first seat to the last (seren_symposium.room).
             source = room_answer(cfg, store, turn, request.app.state.permits)
-            return _ndjson(LiveTurn.begin(request, turn.session, source, asked_of(turn)).follow())
+            live = LiveTurn.begin(request, turn.session, source, asked_of(turn))
+            live.round = turn                           # so the round can be told to end with the seat speaking
+            return _ndjson(live.follow())
         if turn.claude is not None:
             # A set of its own: see /api/chat.
             source = claude_answer(cfg, store, turn, set(), request.app.state.permits)
@@ -1352,7 +1417,26 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
                    if s.get("seats") else {}),
                 "answering": sid in request.app.state.answering,
                 "pending": live.asked if live is not None else None,
-                "started": live.started if live is not None else None}
+                "started": live.started if live is not None else None,
+                # what its conversations left running behind an answer (claude.background)
+                "background": background_of(s)}
+
+    @app.post("/api/sessions/{sid}/background/stop")
+    async def sessions_background_stop(request: Request, sid: str):
+        """End what this chat's conversations have running in the background
+        ({seat?}: only that seat's; a chat's one voice is seat null). The
+        task is killed with the process that held it, and nobody is woken."""
+        s = request.app.state.sessions.get(sid)
+        if s is None:
+            return JSONResponse({"error": "no such session"}, status_code=404)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        only = body.get("seat") if isinstance(body, dict) and "seat" in body else ...
+        stopped = [b["seat"] for b in background_of(s)
+                   if (only is ... or b["seat"] == only) and claude_voice.stop_parked(b["conversation"])]
+        return {"ok": True, "stopped": stopped, "background": background_of(s)}
 
     @app.get("/api/sessions/{sid}/live")
     async def sessions_live(request: Request, sid: str):
@@ -1367,11 +1451,25 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
     @app.post("/api/sessions/{sid}/stop")
     async def sessions_stop(request: Request, sid: str):
         """Stop the turn running in this chat. What it had already kept stays
-        (in a room: every seat that had come back); the answer in mid-air is
-        lost. 404 when nothing is answering."""
+        (in a room: every seat that had come back), and a claude answer in
+        mid-air is kept as far as it got. 404 when nothing is answering.
+
+        {after: "seat"}: nobody is cut off - a room's round ends when the seat
+        speaking is done, and the seats still due are not asked. In a chat
+        with one voice there is no round to cut, so the answer just finishes
+        (the reply says which: `after` is "seat" or "answer")."""
         live = request.app.state.live.get(sid)
         if live is None:
             return JSONResponse({"error": "nothing is answering in this chat"}, status_code=404)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        if isinstance(body, dict) and body.get("after") == "seat":
+            round_ = getattr(live, "round", None)
+            if round_ is not None:
+                round_.cut = True
+            return {"ok": True, "after": "seat" if round_ is not None else "answer"}
         live.stop()
         return {"ok": True}
 
@@ -1404,14 +1502,19 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             return JSONResponse({"error": "no such session"}, status_code=404)
         freed = [h["claude"]["session"] for h in [s, *(s.get("seats") or [])]
                  if isinstance(h.get("claude"), dict) and h["claude"].get("session")]
+        for conversation in freed:                  # nothing of this chat's is left running behind it
+            claude_voice.stop_parked(conversation)
         return {"ok": True, "conversations": freed, "kept": str(store.root / "removed")}
 
     @app.delete("/api/sessions/{sid}")
     async def sessions_delete(request: Request, sid: str):
         if sid in request.app.state.answering:
             return _busy()
+        gone = request.app.state.sessions.get(sid)
         if not request.app.state.sessions.delete(sid):
             return JSONResponse({"error": "no such session"}, status_code=404)
+        for b in background_of(gone or {}):         # nothing of this chat's is left running behind it
+            claude_voice.stop_parked(b["conversation"])
         return {"ok": True}
 
     # ── What the window sets: the app's settings, the projects ──────────
@@ -1945,11 +2048,16 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         return JSONResponse(entry, status_code=201)
 
     @app.get("/api/sessions/{sid}/files/{name}")
-    async def files_get(request: Request, sid: str, name: str):
+    async def files_get(request: Request, sid: str, name: str, download: int = 0):
+        """A stored file. `?download=1` hands it over to be saved, under the
+        name it came with (20 Nov 2026: Chad could see the txt Wren sent and
+        not keep it - a file in a chat has to be one you can take away)."""
         path = request.app.state.sessions.file_path(sid, name)
         if path is None:
             return JSONResponse({"error": "no such file"}, status_code=404)
         media, headers = attachments.serve_headers(attachments.guess_type(name, attachments.head(path)))
+        if download:
+            headers = {**headers, "Content-Disposition": attachments.save_as(name)}
         return FileResponse(path, media_type=media, headers=headers)
 
     @app.get("/api/sessions/{sid}/files/{name}/settings")

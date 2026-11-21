@@ -151,6 +151,14 @@ def serve_headers(entry_type: str) -> tuple[str, dict[str, str]]:
     return "application/octet-stream", {**headers, "Content-Disposition": "attachment"}
 
 
+def save_as(name: str) -> str:
+    """The Content-Disposition that saves a stored file under the name it came
+    with: the stored name less the 8-hex prefix that keeps it unique. A stored
+    name is already only [A-Za-z0-9._-], so it needs no quoting beyond this."""
+    plain = re.sub(r"^[0-9a-f]{8}-", "", name or "") or "file"
+    return f'attachment; filename="{plain}"'
+
+
 async def capture_images(answer: str, store: SessionStore, sid: str, max_bytes: int,
                          client: Optional[httpx.AsyncClient] = None) -> tuple[str, list[dict[str, Any]]]:
     """Images the answer shows from the web, saved into the chat; the answer
@@ -204,17 +212,39 @@ def keep_tool_images(images: list[dict[str, Any]], store: SessionStore, sid: str
     """Pictures a tool sent back as image content (make_image, drawn on
     another box), kept in the chat as the answer's files. Each is named for
     the file the tool says it saved, when it says one, so the copy here and
-    the one in the gallery match; else picture-<time>-<n>."""
+    the one in the gallery match; else picture-<time>-<n>.
+
+    Not a picture the turn only LOOKED at. Opening one of the chat's own
+    files (Read) sends it back as image content too, and every screenshot a
+    seat read was kept again as a new "picture" on its answer: drawn twice,
+    handed to the other seats twice, two copies in the folder (18 Nov 2026,
+    the first tangle on 5.7.0 - the Workbench seat hashed the folder and found
+    the pairs). So: not one read out of this chat's folder, and not one whose
+    bytes the chat already has. A picture read from anywhere else is still
+    kept - the chat had not seen it."""
     said: dict[Any, list[str]] = {}
+    read_here: set[Any] = set()
+    folder = store.files_dir(sid)
+    here = str(folder).replace("\\", "/").lower() if folder is not None else ""
     for s in steps or []:
         if s.get("kind") == "tool" and s.get("result"):
             said[s.get("id")] = _SAVED_NAME.findall(s["result"])
+        if s.get("kind") == "tool" and s.get("tool") == "Read" and here \
+                and here in str(s.get("summary") or "").replace("\\", "/").lower():
+            read_here.add(s.get("id"))
+    have: dict[int, list[Path]] = {}                     # the chat's files by size, to tell a copy cheaply
+    if folder is not None and folder.is_dir():
+        for p in folder.iterdir():
+            if p.is_file():
+                have.setdefault(p.stat().st_size, []).append(p)
     used: dict[Any, int] = {}
     out = []
     for i, im in enumerate(images):
         data = im.get("data") or b""
         kind = sniff_image(data)
         if not kind or len(data) > max_bytes:
+            continue
+        if im.get("tool_use_id") in read_here or any(p.read_bytes() == data for p in have.get(len(data), [])):
             continue
         n = used.get(im.get("tool_use_id"), 0)
         used[im.get("tool_use_id")] = n + 1

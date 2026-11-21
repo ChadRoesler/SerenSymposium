@@ -98,6 +98,15 @@ def wanted(answer: str, files: list[dict[str, Any]]) -> Optional[tuple[str, str,
     for f in files:
         if base and base in (f.get("orig"), f.get("name")):
             return ref, f["name"], everywhere
+    # The same picture under another extension. make_image says it saved
+    # `…-my-avatar.png` and sends back a JPEG of it, which the chat keeps as
+    # `…-my-avatar.jpg`: the name a seat was given never matched the file the
+    # chat had (18 Nov 2026, the first tangle on 5.7.0 - three seats drew a
+    # face, wrote the name they were told, and Chad had to put each on by hand).
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    for f in files:
+        if stem and stem in {str(n).rsplit(".", 1)[0] for n in (f.get("orig"), f.get("name")) if n}:
+            return ref, f["name"], everywhere
     return None
 
 

@@ -155,6 +155,8 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                #    to translate (its chat), plan and draw, and reads its gallery;
                #    what is kept lands beside the chat (seren_symposium.pictures)
                "/api/pictures/options", "/api/pictures/translate", "/api/pictures/plan", "/api/pictures/draw",
+               # -> nothing: ends a process this Symposium itself set aside (claude.background)
+               "/api/sessions/{sid}/background/stop",
                "/api/pictures/gallery", "/api/pictures/gallery/{node}/{day}", "/api/pictures/gallery/{node}/{day}/{name}",
                # -> the renderer we ship
                "/vendor",

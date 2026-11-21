@@ -16,6 +16,8 @@ laid over the yaml when Symposium starts:
     ui.confirm_destructive  ask before a delete or a rewind
     ui.queue                how what you sent mid-answer goes afterwards:
                             meld, each or hold (every chat's default)
+    ui.interrupt            when what you sent mid-answer goes: round, seat
+                            or now (every chat's default)
     ui.translate            what a picture's translate is drafted from:
                             plain, chat or fork (every chat's default)
     claude.permission_mode  how the claude voice is asked about tools,
@@ -59,7 +61,7 @@ PROJECT_FIELDS = ("voice", "system_prompt", "model", "temperature", "max_tokens"
                   "permission_mode", "allowed_tools", "tools_inherit")
 APP_FIELDS = {"you": ("ui", "you"), "claude_name": ("claude", "name"),
               "confirm_destructive": ("ui", "confirm_destructive"),
-              "queue": ("ui", "queue"), "translate": ("ui", "translate"),
+              "queue": ("ui", "queue"), "translate": ("ui", "translate"), "interrupt": ("ui", "interrupt"),
               "claude_mode": ("claude", "permission_mode"), "claude_ask": ("claude", "ask"),
               "claude_tools": ("claude", "allowed_tools"), "claude_dirs": ("claude", "add_dirs")}
 # Not bypassPermissions: a window that can switch every check off with one
@@ -70,6 +72,8 @@ MODES = WINDOW_MODES
 QUEUE_MODES = ("meld", "each", "hold")
 # What a picture's translate is drafted from (config.UiConfig.translate).
 TRANSLATE_MODES = ("plain", "chat", "fork")
+# When what was sent mid-answer goes (config.UiConfig.interrupt).
+INTERRUPT_MODES = ("round", "seat", "now")
 MAX_RULES = 200
 
 
@@ -183,6 +187,10 @@ class Prefs:
         if key == "queue":
             if value not in QUEUE_MODES:
                 raise Invalid(f"queue is one of: {', '.join(QUEUE_MODES)}")
+            return value
+        if key == "interrupt":
+            if value not in INTERRUPT_MODES:
+                raise Invalid(f"interrupt is one of: {', '.join(INTERRUPT_MODES)}")
             return value
         if key == "translate":
             if value not in TRANSLATE_MODES:

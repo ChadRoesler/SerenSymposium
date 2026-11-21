@@ -68,7 +68,50 @@ import re
 from typing import Any, Iterable, Optional
 
 NAME = re.compile(r"^[\w·.-]{1,32}$")
-_MENTION = re.compile(r"(?<![\w@])@([\w·.-]{1,32})(!?)")
+# Not after a letter (an email address) or a slash (a link's path,
+# https://x.com/@name - workbench found that one calling, 20 Nov 2026).
+_MENTION = re.compile(r"(?<![\w@/])@([\w·.-]{1,32})(!?)")
+# Code - a fenced block or an inline span - is quoted, not said: an @name in it
+# calls nobody. 20 Nov 2026: workbench reported a test as `@starwright hi`, and
+# starwright was dragged back into a round that was over. Found the rule the
+# way Markdown has it (CommonMark), not a pattern: the first try knew only
+# single backticks, and starwright showed a double-backtick span, a ~~~ fence
+# and a four-backtick fence around three all still calling.
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_TICKS = re.compile(r"`+")
+
+
+def unquoted(text: str) -> str:
+    """`text` with its code taken out, so what is left is only what was said.
+
+    A fence is three or more backticks or tildes at the start of a line, and
+    runs to a line of at least as many of the same character and nothing
+    else - or to the end, unclosed. An inline span opens with a run of N
+    backticks and closes at the next run of exactly N; a run with no match
+    is only backticks, and stays."""
+    lines, fence = [], ""
+    for line in (text or "").split("\n"):
+        m = _FENCE.match(line)
+        if fence:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not line.strip().strip(fence[0]):
+                fence = ""
+            lines.append("")
+        elif m and not (m.group(1)[0] == "`" and "`" in line[m.end():]):
+            fence = m.group(1)
+            lines.append("")
+        else:
+            lines.append(line)
+    text, out, at = "\n".join(lines), [], 0
+    while (run := _TICKS.search(text, at)) is not None:
+        n = len(run.group(0))
+        close = next((c for c in _TICKS.finditer(text, run.end()) if len(c.group(0)) == n), None)
+        if close is None:
+            out.append(text[at:run.end()])          # no span: just backticks
+            at = run.end()
+            continue
+        out.append(text[at:run.start()] + " ")
+        at = close.end()
+    return "".join(out) + text[at:]
 # A seat's colour in the window, as a hue: given when it sits down (the first
 # one free), kept through a rename or a change of seating order.
 HUES = (330, 200, 140, 35, 270, 175, 10, 95)
@@ -117,7 +160,7 @@ def mentioned(names: list[str], prompt: str) -> tuple[list[str], bool]:
     was named with a `!` (@name!: only the ones named answer)."""
     picked: list[str] = []
     only = False
-    for word, bang in _MENTION.findall(prompt or ""):
+    for word, bang in _MENTION.findall(unquoted(prompt or "")):
         name = _named(names, word)
         if name is None:
             continue
