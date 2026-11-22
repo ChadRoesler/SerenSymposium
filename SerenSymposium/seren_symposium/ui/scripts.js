@@ -338,12 +338,23 @@ function drawSide() {
          + (bits ? `<span class="hint">${esc(bits)}</span>` : "")
          + `<button data-new="${esc(name)}" title="new chat in ${esc(name || "chats")}">+</button></div>`
          + (open ? (rows.join("") || (put.length ? "" : `<div class="sess empty">nothing yet</div>`)) + pile : "");
-  }).join("") + `<div class="loose-drop" data-folder="">drop here to take it out of its project</div>`
-              + `<div class="foot"><button class="ghost" data-project="1">+ project</button>`
-              + `<button class="ghost" data-import="1">import…</button>`
-              + (CFG?.claude?.available ? `<button class="ghost" data-pickup="1" title="carry on a conversation a terminal started">pick up…</button>` : "")
-              + `</div>`;
+  }).join("") + `<div class="loose-drop" data-folder="">drop here to take it out of its project</div>`;
 }
+
+// A kebab (⋮) opens its menu under itself, right edges lined up.
+function kebab(btn, items) {
+  const r = btn.getBoundingClientRect();
+  openMenu(r.right, r.bottom + 4, items);
+  const m = $("#menu");
+  m.style.left = `${Math.max(6, r.right - m.offsetWidth)}px`;
+}
+// The projects bar's: what used to sit at its foot.
+$("#side-more").onclick = e => {
+  e.stopPropagation();
+  kebab(e.currentTarget, [["New project…", () => openNewProject()],
+                          ["Import a chat…", () => $("#importer").click()],
+                          ...(CFG?.claude?.available ? [["Pick up from a terminal…", () => openPickup()]] : [])]);
+};
 
 async function setArchived(id, on) {
   try {
@@ -439,9 +450,6 @@ $("#side").onclick = async e => {
     FOLDED.has(name) ? FOLDED.delete(name) : FOLDED.add(name);
     keep("symposium.folded", [...FOLDED]); return drawSide();
   }
-  if (e.target.closest("[data-project]")) return openNewProject();
-  if (e.target.closest("[data-import]")) $("#importer").click();
-  if (e.target.closest("[data-pickup]")) openPickup();
 };
 
 // ── Pick up a terminal's conversation ──────────────────────────────────
@@ -1357,14 +1365,14 @@ async function copyText(text, btn, back) {
 }
 
 // The whole chat as text: who said it, what they said, what came with it.
-$("#copy-all").onclick = () => {
+function copyAll() {
   if (!current) return;
   const text = current.messages.map(m => {
     const files = (m.files || []).map(f => `[${isScreen(f) ? "screen share" : "attached"}: ${f.orig || f.name}]`);
     return [`${whoName(m)}:`, m.content, ...files].filter(Boolean).join("\n");
   }).join("\n\n");
-  copyText(text, $("#copy-all"), "Copy all");
-};
+  copyText(text, $("#chat-more"), "⋮");
+}
 
 // Is this file a picture the words already show - `![…](files/name)`? Only
 // that counts as shown: a plain link to it still leaves its chip, or the one
@@ -2210,8 +2218,7 @@ $("#title").addEventListener("keydown", e => {
 // project's settings one click away without leaving the chat.
 function drawTitlebar() {
   const fresh = !current;
-  for (const id of ["#rename", "#copy-all", "#archive", "#remove", "#del"]) $(id).hidden = fresh;
-  $("#archive").textContent = current?.archived ? "Unarchive" : "Archive";
+  for (const id of ["#rename", "#chat-more"]) $(id).hidden = fresh;
   if (fresh) { setRenaming(false); $("#title").value = DRAFT.title || ""; $("#title").placeholder = "new chat"; }
   else $("#title").placeholder = "untitled";
   const where = current ? current.folder : folder, preset = presetFor(where);
@@ -2224,15 +2231,19 @@ function drawTitlebar() {
 $("#chat-project").onclick = () => {
   const where = current ? current.folder : folder;
   if (where) return openProjectSheet(where);
-  drawChatSettings(); $("#chat-settings").showModal();
+  openChatSheet("chat");
 };
 
-$("#archive").onclick = () => { if (current) setArchived(current.id, !current.archived); };
-$("#remove").onclick = () => { if (current) removeChat(current.id); };
-$("#del").onclick = async () => {
-  if (!sure(`Delete "${current.title || "untitled"}" and its files? This can't be undone.`)) return;
-  try { await call("DELETE", `/api/sessions/${current.id}`); } catch (ex) { return alert(ex.message); }
-  newChatIn(current.folder); await refresh();
+// The title bar's kebab: what a chat can have done to it, the drastic ones last.
+$("#chat-more").onclick = e => {
+  e.stopPropagation();
+  if (!current) return;
+  const id = current.id;
+  kebab(e.currentTarget, [["Copy all, as text", () => copyAll()],
+                          ["Export as JSON", () => exportChat()],
+                          [current.archived ? "Bring back from the archive" : "Archive", () => setArchived(id, !current.archived)],
+                          ["Remove (nothing deleted)", () => removeChat(id)],
+                          ["Delete", () => deleteChat(id), "danger"]]);
 };
 
 // ── Files panel: everything this chat carried, newest first ─────────────
@@ -2672,11 +2683,40 @@ function drawChatSettings() {
     ? " Claude takes no temperature, max tokens or repeat penalty; its model is an alias (opus, sonnet, haiku) or an exact id."
     : " Temperature, max tokens and repeat penalty are for local models; Claude keeps its own.")
     + (current ? "" : " This chat is kept, with these, once its first answer comes back.");
-  $("#export").hidden = !current;
+  // Claude's tab is the claude voice's, the sampling numbers a local model's.
+  $('#cs-tabs [data-tab="claude"]').hidden = !claude;
+  $('#cs-tabs [data-tab="local"]').hidden = claude;
+  if ($(`#cs-tabs [data-tab="${CS_TAB}"]`).hidden) csTab("chat"); else csTab(CS_TAB, false);
 }
-$("#chat-gear").onclick = () => { drawChatSettings(); $("#chat-settings").showModal(); };
-$("#chat-stack").onclick = () => openStack();
-$("#s-stack").onclick = () => { $("#chat-settings").close(); openStack(); };
+// Which tab of the chat's sheet is showing. The stack's body is one element
+// (#st-body) with its handlers on it: it moves into the Stack tab for a chat,
+// and back into its own sheet for a project's stack.
+let CS_TAB = "chat";
+function csTab(name, fresh = true) {
+  CS_TAB = name;
+  document.querySelectorAll("#cs-tabs [data-tab]").forEach(b => {
+    b.classList.toggle("on", b.dataset.tab === name); b.setAttribute("aria-selected", b.dataset.tab === name);
+  });
+  document.querySelectorAll("#set-chat-form .cs-pane").forEach(p => { p.hidden = p.dataset.pane !== name; });
+  $("#s-note").hidden = name === "stack" || name === "room";
+  $("#chat-settings").classList.toggle("wide", name === "stack");
+  if (name === "stack" && fresh) {
+    STACK_FOR = null; STACK_SEAT = "";
+    $("#cs-stack").append($("#st-body"));
+    $("#st-body").innerHTML = `<p class="muted">Looking…</p>`;
+    drawStack();
+  }
+}
+function openChatSheet(tab = "chat") {
+  CS_TAB = tab;
+  drawChatSettings();
+  if (tab === "stack") csTab("stack");                    // drawn fresh, for the chat open now
+  if (!$("#chat-settings").open) $("#chat-settings").showModal();
+}
+$("#cs-tabs").addEventListener("click", e => { const b = e.target.closest("[data-tab]"); if (b) csTab(b.dataset.tab); });
+$("#cs-st-refresh").onclick = () => drawStack();
+$("#chat-gear").onclick = () => openChatSheet("chat");
+$("#chat-stack").onclick = () => openChatSheet("stack");
 $("#chat-settings").addEventListener("click", e => { if (e.target === $("#chat-settings")) $("#chat-settings").close(); });
 
 // One setting of the open chat changed: kept in DRAFT before the chat exists,
@@ -2983,14 +3023,14 @@ $("#ps-body").addEventListener("click", async e => {
   }
 });
 
-$("#export").onclick = () => {
+function exportChat() {
+  if (!current) return;
   const blob = new Blob([JSON.stringify(current, null, 1)], { type: "application/json" });
   const a = Object.assign(document.createElement("a"), {
     href: URL.createObjectURL(blob),
     download: `${(current.title || "session").replace(/[^\w.-]+/g, "_").slice(0, 60)}.json` });
   a.click(); URL.revokeObjectURL(a.href);
-};
-$("#import").onclick = () => $("#importer").click();
+}
 $("#importer").onchange = async () => {
   const file = $("#importer").files[0]; $("#importer").value = "";
   if (!file) return;
@@ -3491,8 +3531,10 @@ const chips = list => list?.length ? `<div class="st-chips">${list.map(x => `<sp
 // A room has a stack per seat: which one the sheet is showing ("" = the first).
 let STACK_SEAT = "";
 async function openStack(project) {
-  STACK_FOR = project != null ? project : null;
+  if (project == null) return openChatSheet("stack");      // a chat's stack is a tab of its sheet
+  STACK_FOR = project;
   STACK_SEAT = "";
+  $("#stack-sheet").append($("#st-body"));
   $("#st-body").innerHTML = `<p class="muted">Looking…</p>`;
   if (!$("#stack-sheet").open) $("#stack-sheet").showModal();
   await drawStack();
@@ -3514,6 +3556,7 @@ async function drawStack() {
   $("#st-title").textContent = STACK_FOR != null ? `What chats in ${STACK_FOR} start with`
     : st.seat ? `What ${seatWho(st.seat)} is given`
     : `What ${current?.title ? `“${current.title}”` : "this chat"} is given`;
+  $("#cs-stack-title").textContent = $("#st-title").textContent;
   const sized = st.layers.filter(l => l.chars && !["off", "replaced", "unknown"].includes(l.state));
   const bar = st.total_chars ? sized.map(l =>
     `<span class="g-${l.group}" style="flex:${l.chars}" title="${esc(l.title)}: ${esc(stackChars(l.chars))}"></span>`).join("") : "";
@@ -3574,7 +3617,10 @@ $("#st-body").addEventListener("click", e => {
   const b = e.target.closest("[data-edit]");
   if (!b) return;
   e.preventDefault();
-  $("#stack-sheet").close();
-  if (b.dataset.edit === "project") return openProjectSheet(STACK_FOR ?? (current ? current.folder : folder));
-  drawChatSettings(); $("#chat-settings").showModal(); $("#s-system_prompt").focus();
+  if ($("#stack-sheet").open) $("#stack-sheet").close();
+  if (b.dataset.edit === "project") {
+    if ($("#chat-settings").open) $("#chat-settings").close();
+    return openProjectSheet(STACK_FOR ?? (current ? current.folder : folder));
+  }
+  openChatSheet("chat"); $("#s-system_prompt").focus();
 });

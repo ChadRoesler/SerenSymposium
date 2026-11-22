@@ -659,3 +659,16 @@ form#composer { position: relative; }
 .pics-fold > summary:hover { color: var(--text); border-color: var(--accent); }
 .pics-fold > summary span { color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .pics-fold[open] > summary { border-style: solid; }
+
+/* ── 21 Nov 2026: the chat's sheet in tabs, kebabs for the rest (body.html, #chat-settings) ── */
+.cs-tabs { margin: 0 12px 0 16px; }
+.sheet-head .cs-tabs button { margin-left: 0; padding: 4px 12px; font-size: 12.5px; }
+.cs-tabs button[hidden] { display: none; }
+#chat-settings .cs-pane { min-height: 260px; align-content: start; }
+#chat-settings .cs-pane[hidden], #s-note[hidden] { display: none !important; }
+#chat-settings #s-note { margin: 14px 0 0 144px; }
+.cs-stack-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.cs-stack-head span { margin-right: auto; font-size: 12.5px; }
+.kebab { font-size: 17px; line-height: 1; padding: 3px 9px; font-weight: 700; }
+.side-search { display: flex; gap: 4px; align-items: center; }
+.side-search input { flex: 1; min-width: 0; }
