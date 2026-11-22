@@ -17,7 +17,7 @@ async function call(method, path, body) {
   return j;
 }
 
-const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty", "cwd", "queue", "interrupt"];
+const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty", "cwd", "queue", "interrupt", "pictures"];
 const NUMBER = new Set(["temperature", "max_tokens", "repeat_penalty"]);
 // A chat's settings sit on top of its project's; the project calls one of
 // them by a shorter name.
@@ -119,6 +119,15 @@ const interruptLabels = () => current?.seats?.length
   ? { round: "after the round", seat: "after this seat", now: "stop and send now" }
   : { round: "after this answer", now: "stop and send now" };
 let WHEN_ONCE = null;
+// How a message's pictures sit in the log (21 Nov 2026, Chad: "file
+// collapse/display for pictures for skimming"): this chat's own, else every
+// chat's, else strip.
+const PICTURE_NAMES = { strip: "side by side when there are several", full: "each at full size",
+                        folded: "folded to one line per message" };
+const picturesMode = () => {
+  const own = current ? current.settings?.pictures : DRAFT.settings.pictures;
+  return PICTURE_NAMES[own] ? own : PICTURE_NAMES[CFG?.pictures] ? CFG.pictures : "strip";
+};
 const interruptMode = () => {
   const own = current ? current.settings?.interrupt : DRAFT.settings.interrupt;
   const usual = INTERRUPT_NAMES[own] ? own : INTERRUPT_NAMES[CFG?.interrupt] ? CFG.interrupt : "round";
@@ -291,27 +300,44 @@ async function ensureSession() {
 
 const presetFor = name => CFG.folders.find(f => f.name === name) || {};
 
+// One chat's row in the bar.
+function sessRow(s, name) {
+  const here = current && s.id === current.id;
+  return `<div class="sess${s.archived ? " archived" : ""}" draggable="true" data-s="${esc(s.id)}" data-folder="${esc(name)}" aria-current="${here}"
+               title="${esc(s.title || "untitled")} · ${s.count} messages${s.archived ? " · archived" : ""}">${icon(here ? "kylix-full" : "kylix")}<span>${esc(s.title || "untitled")}</span>`
+       + (ANSWERING.has(s.id) ? `<i class="live-dot" title="an answer is coming"></i>` : "")
+       + (s.sources?.length ? `<i class="fed-dot" title="a plugin speaks in this chat: ${esc(s.sources.join(", "))}"></i>` : "")
+       + `</div>`;
+}
+
+// Each project's archived chats, folded into one line under the live ones
+// (21 Nov 2026, Chad: "archival, or just hiding from main project area").
+// Which piles are open is this window's, for now; the open chat's pile
+// opens with it, so an archived chat you are reading is never hidden.
+const ARCH_OPEN = new Set();
+
 function drawSide() {
   // into the list, not the bar: the bar's fold button is the page's, not redrawn
+  if (SEARCH.q) return drawHits();
   $("#side-list").innerHTML = folderNames().map(name => {
     const f = presetFor(name);
     const bits = [f.voice === "claude" ? voiceName("claude") : null, f.model,
                   f.voice !== "claude" && f.temperature != null ? `t=${f.temperature}` : null].filter(Boolean).join(" · ");
     const chats = SESSIONS.filter(s => s.folder === name);
+    const live = chats.filter(s => !s.archived), put = chats.filter(s => s.archived);
     const open = !FOLDED.has(name) || (current && current.folder === name);
-    const rows = open ? chats.map(s => {
-      const here = current && s.id === current.id;
-      return `<div class="sess" draggable="true" data-s="${esc(s.id)}" data-folder="${esc(name)}" aria-current="${here}"
-                   title="${esc(s.title || "untitled")} · ${s.count} messages">${icon(here ? "kylix-full" : "kylix")}<span>${esc(s.title || "untitled")}</span>`
-           + (ANSWERING.has(s.id) ? `<i class="live-dot" title="an answer is coming"></i>` : "")
-           + (s.sources?.length ? `<i class="fed-dot" title="a plugin speaks in this chat: ${esc(s.sources.join(", "))}"></i>` : "")
-           + `</div>`;
-    }) : [];
+    const pileOpen = ARCH_OPEN.has(name) || put.some(s => s.id === current?.id);
+    const rows = open ? live.map(s => sessRow(s, name)) : [];
+    const pile = open && put.length
+      ? `<div class="arch-pile" data-pile="${esc(name)}" aria-expanded="${pileOpen}" title="${pileOpen ? "fold the archived chats" : "show the archived chats"}">`
+        + `<span class="seren-chev" aria-hidden="true"></span>archived (${put.length})</div>`
+        + (pileOpen ? put.map(s => sessRow(s, name)).join("") : "")
+      : "";
     return `<div class="folder" data-folder="${esc(name)}"><span class="name" data-fold="${esc(name)}" title="${open ? "fold" : "unfold"}">`
          + `${icon(open ? "krater-full" : "krater")}<span>${esc(name || "chats")}</span></span>`
          + (bits ? `<span class="hint">${esc(bits)}</span>` : "")
          + `<button data-new="${esc(name)}" title="new chat in ${esc(name || "chats")}">+</button></div>`
-         + (open ? (rows.join("") || `<div class="sess empty">nothing yet</div>`) : "");
+         + (open ? (rows.join("") || (put.length ? "" : `<div class="sess empty">nothing yet</div>`)) + pile : "");
   }).join("") + `<div class="loose-drop" data-folder="">drop here to take it out of its project</div>`
               + `<div class="foot"><button class="ghost" data-project="1">+ project</button>`
               + `<button class="ghost" data-import="1">import…</button>`
@@ -319,7 +345,90 @@ function drawSide() {
               + `</div>`;
 }
 
+async function setArchived(id, on) {
+  try {
+    const s = await call("PATCH", `/api/sessions/${id}`, { archived: on });
+    if (current?.id === id) { current = { ...current, archived: s.archived }; drawTitlebar(); }
+  } catch (ex) { return alert(ex.message); }
+  await refresh();
+}
+
+// ── Search every chat ───────────────────────────────────────────────────
+// What is typed in the bar's box, and what came back for it. The server reads
+// every chat, archived ones too; a reply that lands after newer words were
+// typed is dropped.
+const SEARCH = { q: "", hits: [], asked: 0, timer: 0, pending: false };
+const searchTerms = q => q.toLowerCase().split(/\s+/).filter(Boolean);
+function hiliteTerms(text, terms) {
+  let out = esc(text);
+  for (const w of terms) out = out.replace(new RegExp(escRe(esc(w)), "gi"), m => `<mark>${m}</mark>`);
+  return out;
+}
+function drawHits() {
+  const terms = searchTerms(SEARCH.q);
+  if (!SEARCH.hits.length) {
+    $("#side-list").innerHTML = `<div class="side-none">${SEARCH.pending ? "looking…" : `nothing says “${esc(SEARCH.q)}”`}</div>`;
+    return;
+  }
+  $("#side-list").innerHTML = SEARCH.hits.map(h => {
+    const here = current && h.id === current.id;
+    const snips = h.matches.map(m => {
+      const who = m.role === "user" ? "you" : (m.seat || voiceName("claude"));
+      return `<span class="snip" data-hit="${esc(h.id)}" data-at="${m.index}"><b>${esc(who)}:</b> ${hiliteTerms(m.snippet, terms)}</span>`;
+    }).join("");
+    const more = h.hits > h.matches.length ? `<div class="more">and ${h.hits - h.matches.length} more in this chat</div>` : "";
+    return `<div class="hit" data-hit="${esc(h.id)}" aria-current="${here}" title="${esc(h.title || "untitled")}${h.archived ? " · archived" : ""}">`
+         + `<div class="hit-head"><span class="hit-title">${h.title_hit ? hiliteTerms(h.title || "untitled", terms) : esc(h.title || "untitled")}</span>`
+         + `<span class="hit-where">${esc(h.folder || "chats")}${h.archived ? " · archived" : ""}</span></div>`
+         + snips + more + `</div>`;
+  }).join("");
+}
+async function runSearch() {
+  const q = SEARCH.q, n = ++SEARCH.asked;
+  if (!q) { SEARCH.hits = []; SEARCH.pending = false; return drawSide(); }
+  SEARCH.pending = true; if (!SEARCH.hits.length) drawHits();
+  let got;
+  try { got = await call("GET", `/api/sessions/search?q=${encodeURIComponent(q)}`); }
+  catch (ex) {
+    if (n === SEARCH.asked) $("#side-list").innerHTML = `<div class="side-none">could not search: ${esc(ex.message)}</div>`;
+    return;
+  }
+  if (n !== SEARCH.asked) return;                  // newer words were typed meanwhile
+  SEARCH.pending = false; SEARCH.hits = got.sessions; drawHits();
+}
+$("#side-q").addEventListener("input", () => {
+  SEARCH.q = $("#side-q").value.trim();
+  clearTimeout(SEARCH.timer); SEARCH.timer = setTimeout(runSearch, SEARCH.q ? 180 : 0);
+});
+$("#side-q").addEventListener("keydown", e => {
+  if (e.key === "Escape") { e.preventDefault(); $("#side-q").value = ""; SEARCH.q = ""; runSearch(); $("#input").focus(); }
+  if (e.key === "Enter") { e.preventDefault(); $("#side-list .snip, #side-list .hit")?.click(); }
+});
+document.addEventListener("keydown", e => {
+  if (e.key.toLowerCase() === "k" && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+    e.preventDefault(); show("chat"); $("#side-q").focus(); $("#side-q").select();
+  }
+});
+
+// Open a chat at one of its messages, and point at it for a moment.
+async function openAt(id, index) {
+  await openSession(id);
+  const el = $(`#log .msg[data-i="${index}"]`);
+  if (!el) return;
+  const go = () => { pinned = false; el.scrollIntoView({ block: "center" }); };
+  go(); setTimeout(go, 250);                       // again once the pictures above it have taken their room
+  el.classList.add("found");
+  setTimeout(() => el.classList.add("fading"), 1600);
+  setTimeout(() => el.classList.remove("found", "fading"), 3000);
+}
+
 $("#side").onclick = async e => {
+  const snip = e.target.closest(".snip[data-hit]");
+  if (snip) return openAt(snip.dataset.hit, Number(snip.dataset.at));
+  const hit = e.target.closest(".hit[data-hit]");
+  if (hit) return openSession(hit.dataset.hit);
+  const pile = e.target.closest("[data-pile]");
+  if (pile) { const n = pile.dataset.pile; ARCH_OPEN.has(n) ? ARCH_OPEN.delete(n) : ARCH_OPEN.add(n); return drawSide(); }
   const row = e.target.closest("[data-s]");
   if (row) return openSession(row.dataset.s);
   const add = e.target.closest("[data-new]");
@@ -665,7 +774,9 @@ $("#side").addEventListener("contextmenu", e => {
   e.preventDefault();
   if (row) {
     const id = row.dataset.s;
+    const put = SESSIONS.find(x => x.id === id)?.archived;
     openMenu(e.clientX, e.clientY, [["Rename", () => editInPlace(row.querySelector("span"), t => renameChat(id, t))],
+                                    [put ? "Bring back from the archive" : "Archive", () => setArchived(id, !put)],
                                     ["Remove (nothing deleted)", () => removeChat(id)],
                                     ["Delete", () => deleteChat(id), "danger"]]);
   } else {
@@ -959,6 +1070,7 @@ function bubble(m, i, count, opts = {}) {
   }
   const atts = attachmentsEl(m.files, current?.id, m.content);
   if (atts) d.append(atts);
+  layoutPictures(d, picturesMode());
   if (!opts.bare) {
     const meta = document.createElement("div"); meta.className = "meta";
     const line = asked ? "" : receipt(m.meta);
@@ -967,6 +1079,58 @@ function bubble(m, i, count, opts = {}) {
     d.append(meta);
   }
   return d;
+}
+
+// ── Pictures in a message: full, strip or folded ────────────────────────
+// A paragraph that is nothing but pictures (how a burst is written:
+// ![a](..) ![b](..) ![c](..), each on its own line) is a run; consecutive ones
+// are one run. Three portraits in a row were three 360px walls (21 Nov 2026,
+// the over-the-frames burst). Strip puts a run of two or more side by side as
+// thumbs - one alone is art and stays full. Folded puts every run, and the
+// pictures a message carried, behind one line saying how many and what.
+const onlyPictures = p => p.tagName === "P" && p.querySelector("img")
+  && [...p.childNodes].every(n => n.nodeName === "IMG" || n.nodeName === "BR" || (n.nodeType === 3 && !n.textContent.trim()));
+function pictureRuns(md) {
+  const runs = []; let run = [];
+  for (const el of [...md.children]) {
+    if (onlyPictures(el)) { run.push(el); continue; }
+    if (run.length) runs.push(run);
+    run = [];
+  }
+  if (run.length) runs.push(run);
+  return runs.map(ps => ({ ps, imgs: ps.flatMap(p => [...p.querySelectorAll("img")]) }));
+}
+function foldOf(imgs, what = "") {
+  const names = imgs.map(i => i.alt || i.title || "").filter(Boolean);
+  const box = Object.assign(document.createElement("details"), { className: "pics-fold" });
+  box.innerHTML = `<summary>🖼 ${imgs.length} picture${imgs.length === 1 ? "" : "s"}${what}`
+                + (names.length ? `<span>${esc(names.join(" · "))}</span>` : "") + `</summary>`;
+  const strip = Object.assign(document.createElement("div"), { className: "pics strip" });
+  box.append(strip);
+  return [box, strip];
+}
+function layoutPictures(d, mode) {
+  if (mode === "full") return;
+  for (const md of d.querySelectorAll(".md")) {
+    for (const { ps, imgs } of pictureRuns(md)) {
+      if (mode === "strip" && imgs.length < 2) continue;
+      let holder, put;
+      if (mode === "folded") [holder, put] = foldOf(imgs);
+      else holder = put = Object.assign(document.createElement("div"), { className: "pics strip" });
+      ps[0].before(holder);
+      for (const img of imgs) { if (img.alt && !img.title) img.title = img.alt; put.append(img); }
+      ps.forEach(p => p.remove());
+    }
+  }
+  // What the message carried: its pictures go in the fold too, its other files stay out.
+  const atts = d.querySelector(":scope > .atts");
+  const carried = atts ? [...atts.querySelectorAll(":scope > .att.pic")] : [];
+  if (!carried.length) return;
+  if (mode === "folded") {
+    const [box, strip] = foldOf(carried.map(a => a.querySelector("img")), " carried");
+    atts.before(box); carried.forEach(a => strip.append(a));
+    if (!atts.children.length) atts.remove();
+  } else if (carried.length > 1) atts.classList.add("strip");
 }
 
 // ── Under the fold: how an answer got there ─────────────────────────────
@@ -1069,8 +1233,8 @@ function actionsEl(m, i, count) {
 }
 
 $("#log").addEventListener("click", async e => {
-  const img = e.target.closest(".md img, .atts img");
-  if (img) return lightbox(img.src);
+  const img = e.target.closest(".md img, .atts img, .pics-fold img");
+  if (img) { LB_LIST = [...$("#log").querySelectorAll(".md img, .atts img, .pics-fold img")].map(i => i.src); return lightbox(img.src); }
   const shot = e.target.closest("[data-shot]");
   if (shot) return lightbox(shot.dataset.shot);
   const copy = e.target.closest(".copy");
@@ -2046,7 +2210,8 @@ $("#title").addEventListener("keydown", e => {
 // project's settings one click away without leaving the chat.
 function drawTitlebar() {
   const fresh = !current;
-  for (const id of ["#rename", "#copy-all", "#remove", "#del"]) $(id).hidden = fresh;
+  for (const id of ["#rename", "#copy-all", "#archive", "#remove", "#del"]) $(id).hidden = fresh;
+  $("#archive").textContent = current?.archived ? "Unarchive" : "Archive";
   if (fresh) { setRenaming(false); $("#title").value = DRAFT.title || ""; $("#title").placeholder = "new chat"; }
   else $("#title").placeholder = "untitled";
   const where = current ? current.folder : folder, preset = presetFor(where);
@@ -2062,6 +2227,7 @@ $("#chat-project").onclick = () => {
   drawChatSettings(); $("#chat-settings").showModal();
 };
 
+$("#archive").onclick = () => { if (current) setArchived(current.id, !current.archived); };
 $("#remove").onclick = () => { if (current) removeChat(current.id); };
 $("#del").onclick = async () => {
   if (!sure(`Delete "${current.title || "untitled"}" and its files? This can't be undone.`)) return;
@@ -2137,6 +2303,14 @@ $("#shots").addEventListener("click", e => { const i = e.target.closest("[data-s
 // sampler, seed, size - from .../files/{name}/settings (24 Oct 2026). One
 // drawn before those were kept says so; your own attachments open bare.
 let LB_ASKED = 0;
+// The chat's pictures, in order, when one was opened from the log: <- and ->
+// go through them (folded ones too), so a burst is skimmed in the big view.
+let LB_LIST = [];
+function lightboxStep(by) {
+  const at = LB_LIST.indexOf($("#lightbox-img").src);
+  if (at < 0 || LB_LIST.length < 2) return;
+  lightbox(LB_LIST[(at + by + LB_LIST.length) % LB_LIST.length]);
+}
 function lightbox(src) {
   $("#lightbox-img").src = src; $("#lightbox").hidden = false;
   const made = $("#lightbox-made"), ask = ++LB_ASKED;
@@ -2183,7 +2357,7 @@ function madeHtml(got) {
     + `<button type="button" class="ghost" data-copy="all" title="every setting, as JSON">copy all</button></div>`;
 }
 const lightboxClose = () => {
-  LB_ASKED++;
+  LB_ASKED++; LB_LIST = [];
   $("#lightbox").hidden = true; $("#lightbox-img").removeAttribute("src");
   $("#lightbox-made").hidden = true; $("#lightbox").classList.remove("with-made");
 };
@@ -2196,7 +2370,11 @@ $("#lightbox").onclick = e => {
   try { d = JSON.parse(made.dataset.drawn || "null"); } catch {}
   if (d) copyText(b.dataset.copy === "prompt" ? d.prompt || "" : JSON.stringify(d, null, 1), b, b.textContent);
 };
-document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#lightbox").hidden) lightboxClose(); });
+document.addEventListener("keydown", e => {
+  if ($("#lightbox").hidden) return;
+  if (e.key === "Escape") lightboxClose();
+  if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); lightboxStep(e.key === "ArrowRight" ? 1 : -1); }
+});
 
 // ── The bars: projects on the left, the panels on the right ─────────────
 // Either folds to a strip so the chat gets the room (24 Oct 2026). Which are
@@ -2465,6 +2643,10 @@ function drawChatSettings() {
   $("#s-interrupt").innerHTML = `<option value="">every chat's (${esc(INTERRUPT_NAMES[usualWhen])})</option>`
     + Object.entries(INTERRUPT_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
   $("#s-interrupt").value = own.interrupt ?? "";
+  const usualPics = PICTURE_NAMES[CFG.pictures] ? CFG.pictures : "strip";
+  $("#s-pictures").innerHTML = `<option value="">every chat's (${esc(PICTURE_NAMES[usualPics])})</option>`
+    + Object.entries(PICTURE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+  $("#s-pictures").value = own.pictures ?? "";
   // The prompts add up (22 Oct 2026): its project's, then this chat's after it.
   const inherit = own.system_inherit !== false, theirs = String(preset.system_prompt || "").trim();
   $("#s-system_inherit").checked = inherit;
@@ -2504,7 +2686,7 @@ function setChatSetting(k, v) {
     if (v === null) delete DRAFT.settings[k]; else DRAFT.settings[k] = v;
     drawChatSettings(); lockComposer(); picDrawHow(); return drawLog();
   }
-  patch({ settings: { [k]: v } }).then(() => { drawChatSettings(); drawTitlebar(); lockComposer(); picDrawHow(); })
+  patch({ settings: { [k]: v } }).then(() => { drawChatSettings(); drawTitlebar(); lockComposer(); picDrawHow(); if (k === "pictures") drawLog(); })
     .catch(ex => { alert(ex.message); drawChatSettings(); });
 }
 $("#s-permission_mode").addEventListener("change", e => setChatSetting("permission_mode", e.target.value || null));
@@ -2565,6 +2747,8 @@ function drawSettings() {
   $("#a-queue").value = QUEUE_NAMES[CFG.queue] ? CFG.queue : "meld";
   $("#a-interrupt").innerHTML = Object.entries(INTERRUPT_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
   $("#a-interrupt").value = INTERRUPT_NAMES[CFG.interrupt] ? CFG.interrupt : "round";
+  $("#a-pictures").innerHTML = Object.entries(PICTURE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+  $("#a-pictures").value = PICTURE_NAMES[CFG.pictures] ? CFG.pictures : "strip";
   $("#a-translate").innerHTML = Object.entries(TRANSLATE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
   $("#a-translate").value = TRANSLATE_NAMES[CFG.translate] ? CFG.translate : "chat";
   $("#a-prefs-file").textContent = CFG.prefs_file || "";
@@ -2622,7 +2806,7 @@ for (const [box, key] of [["#c-tool-add", "claude_tools"], ["#c-dir-add", "claud
   });
 }
 
-for (const k of ["you", "claude_name", "confirm_destructive", "queue", "translate", "interrupt"]) {
+for (const k of ["you", "claude_name", "confirm_destructive", "queue", "translate", "interrupt", "pictures"]) {
   $(`#a-${k}`).addEventListener("change", async e => {
     const v = e.target.type === "checkbox" ? e.target.checked : e.target.value.trim();
     try { await call("PATCH", "/api/prefs", { [k]: v }); } catch (ex) { alert(ex.message); }

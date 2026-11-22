@@ -113,7 +113,7 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                # -> Lodestar, through app.state.client and nothing else
                "/api/chat", "/api/chat/stream", "/api/models",
                # -> files on this machine; no network at all
-               "/api/sessions", "/api/sessions/{sid}", "/api/sessions/{sid}/live",
+               "/api/sessions", "/api/sessions/search", "/api/sessions/{sid}", "/api/sessions/{sid}/live",
                "/api/sessions/{sid}/files", "/api/sessions/{sid}/files/{name}",
                # what made a picture drawn here: read from the chat's own file
                "/api/sessions/{sid}/files/{name}/settings",

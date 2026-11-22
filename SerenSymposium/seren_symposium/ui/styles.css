@@ -621,3 +621,41 @@ form#composer { position: relative; }
 .seat-row .note { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .seat-add { display: flex; flex-wrap: wrap; gap: 6px; }
 .seat-add input { flex: 1 1 120px; min-width: 0; }
+
+/* ── 21 Nov 2026: archive and search in the projects bar ── */
+.side-search { flex: none; margin: 0 0 6px; }
+.side-search input { width: 100%; padding: 5px 9px; font-size: 12.5px; border-radius: 7px; }
+#chat.side-folded .side-search { display: none; }
+.sess.archived span { color: var(--faint); font-style: italic; }
+.arch-pile { display: flex; align-items: center; gap: 6px; padding: 3px 9px 3px 20px; color: var(--faint);
+             font-size: 11.5px; cursor: pointer; border-radius: 6px; }
+.arch-pile:hover { color: var(--text-dim); background: var(--surface-2); }
+.arch-pile .seren-chev { transform: rotate(-90deg); }
+.arch-pile[aria-expanded=true] .seren-chev { transform: none; }
+.hit { padding: 6px 8px; border-radius: 7px; cursor: pointer; }
+.hit:hover { background: var(--surface-2); }
+.hit[aria-current=true] { background: var(--sel); }
+.hit .hit-head { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.hit .hit-title { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hit .hit-where { margin-left: auto; color: var(--faint); font-size: 11px; white-space: nowrap; }
+.hit .snip { display: block; padding: 3px 0 0 8px; color: var(--text-dim); font-size: 12px; line-height: 1.35;
+             border-left: 2px solid var(--border); margin: 4px 0 0 2px; cursor: pointer; }
+.hit .snip:hover { color: var(--text); border-left-color: var(--accent); }
+.hit .snip b { color: var(--faint); font-weight: normal; }
+.hit mark, .msg.found mark { background: color-mix(in srgb, var(--accent) 35%, transparent); color: inherit; border-radius: 2px; }
+.hit .more { padding: 2px 0 0 10px; color: var(--faint); font-size: 11px; }
+.side-none { color: var(--faint); font-style: italic; padding: 8px; font-size: 12.5px; }
+.msg.found { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 10px; transition: outline-color 1.2s; }
+.msg.found.fading { outline-color: transparent; }
+
+/* ── 21 Nov 2026: a message's pictures, strip or folded (scripts.js, layoutPictures) ── */
+.pics.strip, .atts.strip { display: flex; flex-wrap: wrap; gap: 6px; margin: .4em 0; }
+.pics.strip img, .atts.strip img { height: 150px; width: auto; max-width: 240px; max-height: none; object-fit: cover;
+                                   margin: 0; border-radius: 7px; border: 1px solid var(--border); cursor: zoom-in; display: block; }
+.pics.strip img:hover, .atts.strip img:hover { border-color: var(--accent); }
+.pics-fold { margin: .4em 0; }
+.pics-fold > summary { cursor: pointer; display: flex; gap: 8px; align-items: baseline; color: var(--text-dim); font-size: 12.5px;
+                       padding: 4px 9px; border: 1px dashed var(--border); border-radius: 8px; width: fit-content; max-width: 100%; }
+.pics-fold > summary:hover { color: var(--text); border-color: var(--accent); }
+.pics-fold > summary span { color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pics-fold[open] > summary { border-style: solid; }

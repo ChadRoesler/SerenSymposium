@@ -1198,6 +1198,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             "queue": cfg.ui.queue,
             "translate": cfg.ui.translate,
             "interrupt": cfg.ui.interrupt,
+            "pictures": cfg.ui.pictures,
             "updates": await updates_payload(
                 getattr(request.app.state, "updates", None),
                 distribution="seren-symposium", installed=APP_VERSION),
@@ -1390,6 +1391,15 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         it at /api/sessions/{sid}/live)."""
         answering = request.app.state.answering
         return {"sessions": [{**s, "answering": s["id"] in answering} for s in request.app.state.sessions.list()]}
+
+    @app.get("/api/sessions/search")
+    async def sessions_search(request: Request, q: str = ""):
+        """?q=words - every chat, archived ones too, whose title holds all the
+        words or one of whose messages does; each with its newest few
+        `matches` ({index, role, seat, snippet}) and how many `hits` in all.
+        This chat history only: what Wren remembers is Memory's to search."""
+        found = await asyncio.to_thread(request.app.state.sessions.search, q[:200])
+        return {"query": q[:200], "sessions": found}
 
     @app.post("/api/sessions")
     async def sessions_create(request: Request):

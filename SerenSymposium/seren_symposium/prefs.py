@@ -18,6 +18,8 @@ laid over the yaml when Symposium starts:
                             meld, each or hold (every chat's default)
     ui.interrupt            when what you sent mid-answer goes: round, seat
                             or now (every chat's default)
+    ui.pictures             how a message's pictures are laid out: full,
+                            strip or folded (every chat's default)
     ui.translate            what a picture's translate is drafted from:
                             plain, chat or fork (every chat's default)
     claude.permission_mode  how the claude voice is asked about tools,
@@ -62,6 +64,7 @@ PROJECT_FIELDS = ("voice", "system_prompt", "model", "temperature", "max_tokens"
 APP_FIELDS = {"you": ("ui", "you"), "claude_name": ("claude", "name"),
               "confirm_destructive": ("ui", "confirm_destructive"),
               "queue": ("ui", "queue"), "translate": ("ui", "translate"), "interrupt": ("ui", "interrupt"),
+              "pictures": ("ui", "pictures"),
               "claude_mode": ("claude", "permission_mode"), "claude_ask": ("claude", "ask"),
               "claude_tools": ("claude", "allowed_tools"), "claude_dirs": ("claude", "add_dirs")}
 # Not bypassPermissions: a window that can switch every check off with one
@@ -74,6 +77,8 @@ QUEUE_MODES = ("meld", "each", "hold")
 TRANSLATE_MODES = ("plain", "chat", "fork")
 # When what was sent mid-answer goes (config.UiConfig.interrupt).
 INTERRUPT_MODES = ("round", "seat", "now")
+# How a message's pictures are laid out (config.UiConfig.pictures).
+PICTURE_MODES = ("full", "strip", "folded")
 MAX_RULES = 200
 
 
@@ -191,6 +196,10 @@ class Prefs:
         if key == "interrupt":
             if value not in INTERRUPT_MODES:
                 raise Invalid(f"interrupt is one of: {', '.join(INTERRUPT_MODES)}")
+            return value
+        if key == "pictures":
+            if value not in PICTURE_MODES:
+                raise Invalid(f"pictures is one of: {', '.join(PICTURE_MODES)}")
             return value
         if key == "translate":
             if value not in TRANSLATE_MODES:

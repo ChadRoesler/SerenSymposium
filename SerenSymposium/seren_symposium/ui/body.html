@@ -81,6 +81,10 @@
   <aside id="side">
     <button type="button" class="bar-toggle" id="side-toggle" aria-expanded="true" aria-controls="side-list"
             title="fold the projects away"><span class="seren-chev" aria-hidden="true"></span><span class="bar-name">Projects</span></button>
+    <!-- Every chat, archived ones too: titles and what was said (GET /api/sessions/search).
+         While it holds words the list below is the hits; Escape or × gives the projects back. -->
+    <div class="side-search"><input id="side-q" type="search" placeholder="search every chat  (Ctrl+K)" autocomplete="off"
+         title="find words in any chat's title or messages - archived chats too. Every word has to be in the same message."></div>
     <div class="side-list" id="side-list"></div>
   </aside>
 
@@ -93,6 +97,7 @@
       <button class="ghost" id="copy-all" title="the whole chat, as text">Copy all</button>
       <button class="ghost icon" id="chat-stack" title="what this chat's model is given: the whole prompt stack"><svg class="i"><use href="#i-layers"/></svg></button>
       <button class="ghost icon" id="chat-gear" title="this chat's settings"><svg class="i"><use href="#i-gear"/></svg></button>
+      <button class="ghost" id="archive" title="put this chat away: it folds into its project's archived pile, search still finds it, and talking in it again brings it back">Archive</button>
       <button class="ghost" id="remove" title="take this chat out of Symposium without deleting anything: it is set aside, and a Claude conversation it carried can be picked up again">Remove</button>
       <button class="ghost danger" id="del">Delete</button>
     </div>
@@ -257,6 +262,7 @@
         <label>faces</label><div id="a-faces"></div>
         <label for="a-queue" title="what you send while an answer is coming waits above the box: this is how it goes once the answer is in. A chat can say otherwise (⚙ above the chat). Stopping an answer always holds what is waiting.">sent mid-answer</label><select id="a-queue"></select>
         <label for="a-interrupt" title="when what you send while an answer is coming goes. A chat can say otherwise (its gear), and so can a single message (beside the send button).">interrupting</label><select id="a-interrupt"></select>
+        <label for="a-pictures" title="how pictures sit in the log: each at full size, several side by side as thumbs, or folded to one line per message. A chat can say otherwise (its gear).">pictures</label><select id="a-pictures"></select>
         <label for="a-translate" title="what the picture panel's translate drafts a prompt from. A chat can say otherwise, in its own picture panel.">picture prompts from</label><select id="a-translate"></select>
         <span></span><label class="check"><input type="checkbox" id="a-confirm_destructive"> ask before deleting or rewinding</label>
         <p class="note">Kept with your chats (<span id="a-prefs-file"></span>), not in the yaml, so a reinstall leaves them alone.</p>
@@ -315,6 +321,7 @@
     <label class="claude-only">seats</label><div class="claude-only" id="s-seats"></div>
     <label>voices</label><div id="s-voices"></div>
     <label for="s-interrupt" title="when what you send while an answer is coming goes. You can still choose otherwise for one message, beside the send button.">interrupting</label><select id="s-interrupt"></select>
+    <label for="s-pictures" title="how this chat's pictures sit in the log: each at full size, several side by side as thumbs, or folded to one line per message">pictures</label><select id="s-pictures"></select>
     <label for="s-queue" title="what you send while an answer is coming waits above the box: this is how it goes once the answer is in">sent mid-answer</label><select id="s-queue"></select>
 
     <label for="s-temperature">temperature</label><input id="s-temperature" type="number" step="0.05" min="0" max="2">

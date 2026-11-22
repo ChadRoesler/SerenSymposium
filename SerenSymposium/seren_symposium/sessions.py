@@ -97,10 +97,15 @@ SETTINGS = {
     # speaking is done; the rest of the round is not asked) or now (the answer
     # is stopped and it goes). A message can say otherwise as it is sent.
     "interrupt": str,
+    # how this chat's pictures are laid out in the log, over every chat's
+    # (ui.pictures): full, strip (side by side when there are several) or
+    # folded (one line per message, opened with a click)
+    "pictures": str,
 }
 QUEUE_MODES = ("meld", "each", "hold")
 INTERRUPT_MODES = ("round", "seat", "now")
 TRANSLATE_MODES = ("plain", "chat", "fork")
+PICTURE_MODES = ("full", "strip", "folded")
 ROLES = ("user", "assistant")
 VOICES = ("lodestar", "claude")
 MAX_TITLE = 120
@@ -173,6 +178,8 @@ def clean_settings(raw: Any) -> dict[str, Any]:
             raise Invalid(f"interrupt is one of {', '.join(INTERRUPT_MODES)}")
         if key == "translate" and value not in TRANSLATE_MODES:
             raise Invalid(f"translate is one of {', '.join(TRANSLATE_MODES)}")
+        if key == "pictures" and value not in PICTURE_MODES:
+            raise Invalid(f"pictures is one of {', '.join(PICTURE_MODES)}")
         if key == "voice" and value not in VOICES:
             raise Invalid(f"voice is one of {', '.join(VOICES)}")
         out[key] = value
@@ -235,7 +242,69 @@ def summary(s: dict[str, Any]) -> dict[str, Any]:
             # what has spoken into this chat besides the person (["table"]), for the badge
             "sources": list(s.get("sources") or []),
             # a room's seats, by name (seren_symposium.room)
-            "seats": [x["name"] for x in s.get("seats") or []]}
+            "seats": [x["name"] for x in s.get("seats") or []],
+            # put away: out of its project's list, still searched, one click back
+            "archived": s.get("archived")}
+
+
+SNIP = 90          # characters of a message shown around a search hit
+
+
+def _snippet(text: str, at: int, width: int) -> str:
+    """`width` characters of `text` around position `at`, on one line, with
+    an ellipsis where it was cut."""
+    lo = max(0, at - width // 3)
+    hi = min(len(text), lo + width)
+    lo = max(0, hi - width)
+    piece = " ".join(text[lo:hi].split())
+    return ("…" if lo > 0 else "") + piece + ("…" if hi < len(text) else "")
+
+
+def _terms(query: str) -> list[str]:
+    return [w for w in query.lower().split() if w][:12]
+
+
+def _anchor(low: str, terms: list[str]) -> int:
+    """Where to cut a hit's snippet: at the words as typed, together, when
+    the message has them so; else at the first word's earliest place that
+    has the next word within a snippet of it; else just the first word.
+    ("reading glasses" found "Symposium reading it" first, three paragraphs
+    from the glasses.)"""
+    phrase = " ".join(terms)
+    at = low.find(phrase)
+    if at >= 0 or len(terms) == 1:
+        return at if at >= 0 else low.find(terms[0])
+    pos = low.find(terms[0])
+    while pos >= 0:
+        if terms[1] in low[max(0, pos - SNIP // 2):pos + SNIP]:
+            return pos
+        pos = low.find(terms[0], pos + 1)
+    return low.find(terms[0])
+
+
+def search_session(s: dict[str, Any], terms: list[str], per_chat: int = 3) -> Optional[dict[str, Any]]:
+    """Where in chat `s` every one of `terms` turns up: in its title, or all
+    in one message. None when nowhere. Messages newest first, `per_chat` of
+    them shown, `hits` counting them all."""
+    title = s.get("title") or ""
+    title_hit = all(w in title.lower() for w in terms)
+    found = []
+    msgs = s.get("messages") or []
+    for i in range(len(msgs) - 1, -1, -1):
+        m = msgs[i]
+        text = m.get("content") or ""
+        low = text.lower()            # lower, not casefold: it keeps the length, so positions still line up
+        if not all(w in low for w in terms):
+            continue
+        if len(found) < per_chat:
+            found.append({"index": i, "role": m.get("role"), "seat": m.get("seat"), "at": m.get("at"),
+                          "snippet": _snippet(text, _anchor(low, terms), SNIP)})
+        else:
+            found.append(None)            # counted, not shown
+    if not title_hit and not found:
+        return None
+    return {**summary(s), "title_hit": title_hit, "hits": len(found),
+            "matches": [f for f in found if f is not None]}
 
 
 class SessionStore:
@@ -317,6 +386,25 @@ class SessionStore:
                     out.append(summary(s))
         return sorted(out, key=lambda s: s["updated"], reverse=True)
 
+    def search(self, query: str, limit: int = 40, per_chat: int = 3) -> list[dict[str, Any]]:
+        """Every chat here - archived ones too - where `query` turns up: its
+        words all in the title, or all in one message (any order, any case).
+        Title hits first, then the most recently spoken in. Read straight off
+        the files: at a few hundred chats that is still nothing."""
+        terms = _terms(query if isinstance(query, str) else "")
+        if not terms or not self.root.is_dir():
+            return []
+        out = []
+        for path in self.root.glob("*.json"):
+            s = self.get(path.stem)
+            if s is None:
+                continue
+            hit = search_session(s, terms, per_chat)
+            if hit is not None:
+                out.append(hit)
+        out.sort(key=lambda h: (not h["title_hit"], -h["updated"]))
+        return out[:limit]
+
     def get(self, sid: str) -> Optional[dict[str, Any]]:
         path = self._path(sid)
         if path is None or not path.is_file():
@@ -365,14 +453,24 @@ class SessionStore:
         return s
 
     def update(self, sid: str, changes: dict[str, Any]) -> Optional[dict[str, Any]]:
-        """Rename (title), move (folder), or change settings. Settings are
-        merged: a key sent as null drops back to the folder's value."""
+        """Rename (title), move (folder), change settings, or put it away
+        (archived: true/false). Settings are merged: a key sent as null drops
+        back to the folder's value. Archiving alone leaves `updated` as it
+        was: putting a chat away is not something said in it, and it comes
+        back where it sat."""
         s = self.get(sid)
         if s is None:
             return None
         for key in changes:
-            if key not in ("title", "folder", "settings"):
+            if key not in ("title", "folder", "settings", "archived"):
                 raise Invalid(f"{key} cannot be changed")
+        if "archived" in changes:
+            if not isinstance(changes["archived"], bool):
+                raise Invalid("archived is true or false")
+            if changes["archived"]:
+                s["archived"] = s.get("archived") or _now()
+            else:
+                s.pop("archived", None)
         if "title" in changes:
             if not isinstance(changes["title"], str):
                 raise Invalid("title is a string")
@@ -386,7 +484,8 @@ class SessionStore:
                 raise Invalid("settings is an object")
             merged = {**s["settings"], **changes["settings"]}
             s["settings"] = clean_settings(merged)
-        s["updated"] = _now()
+        if set(changes) - {"archived"}:
+            s["updated"] = _now()
         self._write(s)
         return s
 
@@ -627,6 +726,7 @@ class SessionStore:
             if files:
                 asked["files"] = files
             s["messages"].append(asked)
+            s.pop("archived", None)           # talked in again: it is back in its project
             if not s["title"]:
                 s["title"] = " ".join(prompt.split())[:48]
         if answer is not None:
@@ -677,6 +777,7 @@ class SessionStore:
         if final and final != answer:
             said["final"] = final
         s["messages"].append(said)
+        s.pop("archived", None)               # it spoke up: back in its project, to be seen
         if caught_up:
             known["seen"] = len(s["messages"])
         s["updated"] = now
@@ -779,6 +880,7 @@ class SessionStore:
         if answer_files:
             said["files"] = answer_files
         s["messages"] += [asked, said]
+        s.pop("archived", None)               # talked in again: it is back in its project
         if not s["title"]:
             s["title"] = " ".join(prompt.split())[:48]
         if claude_session:

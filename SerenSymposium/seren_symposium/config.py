@@ -366,6 +366,15 @@ class UiConfig(BaseModel):
     # Every chat's default; a chat can say otherwise (its settings'
     # `interrupt`), and a message can say otherwise as it is sent.
     interrupt: Literal["round", "seat", "now"] = "round"
+    # How the pictures in a message are laid out in the log (21 Nov 2026,
+    # Chad: "file collapse/display for pictures for skimming"):
+    #   full    each at its size, one under another, as they always were
+    #   strip   two or more together go side by side as small thumbs; one
+    #           alone stays full
+    #   folded  every message's pictures fold into one line ("3 pictures"),
+    #           opened with a click
+    # Every chat's default; a chat can say otherwise (its settings' `pictures`).
+    pictures: Literal["full", "strip", "folded"] = "strip"
     # What the picture panel's translate is given to draft a prompt from. It
     # used to be your words alone, in a blank session, so "a picture of us at
     # the table" had no idea who "us" was (Chad, 17 Nov 2026: "having the
