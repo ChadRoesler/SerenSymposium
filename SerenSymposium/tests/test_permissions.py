@@ -144,3 +144,18 @@ def test_the_settings_take_the_new_keys_and_refuse_bad_ones(make_client, tmp_pat
                                                                 "tools_inherit": False}})
     assert r.status_code == 200 and r.json()["tools_inherit"] is False and r.json()["allowed_tools"] == ["Read"]
     assert tc.patch("/api/projects", json={"name": "den", "set": {"permission_mode": "yolo"}}).status_code == 400
+
+
+def test_a_comma_pasted_list_is_several_rules_on_the_way_in_and_on_the_way_out(tmp_path):
+    # TestSideLoad, 21 Nov 2026: the chat's box split only on newlines, and a
+    # comma paste was kept as one rule nothing could read.
+    pasted = "mcp__wren-workbench__image_options, mcp__wren-workbench__make_image"
+    assert permissions.split_rules([pasted, "Bash(git add a, b)", " , "]) == [
+        "mcp__wren-workbench__image_options", "mcp__wren-workbench__make_image", "Bash(git add a, b)"]
+    assert permissions.clean_rules([pasted, "Read"]) == [
+        "mcp__wren-workbench__image_options", "mcp__wren-workbench__make_image", "Read"]
+    # A chat that already holds the old single rule is read as two.
+    e = permissions.effective(permissions.layers(cfg_with(tmp_path), None,
+                                                 {"allowed_tools": [pasted], "tools_inherit": False}, {}))
+    assert e["allow"] == ["mcp__wren-workbench__image_options", "mcp__wren-workbench__make_image"]
+    assert any(permissions.covers(r, "mcp__wren-workbench__make_image", {}) for r in e["allow"])

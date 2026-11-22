@@ -56,8 +56,34 @@ _KIND = {"Read": "Read", "Glob": "Read", "Grep": "Read", "LS": "Read",
          "Edit": "Edit", "Write": "Edit", "MultiEdit": "Edit", "NotebookEdit": "Edit"}
 
 
+def split_rules(value: Any) -> list[str]:
+    """Each entry split at its commas outside parentheses, stripped, blanks
+    dropped: a pasted "Read, mcp__x__y" is two rules, `Bash(git add a, b)`
+    stays one. A box that splits only on newlines once kept such a paste as a
+    single rule nothing could read (TestSideLoad, 21 Nov 2026), so lists are
+    read through this as well as written through it."""
+    out: list[str] = []
+    for entry in value if isinstance(value, list) else []:
+        if not isinstance(entry, str):
+            out.append(entry)                      # not ours to mend; clean_rules refuses it
+            continue
+        depth, start = 0, 0
+        for i, ch in enumerate(entry):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth = max(0, depth - 1)
+            elif ch == "," and depth == 0:
+                out.append(entry[start:i])
+                start = i + 1
+        out.append(entry[start:])
+    return [r.strip() if isinstance(r, str) else r for r in out if not isinstance(r, str) or r.strip()]
+
+
 def clean_rules(value: Any, label: str = "allowed_tools") -> list[str]:
     """A list of rule strings, stripped and deduplicated; ValueError otherwise."""
+    if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+        value = split_rules(value)
     if not isinstance(value, list) or len(value) > MAX_RULES \
             or not all(isinstance(v, str) and v.strip() for v in value):
         raise ValueError(f"{label} is a list of rules (Read, Bash(git:*), mcp__workbench__*)")
@@ -95,12 +121,13 @@ def layers(cfg: SymposiumConfig, preset: Optional[FolderPreset], settings: dict[
     """The layers for a chat, the most particular first."""
     k = carabiner_session(cfg) if session_block is None else session_block
     out = [{"name": "chat", "mode": settings.get("permission_mode") or "",
-            "allow": list(settings.get("allowed_tools") or []), "inherit": settings.get("tools_inherit") is not False}]
+            "allow": split_rules(list(settings.get("allowed_tools") or [])),
+            "inherit": settings.get("tools_inherit") is not False}]
     if preset is not None:
-        out.append({"name": "project", "mode": preset.permission_mode or "", "allow": list(preset.allowed_tools),
+        out.append({"name": "project", "mode": preset.permission_mode or "", "allow": split_rules(list(preset.allowed_tools)),
                     "inherit": preset.tools_inherit is not False})
     out.append({"name": "symposium", "mode": cfg.claude.permission_mode or "",
-                "allow": list(cfg.claude.allowed_tools), "inherit": True})
+                "allow": split_rules(list(cfg.claude.allowed_tools)), "inherit": True})
     out.append({"name": "carabiner", "mode": k.get("permission_mode") or "",
                 "allow": list(k.get("allowed_tools") or []), "inherit": True})
     return out
