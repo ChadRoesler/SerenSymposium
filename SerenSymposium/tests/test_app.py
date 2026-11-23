@@ -114,6 +114,8 @@ def test_symposium_exposes_no_route_that_bypasses_lodestar(client):
                "/api/chat", "/api/chat/stream", "/api/models",
                # -> files on this machine; no network at all
                "/api/sessions", "/api/sessions/search", "/api/sessions/{sid}", "/api/sessions/{sid}/live",
+               "/api/sessions/{sid}/steps/{tool_id}",     # a tool call in full, from the CLI's transcript
+               "/api/claude/models",                      # the carabiner's model list (its own verb, run here)
                "/api/sessions/{sid}/files", "/api/sessions/{sid}/files/{name}",
                # what made a picture drawn here: read from the chat's own file
                "/api/sessions/{sid}/files/{name}/settings",

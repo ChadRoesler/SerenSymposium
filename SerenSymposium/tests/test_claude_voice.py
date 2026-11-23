@@ -70,7 +70,7 @@ def test_a_claude_turn_streams_in_lodestars_shape_and_is_kept(make_client, runs)
     # how it got there, folded under the answer
     assert meta["steps"] == [
         {"kind": "tool", "id": events[1]["id"], "tool": "mcp__workbench__get_time",
-         "summary": '{"zone": "UTC"}', "ok": True, "result": "12:00 UTC"},
+         "summary": '{"zone": "UTC"}', "sid": s["claude"]["session"], "ok": True, "result": "12:00 UTC"},
         {"kind": "thinking", "text": "hmm"}]
 
     (run,) = runs()

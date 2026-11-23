@@ -112,6 +112,36 @@ def _records(path: Path) -> Iterator[dict[str, Any]]:
         return
 
 
+_TOOL_ID = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+MAX_FULL = 2_000_000      # one tool's full result as the window opens it; a bigger one is cut, and says so
+
+
+def tool_step(path: Path, tool_id: str) -> Optional[dict[str, Any]]:
+    """One tool call in full, as the CLI kept it: {tool, input, result, ok,
+    cut} or None. A turn keeps a few hundred characters of each result
+    (claude_voice.MAX_RESULT); the whole of it is here, read when someone
+    opens it (22 Nov 2026: Chad could not see enough of a tool call to help
+    with it)."""
+    if not _TOOL_ID.match(tool_id or ""):
+        return None
+    call: Optional[dict[str, Any]] = None
+    for r in _records(path):
+        content = (r.get("message") or {}).get("content") if isinstance(r.get("message"), dict) else None
+        for c in content if isinstance(content, list) else []:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "tool_use" and c.get("id") == tool_id:
+                call = {"tool": str(c.get("name") or ""), "input": c.get("input")}
+            elif c.get("type") == "tool_result" and c.get("tool_use_id") == tool_id:
+                body = c.get("content")
+                text = body if isinstance(body, str) else "\n".join(
+                    str(b.get("text") or "") if b.get("type") == "text" else f"[{b.get('type')}]"
+                    for b in body if isinstance(b, dict)) if isinstance(body, list) else ""
+                return {**(call or {"tool": "", "input": None}), "ok": not c.get("is_error"),
+                        "result": text[:MAX_FULL], "cut": len(text) > MAX_FULL}
+    return {**call, "ok": None, "result": None, "cut": False} if call else None
+
+
 def _at(r: dict[str, Any]) -> Optional[float]:
     ts = r.get("timestamp")
     if not isinstance(ts, str):

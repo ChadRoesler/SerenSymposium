@@ -254,7 +254,7 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
          model: str = "", system_prompt: str = "", add_dirs: Optional[list[str]] = None,
          allow: Optional[list[str]] = None, ask: bool = False, replace: bool = False,
          mode: Optional[str] = None, own_tools: bool = True, fork: bool = False,
-         ephemeral: bool = False) -> list[str]:
+         ephemeral: bool = False, effort: str = "", thinking_display: str = "") -> list[str]:
     """`replace`: the system prompt is the whole one (--system-prompt, the
     preface in front), not an addition to the CLI's own. `mode` and
     `own_tools=False`: the turn's permissions were worked out in layers
@@ -281,6 +281,13 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
         out += ["--no-session-persistence", "--settings", json.dumps({"disableAllHooks": True})]
     if model := (model or cfg.model):
         out += ["--model", model]
+    # Worked out in layers (seren_symposium.permissions.thinking); blank
+    # leaves it to the CLI. --thinking-display is a flag --help does not list
+    # (Claude Code 2.1.329): summarized, highlights or omitted.
+    if effort:
+        out += ["--effort", effort]
+    if thinking_display:
+        out += ["--thinking-display", thinking_display]
     if system_prompt:
         out += ["--system-prompt" if replace else "--append-system-prompt", system_prompt]
     if mode := (cfg.permission_mode if mode is None else mode):
@@ -709,7 +716,9 @@ def _digest(ev: dict[str, Any], turn: ClaudeTurn, blocks: dict[Any, dict[str, An
                     given = {}
                 call = {"id": b.get("id"), "tool": b.get("name") or "a tool",
                         "summary": summarize(b.get("name") or "", given, 200)}
-                turn.step({"kind": "tool", **call})
+                # Whose transcript holds it in full (terminal.tool_step): a
+                # chat's conversation can be started over, so the step says.
+                turn.step({"kind": "tool", **call, "sid": turn.session_id})
                 yield {"type": "tool_call", **call}
     elif kind == "user" and not ev.get("parent_tool_use_id"):
         content = (ev.get("message") or {}).get("content")
@@ -743,7 +752,8 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                  permit: Optional[dict[str, str]] = None,
                  replace: bool = False, mode: Optional[str] = None,
                  own_tools: bool = True, cwd: str = "", fork: bool = False,
-                 ephemeral: bool = False, on_wake: Optional[Wake] = None) -> AsyncIterator[dict[str, Any]]:
+                 ephemeral: bool = False, on_wake: Optional[Wake] = None,
+                 effort: str = "", thinking_display: str = "") -> AsyncIterator[dict[str, Any]]:
     """One turn, as Symposium stream events (see the module docstring).
     Always ends with exactly one `done` or `error`. `permit` ({url, ticket})
     is where the CLI's permission asks go; without it, unlisted tools are
@@ -767,7 +777,8 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
         if cli is None:
             cmd = argv(cfg, resume=resume, new_id=turn.session_id, model=model, system_prompt=system_prompt,
                        add_dirs=add_dirs, allow=allow, ask=bool(permit), replace=replace,
-                       mode=mode, own_tools=own_tools, fork=fork, ephemeral=ephemeral)
+                       mode=mode, own_tools=own_tools, fork=fork, ephemeral=ephemeral,
+                       effort=effort, thinking_display=thinking_display)
             cli = Cli(cmd, where and os.path.expanduser(where), _env(permit, cfg), stream=cfg.background,
                       ticket=(permit or {}).get("ticket"))
         cli.notes.clear()

@@ -50,6 +50,14 @@ WINDOW_MODES = ("", "default", "manual", "acceptEdits", "auto", "plan", "dontAsk
 ALL_MODES = WINDOW_MODES + ("bypassPermissions",)
 MAX_RULES = 200
 LAYERS = ("chat", "project", "symposium", "carabiner")
+# How hard a turn thinks (`claude --effort`) and what comes back of the
+# thinking (`--thinking-display`; never the thinking itself on the newer
+# models, a summary at most). "" = no opinion, the next layer's. The same
+# layers as the permissions (22 Nov 2026: "the claude specifics should go into
+# the carabiner, but be able to be pulled in for the settings").
+EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
+THINKING_DISPLAYS = ("", "summarized", "highlights", "omitted")
+_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/\[\]-]{0,99}")
 
 # The file tools and the kind of rule that lets them in.
 _KIND = {"Read": "Read", "Glob": "Read", "Grep": "Read", "LS": "Read",
@@ -113,7 +121,31 @@ def carabiner_session(cfg: SymposiumConfig) -> dict[str, Any]:
         tools = clean_rules(list(tools)) if tools else []
     except ValueError:
         tools = []
-    return {"permission_mode": mode if mode in ALL_MODES else "", "allowed_tools": tools, "path": str(path)}
+    # The rest of what the carabiner says a session is (what-the-carabiner-
+    # owns); each goes on claude's command line, so only what Claude Code takes.
+    model, effort, shown = (str(s.get(k) or "") for k in ("model", "effort", "thinking_display"))
+    return {"permission_mode": mode if mode in ALL_MODES else "", "allowed_tools": tools, "path": str(path),
+            "model": model if _MODEL.fullmatch(model) else "",
+            "effort": effort if effort in EFFORTS else "",
+            "thinking_display": shown if shown in THINKING_DISPLAYS else ""}
+
+
+def thinking(cfg: SymposiumConfig, preset: Optional[FolderPreset], settings: dict[str, Any],
+             session_block: Optional[dict[str, Any]] = None) -> dict[str, str]:
+    """{effort, effort_from, thinking_display, thinking_from}: the first layer
+    with an opinion, chat, project, every chat, carabiner; "cli" when none has
+    one. A project's counts only when its voice is claude, as with its model."""
+    k = carabiner_session(cfg) if session_block is None else session_block
+    claude_preset = preset if preset is not None and preset.voice == "claude" else None
+    out: dict[str, str] = {}
+    for key, ok, said in (("effort", EFFORTS, "effort_from"), ("thinking_display", THINKING_DISPLAYS, "thinking_from")):
+        out[key], out[said] = "", "cli"
+        for name, value in (("chat", settings.get(key)), ("project", getattr(claude_preset, key, "")),
+                            ("symposium", getattr(cfg.claude, key, "")), ("carabiner", k.get(key))):
+            if value and value in ok:
+                out[key], out[said] = value, name
+                break
+    return out
 
 
 def layers(cfg: SymposiumConfig, preset: Optional[FolderPreset], settings: dict[str, Any],

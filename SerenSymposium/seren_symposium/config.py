@@ -65,6 +65,10 @@ class FolderPreset(BaseModel):
     permission_mode: str = ""
     allowed_tools: list[str] = Field(default_factory=list)
     tools_inherit: bool = True
+    # How hard the claude voice thinks here and what it shows of it ("" =
+    # every chat's, then the carabiner's; seren_symposium.permissions.thinking).
+    effort: str = ""
+    thinking_display: str = ""
 
 
 class LodestarClientConfig(BaseModel):
@@ -159,7 +163,9 @@ class ClaudeConfig(BaseModel):
     model: str = ""
     # What the model field suggests when a chat or project answers with this
     # voice (any name the CLI's --model takes still goes): the aliases for the
-    # latest of each, then exact ids. Local models are Lodestar's list.
+    # latest of each, then exact ids. Local models are Lodestar's list. Only
+    # when no carabiner is clipped or it does not answer: the carabiner's own
+    # list comes first (GET /api/claude/models, 22 Nov 2026).
     models: list[str] = Field(default_factory=lambda: [
         "opus", "sonnet", "haiku",
         "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"])
@@ -168,6 +174,11 @@ class ClaudeConfig(BaseModel):
     # the ones this voice may use (e.g. "mcp__workbench__*").
     permission_mode: str = ""
     allowed_tools: list[str] = Field(default_factory=list)
+    # --effort (low, medium, high, xhigh, max) and --thinking-display
+    # (summarized, highlights, omitted) for every chat. Blank = the
+    # carabiner's session block, then the CLI's own.
+    effort: str = ""
+    thinking_display: str = ""
     # Folders Claude may read and work in besides its cwd (--add-dir).
     add_dirs: list[str] = Field(default_factory=list)
     # Only these MCP servers, by the names they have in Claude Code's user

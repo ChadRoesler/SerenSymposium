@@ -1161,10 +1161,40 @@ function stepHtml(s) {
          + `</span></div>`;
   }
   const mark = s.ok === undefined ? "…" : s.ok ? "✓" : "✗";
+  // The corner opens the whole call - every argument, all that came back -
+  // from the CLI's transcript; the fold keeps a preview (22 Nov 2026).
+  const full = s.id ? `<button type="button" class="step-full" data-tool="${esc(s.id)}" title="see all of it">${icon("expand")}</button>` : "";
   return `<div class="step tool${s.ok === false ? " bad" : ""}"><span class="mark">${mark}</span>`
-       + `<span><code>${esc(s.tool)}</code> <span class="sum">${esc(s.summary || "")}</span>`
-       + (s.result ? `<pre>${esc(s.result)}</pre>` : "") + `</span></div>`;
+       + `<span class="body"><code>${esc(s.tool)}</code> <span class="sum">${esc(s.summary || "")}</span>`
+       + (s.result ? `<div class="res">${full}<pre>${esc(s.result)}</pre></div>` : full) + `</span></div>`;
 }
+
+// One tool call in full, in its own sheet.
+async function openStep(toolId) {
+  const sid = current?.id;
+  if (!sid) return;
+  $("#sf-title").textContent = "Tool call";
+  $("#sf-body").innerHTML = `<p class="muted">reading the transcript…</p>`;
+  if (!$("#step-sheet").open) $("#step-sheet").showModal();
+  try {
+    const st = await call("GET", `/api/sessions/${encodeURIComponent(sid)}/steps/${encodeURIComponent(toolId)}`);
+    $("#sf-title").textContent = st.tool || "Tool call";
+    const given = st.input === null || st.input === undefined ? "" : JSON.stringify(st.input, null, 2);
+    const result = st.result === null ? "(nothing came back yet)" : st.result;
+    $("#sf-body").innerHTML = `<h4>handed</h4><pre class="sf-pre">${esc(given || "(nothing)")}</pre>`
+      + `<h4>${st.ok === false ? "came back as an error" : "came back"}</h4><pre class="sf-pre${st.ok === false ? " bad" : ""}">${esc(result)}</pre>`
+      + (st.cut ? `<p class="muted">cut at 2 MB; the rest is in the CLI's transcript.</p>` : "");
+    $("#sf-copy").onclick = () => navigator.clipboard?.writeText(result);
+  } catch (e) {
+    $("#sf-body").innerHTML = `<p class="muted">${esc(e.message || String(e))}</p>`;
+  }
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest?.(".step-full");
+  if (!b) return;
+  e.preventDefault(); e.stopPropagation();
+  openStep(b.dataset.tool);
+});
 
 function stepsLine(steps, liveNow) {
   if (liveNow) {
@@ -2144,6 +2174,18 @@ function modeOptions(blank, value) {
 }
 const SCOPE_NAMES = { chat: "this chat", project: "this project", all: "every chat" };
 
+// How hard Claude thinks (--effort) and what it shows of it (--thinking-display),
+// in the same layers as the permissions: chat, project, every chat, carabiner,
+// the CLI (22 Nov 2026). The thinking itself never comes back; a summary does.
+const EFFORT_LABELS = { low: "low - quick and cheap", medium: "medium", high: "high - thinks harder",
+                        xhigh: "extra high - long coding and agent work", max: "max - whatever it costs" };
+const THINKING_LABELS = { summarized: "a summary of it", highlights: "highlights",
+                          omitted: "nothing (it still thinks, still billed)" };
+function pickOptions(labels, blank, value) {
+  return `<option value="">${esc(blank)}</option>`
+    + Object.entries(labels).map(([k, l]) => `<option value="${k}"${value === k ? " selected" : ""}>${esc(l)}</option>`).join("");
+}
+
 // May I? Claude wants a tool that is not on its list, and waits on you.
 function permitCard(ev) {
   const card = document.createElement("div");
@@ -2606,9 +2648,24 @@ $("#screen-preview").addEventListener("click", e => { if (e.target.tagName === "
 
 // ── Settings ────────────────────────────────────────────────────────────
 
+// Claude's models are the carabiner's list (it asks Anthropic, or knows what
+// it shipped with); the yaml's claude.models only until it answers, or when
+// none is clipped (22 Nov 2026). Asked once per window; it keeps a while.
+let claudeModelsLoaded = false;
+async function loadClaudeModels() {
+  if (claudeModelsLoaded) return;
+  claudeModelsLoaded = true;
+  try {
+    const { models } = await call("GET", "/api/claude/models");
+    if (models?.length) $("#claude-models").innerHTML = models.map(m =>
+      `<option value="${esc(m.value)}"${m.label && m.label !== m.value ? ` label="${esc(m.label)}"` : ""}>`).join("");
+  } catch { claudeModelsLoaded = false; }
+}
+
 function drawVoices() {
   const claude = CFG.claude || {};
   $("#claude-models").innerHTML = (claude.models || []).map(m => `<option value="${esc(m)}">`).join("");
+  loadClaudeModels();
   $("#s-voice").innerHTML = `<option value="">project's</option>`
     + `<option value="lodestar">local model (lodestar)</option>`
     + `<option value="claude"${claude.available ? "" : " disabled"}>${esc(voiceName("claude"))}`
@@ -2675,6 +2732,8 @@ function drawChatSettings() {
   document.querySelectorAll("#set-chat-form .claude-only").forEach(el => { el.hidden = !claude; });
   if (claude) {
     $("#s-permission_mode").innerHTML = modeOptions("its project's, every chat's or the carabiner's", own.permission_mode || "");
+    $("#s-effort").innerHTML = pickOptions(EFFORT_LABELS, "its project's, every chat's or the carabiner's", own.effort || "");
+    $("#s-thinking_display").innerHTML = pickOptions(THINKING_LABELS, "its project's, every chat's or the carabiner's", own.thinking_display || "");
     $("#s-allowed_tools").value = (own.allowed_tools || []).join("\n");
     $("#s-tools_inherit").checked = own.tools_inherit !== false;
     drawEffective(where, own);
@@ -2730,6 +2789,8 @@ function setChatSetting(k, v) {
     .catch(ex => { alert(ex.message); drawChatSettings(); });
 }
 $("#s-permission_mode").addEventListener("change", e => setChatSetting("permission_mode", e.target.value || null));
+$("#s-effort").addEventListener("change", e => setChatSetting("effort", e.target.value || null));
+$("#s-thinking_display").addEventListener("change", e => setChatSetting("thinking_display", e.target.value || null));
 $("#s-allowed_tools").addEventListener("change", e => {
   const list = e.target.value.split(/\n+/).map(x => x.trim()).filter(Boolean);
   setChatSetting("allowed_tools", list.length ? list : null);
@@ -2811,11 +2872,16 @@ async function drawClaude() {
     if (k.bookmark) rows.push(["bookmark (Margin)", k.bookmark]);
     const ks = CLAUDE.carabiner_session || {};
     rows.push(["its permission mode", ks.permission_mode || "none (the CLI's own)"],
-              ["it allows", (ks.allowed_tools || []).join(", ") || "nothing more than the CLI"]);
+              ["it allows", (ks.allowed_tools || []).join(", ") || "nothing more than the CLI"],
+              ["its model", ks.model || "none (the CLI's own)"],
+              ["how hard it thinks", ks.effort || "none (the CLI's own)"],
+              ["what it shows of it", ks.thinking_display || "none (the CLI's own)"]);
   } else rows.push(["carabiner", "none clipped on this box"]);
   $("#c-facts").innerHTML = rows.map(([a, b]) => `<dt>${esc(a)}</dt><dd>${esc(b)}</dd>`).join("");
   $("#c-mode").innerHTML = modeOptions("the carabiner's, else the CLI's own", CLAUDE.mode || "");
   $("#c-ask").checked = !!CLAUDE.ask;
+  $("#c-effort").innerHTML = pickOptions(EFFORT_LABELS, "the carabiner's, else the CLI's own", CLAUDE.effort || "");
+  $("#c-thinking").innerHTML = pickOptions(THINKING_LABELS, "the carabiner's, else the CLI's own", CLAUDE.thinking_display || "");
   const chips = (list, key) => list.map((v, i) =>
     `<span class="pending rule"><code>${esc(v)}</code><button type="button" data-unlist="${key}" data-i="${i}" title="take it off">×</button></span>`).join("")
     || `<span class="muted">none</span>`;
@@ -2829,6 +2895,8 @@ async function setClaude(changes) {
 }
 $("#c-mode").onchange = () => setClaude({ claude_mode: $("#c-mode").value });
 $("#c-ask").onchange = () => setClaude({ claude_ask: $("#c-ask").checked });
+$("#c-effort").onchange = () => setClaude({ claude_effort: $("#c-effort").value });
+$("#c-thinking").onchange = () => setClaude({ claude_thinking: $("#c-thinking").value });
 $("#set-claude").addEventListener("click", e => {
   const x = e.target.closest("[data-unlist]");
   if (!x) return;
@@ -2925,6 +2993,8 @@ function projectFields(f, { name = null } = {}) {
       ? `<span></span><p class="muted">temperature, max tokens and repeat penalty are the local model's; the claude CLI sets its own.</p>`
         // Claude's permissions for chats here, over every chat's and the carabiner's (22 Oct 2026).
         + `<label>permission mode</label><select data-k="permission_mode">${modeOptions("every chat's", f.permission_mode || "")}</select>`
+        + `<label>how hard it thinks</label><select data-k="effort">${pickOptions(EFFORT_LABELS, "every chat's", f.effort || "")}</select>`
+        + `<label>what it shows of its thinking</label><select data-k="thinking_display">${pickOptions(THINKING_LABELS, "every chat's", f.thinking_display || "")}</select>`
         + `<label>allowed without asking</label><textarea data-k="allowed_tools" class="rules-box" `
         + `placeholder="one per line: Read, Bash(git:*), mcp__wren-workbench__*">${esc((f.allowed_tools || []).join("\n"))}</textarea>`
         + `<span></span><label class="check"><input type="checkbox" data-k="tools_inherit"${f.tools_inherit === false ? "" : " checked"}> `

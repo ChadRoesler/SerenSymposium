@@ -246,13 +246,17 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
     told = [{**(t := as_told(m)), "content": attachments.with_files(
                 t["content"], attachments.for_claude(m.get("files") or [], folder))}
             for m in missed if not terminal.harness_notice(m)]
+    # The carabiner's session block, read once for the turn: its permissions,
+    # its model and how hard it thinks are the layer under every chat's.
+    ks = permissions.carabiner_session(cfg)
     model = layered.get("model_override") or (
-        preset.model if preset and preset.voice == "claude" else "")
+        preset.model if preset and preset.voice == "claude" else "") or cfg.claude.model or ks.get("model") or ""
     system, replace = claude_system(cfg, stack.own_prompt(preset, layered), str(folder))
     # Permissions in layers: the CLI's own, the carabiner's, every chat's, the
     # project's, this chat's (seren_symposium.permissions). The chat's own
     # folder is always writable when save_files is on, whatever they say.
-    perms = permissions.effective(permissions.layers(cfg, preset, layered))
+    perms = permissions.effective(permissions.layers(cfg, preset, layered, ks))
+    think = permissions.thinking(cfg, preset, layered, ks)
     return {
         "prompt": claude_voice.handover(_trim_history(told, cfg.claude.handover_max_chars, also=("stopped",)),
                                         attachments.with_files(prompt, attachments.for_claude(files or [], folder)),
@@ -261,6 +265,7 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
         "add_dirs": [str(folder)],
         "allow": ([claude_voice.folder_rule(str(folder))] if cfg.claude.save_files else []) + perms["allow"],
         "mode": perms["mode"],
+        "effort": think["effort"], "thinking_display": think["thinking_display"],
         # Where it runs (a picked-up chat: where its conversation began), and
         # whether its first turn here forks it off a terminal still holding it.
         "cwd": layered.get("cwd") or "",
@@ -730,6 +735,7 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                                      replace=bool(ask.get("system_replace")),
                                      mode=ask.get("mode"), own_tools="mode" not in ask,
                                      cwd=ask.get("cwd") or "", fork=bool(ask.get("fork")),
+                                     effort=ask.get("effort") or "", thinking_display=ask.get("thinking_display") or "",
                                      on_wake=waker(cfg, store, turn.session, turn.seat) if turn.session else None)
         async for event in (_with_asks(spoken, desk) if desk else spoken):
             # A seat of a room with nothing to add says so (room.passed): it
@@ -1448,6 +1454,34 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
                    if (only is ... or b["seat"] == only) and claude_voice.stop_parked(b["conversation"])]
         return {"ok": True, "stopped": stopped, "background": background_of(s)}
 
+    @app.get("/api/sessions/{sid}/steps/{tool_id}")
+    async def sessions_step(request: Request, sid: str, tool_id: str):
+        """One tool call of this chat's in full: what it was handed and all
+        that came back, from the CLI's own transcript (a turn keeps only a
+        preview of each). Only the Claude conversations this chat has had are
+        looked in: the one a step names, the chat's, its seats'."""
+        s = request.app.state.sessions.get(sid)
+        if s is None:
+            return JSONResponse({"error": "no such session"}, status_code=404)
+        named = [st.get("sid") for m in s.get("messages") or [] for st in (m.get("meta") or {}).get("steps") or []
+                 if isinstance(st, dict) and st.get("id") == tool_id]
+        ids = [*named, (s.get("claude") or {}).get("session"),
+               *[(x.get("claude") or {}).get("session") for x in s.get("seats") or []]]
+        root = terminal.projects_dir(cfg.claude.projects_dir)
+
+        def look() -> Optional[dict[str, Any]]:
+            for cli_id in dict.fromkeys(i for i in ids if terminal.is_id(i)):
+                path = terminal.find(root, cli_id)
+                found = terminal.tool_step(path, tool_id) if path else None
+                if found:
+                    return found
+            return None
+        found = await asyncio.to_thread(look)
+        if found is None:
+            return JSONResponse({"error": "the CLI's transcript does not have that tool call "
+                                          "(a side copy keeps none, and a deleted one is gone)"}, status_code=404)
+        return found
+
     @app.get("/api/sessions/{sid}/live")
     async def sessions_live(request: Request, sid: str):
         """The turn running in this chat, from its first event to its end,
@@ -1548,6 +1582,16 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             out["project_defaults"] = prefs.project_defaults()
         return out
 
+    @app.get("/api/claude/models")
+    async def claude_models(request: Request, fresh: int = 0):
+        """What a Claude model field suggests: the carabiner's list (it asks
+        Anthropic, or knows the list it shipped with), else claude.models from
+        this yaml. Every item is {value, label}; any model id can still be typed."""
+        found = await asyncio.to_thread(carabiner.models, cfg.claude, bool(fresh))
+        if found:
+            return {"source": "carabiner", "models": found}
+        return {"source": "symposium", "models": [{"value": m, "label": m} for m in cfg.claude.models]}
+
     @app.get("/api/claude")
     async def claude_settings(request: Request, session: str = "", folder: str = "", settings: str = ""):
         """The claude voice's settings as they stand, and the carabiner on
@@ -1557,6 +1601,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         c = cfg.claude
         out = {"available": claude_voice.available(c), "name": c.name, "cwd": c.cwd,
                "mode": c.permission_mode, "ask": c.ask, "tools": c.allowed_tools, "dirs": c.add_dirs,
+               "effort": c.effort, "thinking_display": c.thinking_display,
                "modes": list(permissions.WINDOW_MODES),
                "carabiner": await asyncio.to_thread(carabiner.describe, c),
                "carabiner_session": await asyncio.to_thread(permissions.carabiner_session, cfg)}

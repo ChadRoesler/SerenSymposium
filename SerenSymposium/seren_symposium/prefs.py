@@ -52,7 +52,7 @@ from typing import Any, Optional
 from pydantic import ValidationError
 
 from .config import FolderPreset, SymposiumConfig
-from .permissions import WINDOW_MODES, clean_rules
+from .permissions import EFFORTS, THINKING_DISPLAYS, WINDOW_MODES, clean_rules
 
 log = logging.getLogger(__name__)
 
@@ -60,8 +60,9 @@ FILE_NAME = "symposium-prefs.json"
 MAX_NAME = 120
 # The settings a project carries, and how a value for each is checked.
 PROJECT_FIELDS = ("voice", "system_prompt", "model", "temperature", "max_tokens", "repeat_penalty",
-                  "permission_mode", "allowed_tools", "tools_inherit")
+                  "permission_mode", "allowed_tools", "tools_inherit", "effort", "thinking_display")
 APP_FIELDS = {"you": ("ui", "you"), "claude_name": ("claude", "name"),
+              "claude_effort": ("claude", "effort"), "claude_thinking": ("claude", "thinking_display"),
               "confirm_destructive": ("ui", "confirm_destructive"),
               "queue": ("ui", "queue"), "translate": ("ui", "translate"), "interrupt": ("ui", "interrupt"),
               "pictures": ("ui", "pictures"),
@@ -105,6 +106,10 @@ def _preset(name: str, values: dict[str, Any]) -> FolderPreset:
     if values.get("permission_mode") not in (None, *WINDOW_MODES):
         names = ", ".join(m or "(every chat's)" for m in WINDOW_MODES)
         raise Invalid(f"permission_mode is one of: {names}")
+    if values.get("effort") not in (None, *EFFORTS):
+        raise Invalid(f"effort is one of: {', '.join(e or '(every chat’s)' for e in EFFORTS)}")
+    if values.get("thinking_display") not in (None, *THINKING_DISPLAYS):
+        raise Invalid(f"thinking_display is one of: {', '.join(t or '(every chat’s)' for t in THINKING_DISPLAYS)}")
     if values.get("allowed_tools") is not None:
         try:
             values = {**values, "allowed_tools": clean_rules(values["allowed_tools"])}
@@ -208,6 +213,11 @@ class Prefs:
         if key == "claude_mode":
             if value not in MODES:
                 raise Invalid(f"claude_mode is one of: {', '.join(m or '(the CLI default)' for m in MODES)}")
+            return value
+        if key in ("claude_effort", "claude_thinking"):
+            ok = EFFORTS if key == "claude_effort" else THINKING_DISPLAYS
+            if value not in ok:
+                raise Invalid(f"{key} is one of: {', '.join(v or '(the carabiner’s, then the CLI’s)' for v in ok)}")
             return value
         if key in ("claude_tools", "claude_dirs"):
             if not isinstance(value, list) or len(value) > MAX_RULES \

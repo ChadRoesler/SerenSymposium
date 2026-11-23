@@ -70,6 +70,11 @@ SETTINGS = {
     "permission_mode": str,
     "allowed_tools": list,
     "tools_inherit": bool,
+    # how hard the claude voice thinks in this chat and what it shows of it
+    # (claude --effort / --thinking-display), over its project's, every
+    # chat's and the carabiner's (seren_symposium.permissions.thinking)
+    "effort": str,
+    "thinking_display": str,
     # the folder the claude voice runs in for this chat, over claude.cwd: a
     # chat picked up from a terminal runs where that conversation was started
     "cwd": str,
@@ -172,6 +177,11 @@ def clean_settings(raw: Any) -> dict[str, Any]:
             from .permissions import WINDOW_MODES
             if value not in WINDOW_MODES:
                 raise Invalid(f"permission_mode is one of {', '.join(m for m in WINDOW_MODES if m)}")
+        if key in ("effort", "thinking_display"):
+            from .permissions import EFFORTS, THINKING_DISPLAYS
+            ok = EFFORTS if key == "effort" else THINKING_DISPLAYS
+            if value not in ok:
+                raise Invalid(f"{key} is one of {', '.join(v for v in ok if v)}")
         if key == "queue" and value not in QUEUE_MODES:
             raise Invalid(f"queue is one of {', '.join(QUEUE_MODES)}")
         if key == "interrupt" and value not in INTERRUPT_MODES:

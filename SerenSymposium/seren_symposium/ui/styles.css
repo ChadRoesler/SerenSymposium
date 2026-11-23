@@ -367,6 +367,19 @@ details.steps[open] summary::before { transform: rotate(90deg); }
 .step pre { margin: 4px 0 0; padding: 6px 8px; background: color-mix(in srgb, var(--bg) 70%, transparent); border-radius: 6px;
             font: 11.5px var(--mono); white-space: pre-wrap; max-height: 120px; overflow: auto; color: var(--text-dim); }
 .step.asked svg { width: 13px; height: 13px; color: var(--accent); margin-top: 2px; }
+.step.tool > .body { min-width: 0; flex: 1; }
+.step .res { position: relative; }
+.step .res pre { padding-right: 26px; }
+.step-full { background: none; border: 0; padding: 2px; cursor: pointer; color: var(--text-dim); opacity: .55; line-height: 0;
+             vertical-align: middle; }
+.step .res .step-full { position: absolute; top: 4px; right: 4px; z-index: 1; }
+.step-full:hover { opacity: 1; color: var(--accent); }
+.step-full svg { width: 14px; height: 14px; }
+#sf-body h4 { margin: 10px 0 4px; font-size: 12px; color: var(--text-dim); font-weight: 600; }
+#sf-body .sf-pre { margin: 0; padding: 8px 10px; background: color-mix(in srgb, var(--bg) 70%, transparent); border-radius: 6px;
+                   font: 12px var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; }
+#sf-body .sf-pre.bad { color: var(--danger); }
+#sf-body .muted { color: var(--text-dim); }
 
 /* may I? */
 .permit { margin: 6px 0 8px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--accent);

@@ -70,6 +70,9 @@
     <symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
       <path d="M12 3 3 7.5l9 4.5 9-4.5z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 16.5 9 4.5 9-4.5"/>
     </symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M14 4h6v6"/><path d="M20 4l-7 7"/><path d="M10 20H4v-6"/><path d="M4 20l7-7"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -273,6 +276,10 @@
         <label for="c-mode">permission mode</label>
         <select id="c-mode"></select>
         <span></span><label class="check"><input type="checkbox" id="c-ask"> ask me here when Claude wants a tool that is not on its list</label>
+        <label for="c-effort">how hard it thinks</label>
+        <select id="c-effort"></select>
+        <label for="c-thinking">what it shows of its thinking</label>
+        <select id="c-thinking"></select>
         <label>allowed without asking</label>
         <div class="rules"><span class="chips" id="c-tools"></span>
           <input id="c-tool-add" placeholder="add one: Read, Bash(git:*), mcp__workbench__* - Enter" autocomplete="off"></div>
@@ -328,6 +335,8 @@
     </div>
     <div class="form cs-pane" data-pane="claude" hidden>
       <label for="s-permission_mode" class="claude-only">permission mode</label><select id="s-permission_mode" class="claude-only"></select>
+      <label for="s-effort" class="claude-only">how hard it thinks</label><select id="s-effort" class="claude-only"></select>
+      <label for="s-thinking_display" class="claude-only">what it shows of its thinking</label><select id="s-thinking_display" class="claude-only"></select>
       <label for="s-allowed_tools" class="claude-only">allowed without asking</label><textarea id="s-allowed_tools" class="claude-only rules-box" placeholder="one per line: Read, Bash(git:*), mcp__wren-workbench__*"></textarea>
       <span class="claude-only"></span><label class="check claude-only"><input type="checkbox" id="s-tools_inherit"> also what its project, every chat and the carabiner allow</label>
       <span class="claude-only"></span><p class="note claude-only" id="s-perms"></p>
@@ -359,6 +368,14 @@
     <button type="button" class="ghost icon" id="st-refresh" title="look again"><svg class="i"><use href="#i-refresh"/></svg></button>
     <button class="ghost" title="close">✕</button></form>
   <div id="st-body"></div>
+</dialog>
+
+<!-- ── One tool call in full (the expand corner on a step under the fold) ── -->
+<dialog class="sheet wide" id="step-sheet">
+  <form method="dialog" class="sheet-head"><h3 id="sf-title">Tool call</h3>
+    <button type="button" class="ghost icon" id="sf-copy" title="copy what came back"><svg class="i"><use href="#i-copy"/></svg></button>
+    <button class="ghost" title="close">✕</button></form>
+  <div id="sf-body"></div>
 </dialog>
 
 <!-- ── A project's settings, from the chat (the project chip in its title bar) ── -->
