@@ -142,6 +142,58 @@ def tool_step(path: Path, tool_id: str) -> Optional[dict[str, Any]]:
     return {**call, "ok": None, "result": None, "cut": False} if call else None
 
 
+_TASK_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+TASK_TAIL = 24 * 1024     # how much of the end of a task's output the window is shown
+
+
+def task_output_dirs() -> list[Path]:
+    """Where the CLI keeps a background task's output: <temp>/claude/<hash>/
+    <conversation>/tasks/<task id>.output (Claude Code 2.1.329 on Windows;
+    CLAUDE_CODE_TMPDIR moves the <temp>)."""
+    import tempfile
+    roots = [os.environ.get("CLAUDE_CODE_TMPDIR") or "", tempfile.gettempdir()]
+    return [Path(r) / "claude" for r in dict.fromkeys(roots) if r]
+
+
+def task_info(transcript: Optional[Path], conversation: str, task_id: str,
+              dirs: Optional[list[Path]] = None) -> dict[str, Any]:
+    """A background task looked into: what started it (the tool call whose
+    answer named its id: {tool, input}) and the end of what it has written so
+    far ({tail, size, written_at, path}). Either may be missing - an agent
+    task writes no output file, a transcript may be gone."""
+    out: dict[str, Any] = {"started_by": None, "output": None}
+    if not _TASK_ID.match(task_id or "") or not is_id(conversation):
+        return out
+    if transcript is not None:
+        calls: dict[str, dict[str, Any]] = {}
+        for r in _records(transcript):
+            content = (r.get("message") or {}).get("content") if isinstance(r.get("message"), dict) else None
+            for c in content if isinstance(content, list) else []:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("type") == "tool_use" and isinstance(c.get("id"), str):
+                    calls[c["id"]] = {"tool": str(c.get("name") or ""), "input": c.get("input"), "id": c["id"]}
+                elif c.get("type") == "tool_result" and c.get("tool_use_id") in calls:
+                    body = c.get("content")
+                    text = body if isinstance(body, str) else " ".join(
+                        str(b.get("text") or "") for b in body if isinstance(b, dict)) if isinstance(body, list) else ""
+                    if task_id in text and out["started_by"] is None:     # the first: later ones read its output
+                        out["started_by"] = calls[c["tool_use_id"]]
+    for root in dirs if dirs is not None else task_output_dirs():
+        for p in root.glob(f"*/{conversation}/tasks/{task_id}.output") if root.is_dir() else []:
+            try:
+                st = p.stat()
+                with p.open("rb") as f:
+                    f.seek(max(0, st.st_size - TASK_TAIL))
+                    tail = f.read().decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            out["output"] = {"tail": tail, "size": st.st_size, "written_at": st.st_mtime, "path": str(p),
+                             "cut": st.st_size > TASK_TAIL}
+            return out
+    return out
+
+
 def _at(r: dict[str, Any]) -> Optional[float]:
     ts = r.get("timestamp")
     if not isinstance(ts, str):

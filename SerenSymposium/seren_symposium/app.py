@@ -1205,6 +1205,7 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             "translate": cfg.ui.translate,
             "interrupt": cfg.ui.interrupt,
             "pictures": cfg.ui.pictures,
+            "my_pictures": cfg.ui.my_pictures,
             "updates": await updates_payload(
                 getattr(request.app.state, "updates", None),
                 distribution="seren-symposium", installed=APP_VERSION),
@@ -1399,11 +1400,15 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         return {"sessions": [{**s, "answering": s["id"] in answering} for s in request.app.state.sessions.list()]}
 
     @app.get("/api/sessions/search")
-    async def sessions_search(request: Request, q: str = ""):
+    async def sessions_search(request: Request, q: str = "", chat: str = ""):
         """?q=words - every chat, archived ones too, whose title holds all the
         words or one of whose messages does; each with its newest few
         `matches` ({index, role, seat, snippet}) and how many `hits` in all.
+        With &chat=<id>, that one chat with every match, not just the newest.
         This chat history only: what Wren remembers is Memory's to search."""
+        if chat:
+            one = await asyncio.to_thread(request.app.state.sessions.search_one, chat, q[:200])
+            return {"query": q[:200], "sessions": [one] if one else []}
         found = await asyncio.to_thread(request.app.state.sessions.search, q[:200])
         return {"query": q[:200], "sessions": found}
 
@@ -1454,18 +1459,40 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
                    if (only is ... or b["seat"] == only) and claude_voice.stop_parked(b["conversation"])]
         return {"ok": True, "stopped": stopped, "background": background_of(s)}
 
+    @app.get("/api/sessions/{sid}/background/{task_id}")
+    async def sessions_background_task(request: Request, sid: str, task_id: str):
+        """One task this chat left running, looked into: what the CLI says it
+        is, how long it has been going, the tool call that started it (from the
+        transcript) and the end of its output so far (the CLI's task file).
+        For the task found still going hours later, by someone who no longer
+        remembers starting it (23 Nov 2026)."""
+        s = request.app.state.sessions.get(sid)
+        if s is None:
+            return JSONResponse({"error": "no such session"}, status_code=404)
+        for b in background_of(s):
+            task = next((d for d in b.get("details") or [] if d.get("id") == task_id), None)
+            if task is None:
+                continue
+            root = terminal.projects_dir(cfg.claude.projects_dir)
+            found = await asyncio.to_thread(
+                lambda: terminal.task_info(terminal.find(root, b["conversation"]), b["conversation"], task_id))
+            return {**task, "seat": b["seat"], "now": time.time(), **found}
+        return JSONResponse({"error": "nothing by that id is running in this chat (it may have just ended)"},
+                            status_code=404)
+
     @app.get("/api/sessions/{sid}/steps/{tool_id}")
-    async def sessions_step(request: Request, sid: str, tool_id: str):
+    async def sessions_step(request: Request, sid: str, tool_id: str, cli: str = ""):
         """One tool call of this chat's in full: what it was handed and all
         that came back, from the CLI's own transcript (a turn keeps only a
-        preview of each). Only the Claude conversations this chat has had are
-        looked in: the one a step names, the chat's, its seats'."""
+        preview of each). Looked in: the conversation the window names (`cli`,
+        for a step of a turn still running, not kept yet), the one a kept step
+        names, the chat's, its seats'."""
         s = request.app.state.sessions.get(sid)
         if s is None:
             return JSONResponse({"error": "no such session"}, status_code=404)
         named = [st.get("sid") for m in s.get("messages") or [] for st in (m.get("meta") or {}).get("steps") or []
                  if isinstance(st, dict) and st.get("id") == tool_id]
-        ids = [*named, (s.get("claude") or {}).get("session"),
+        ids = [cli, *named, (s.get("claude") or {}).get("session"),
                *[(x.get("claude") or {}).get("session") for x in s.get("seats") or []]]
         root = terminal.projects_dir(cfg.claude.projects_dir)
 

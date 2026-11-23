@@ -201,6 +201,20 @@ body.gripping-row { user-select: none; cursor: row-resize; }
 .behind .task span { max-width: 460px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .behind .task button { background: none; border: 0; padding: 0 5px; color: var(--text-dim); font-size: 14px; line-height: 1; }
 .behind .task button:hover { color: var(--danger); }
+.behind .task .task-open { font-size: inherit; padding: 0; color: var(--text); text-decoration: underline dotted;
+                           text-underline-offset: 3px; cursor: pointer; }
+.behind .task .task-open i { font-style: normal; color: var(--text-dim); margin-left: 2px; }
+.behind .task .task-open:hover { color: var(--accent); }
+#task-sheet .sheet-head h3 { margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#task-sheet .sheet-head button { margin-left: 4px; }
+#tk-body h4 { margin: 12px 0 4px; font-size: 12px; color: var(--text-dim); font-weight: 600; }
+#tk-body .sf-pre { margin: 0; padding: 8px 10px; background: color-mix(in srgb, var(--bg) 70%, transparent); border-radius: 6px;
+                   font: 12px var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 50vh; overflow: auto; }
+#tk-body .muted { color: var(--text-dim); }
+#tk-body .tk-path { font: 11px var(--mono); margin: 4px 0 0; overflow-wrap: anywhere; }
+.tk-facts { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 0; font-size: 13px; }
+.tk-facts dt { color: var(--text-dim); }
+.tk-facts dd { margin: 0; }
 .queue .slip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 4px 3px 9px; border-radius: 8px; font-size: 12.5px;
                border: 1px dashed var(--mine-line); background: color-mix(in srgb, var(--mine) 55%, transparent); }
 #pic-how { width: 100%; }
@@ -398,7 +412,11 @@ details.steps[open] summary::before { transform: rotate(90deg); }
 dialog.sheet { width: min(720px, 94vw); max-height: 88vh; overflow: auto; padding: 16px 20px 20px; border-radius: 14px;
                border: 1px solid var(--border); background: var(--surface); color: var(--text); }
 dialog.sheet::backdrop { background: rgba(0, 0, 0, .55); }
-.sheet-head { display: flex; align-items: center; margin: 0 0 12px; }
+/* Pinned while the sheet scrolls under it (23 Nov 2026): the sheet's top
+   padding moves into the head, so nothing shows above it once scrolled. */
+.sheet-head { display: flex; align-items: center; position: sticky; top: -16px; z-index: 5;
+              margin: -16px -20px 12px; padding: 16px 20px 10px; background: var(--surface);
+              border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
 .sheet-head h3 { margin: 0; font-size: 1rem; }
 .sheet-head button { margin-left: auto; }
 .titlebar button.icon { padding: 4px 7px; }
@@ -478,6 +496,8 @@ dl.facts dd { margin: 0; font-family: var(--mono); font-size: 12px; word-break: 
 dialog.sheet.wide { width: min(900px, 96vw); }
 #stack-sheet .sheet-head h3 { margin-right: auto; }
 #stack-sheet .sheet-head button { margin-left: 4px; }
+#step-sheet .sheet-head h3 { margin-right: auto; }
+#step-sheet .sheet-head button { margin-left: 4px; }
 .st-total { font-size: 12.5px; color: var(--text-dim); margin: 0 0 8px; }
 .st-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--border); margin: 0 0 6px; gap: 1px; }
 .st-bar span { display: block; height: 100%; min-width: 3px; }
@@ -656,7 +676,15 @@ form#composer { position: relative; }
 .hit .snip:hover { color: var(--text); border-left-color: var(--accent); }
 .hit .snip b { color: var(--faint); font-weight: normal; }
 .hit mark, .msg.found mark { background: color-mix(in srgb, var(--accent) 35%, transparent); color: inherit; border-radius: 2px; }
-.hit .more { padding: 2px 0 0 10px; color: var(--faint); font-size: 11px; }
+.hit .more { display: block; padding: 3px 0 0 10px; color: var(--faint); font-size: 11px; background: none; border: 0;
+             cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.hit .more:hover { color: var(--accent); }
+/* The fold and the search stay at the top of the bar while the list scrolls
+   under them (23 Nov 2026); aside's padding moves into them, so nothing shows
+   above. The background is the bar's own, made solid. */
+.side-top { position: sticky; top: -10px; z-index: 4; margin: -10px -10px 0; padding: 10px 10px 2px;
+            background: color-mix(in srgb, var(--surface) 70%, var(--bg)); }
+#chat.side-folded .side-top { position: static; margin: 0; padding: 0; background: none; }
 .side-none { color: var(--faint); font-style: italic; padding: 8px; font-size: 12.5px; }
 .msg.found { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 10px; transition: outline-color 1.2s; }
 .msg.found.fading { outline-color: transparent; }

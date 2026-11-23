@@ -106,6 +106,9 @@ SETTINGS = {
     # (ui.pictures): full, strip (side by side when there are several) or
     # folded (one line per message, opened with a click)
     "pictures": str,
+    # the same for the pictures you send in this chat, over every chat's
+    # (ui.my_pictures); unset, yours go as `pictures` says
+    "my_pictures": str,
 }
 QUEUE_MODES = ("meld", "each", "hold")
 INTERRUPT_MODES = ("round", "seat", "now")
@@ -188,7 +191,7 @@ def clean_settings(raw: Any) -> dict[str, Any]:
             raise Invalid(f"interrupt is one of {', '.join(INTERRUPT_MODES)}")
         if key == "translate" and value not in TRANSLATE_MODES:
             raise Invalid(f"translate is one of {', '.join(TRANSLATE_MODES)}")
-        if key == "pictures" and value not in PICTURE_MODES:
+        if key in ("pictures", "my_pictures") and value not in PICTURE_MODES:
             raise Invalid(f"pictures is one of {', '.join(PICTURE_MODES)}")
         if key == "voice" and value not in VOICES:
             raise Invalid(f"voice is one of {', '.join(VOICES)}")
@@ -414,6 +417,15 @@ class SessionStore:
                 out.append(hit)
         out.sort(key=lambda h: (not h["title_hit"], -h["updated"]))
         return out[:limit]
+
+    def search_one(self, sid: str, query: str, most: int = 2000) -> Optional[dict[str, Any]]:
+        """Every message of one chat where `query` turns up, newest first
+        (the sidebar's "and N more in this chat", opened: 23 Nov 2026, Chad
+        looking for something said many messages back). None when it is not
+        there."""
+        terms = _terms(query if isinstance(query, str) else "")
+        s = self.get(sid) if terms else None
+        return search_session(s, terms, most) if s is not None else None
 
     def get(self, sid: str) -> Optional[dict[str, Any]]:
         path = self._path(sid)

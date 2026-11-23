@@ -386,6 +386,9 @@ class UiConfig(BaseModel):
     #           opened with a click
     # Every chat's default; a chat can say otherwise (its settings' `pictures`).
     pictures: Literal["full", "strip", "folded"] = "strip"
+    # The same, for the pictures YOU send (23 Nov 2026, Chad: "a secondary one
+    # for user picture folding"). Blank: as `pictures` says.
+    my_pictures: Literal["", "full", "strip", "folded"] = ""
     # What the picture panel's translate is given to draft a prompt from. It
     # used to be your words alone, in a blank session, so "a picture of us at
     # the table" had no idea who "us" was (Chad, 17 Nov 2026: "having the

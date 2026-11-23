@@ -65,7 +65,7 @@ APP_FIELDS = {"you": ("ui", "you"), "claude_name": ("claude", "name"),
               "claude_effort": ("claude", "effort"), "claude_thinking": ("claude", "thinking_display"),
               "confirm_destructive": ("ui", "confirm_destructive"),
               "queue": ("ui", "queue"), "translate": ("ui", "translate"), "interrupt": ("ui", "interrupt"),
-              "pictures": ("ui", "pictures"),
+              "pictures": ("ui", "pictures"), "my_pictures": ("ui", "my_pictures"),
               "claude_mode": ("claude", "permission_mode"), "claude_ask": ("claude", "ask"),
               "claude_tools": ("claude", "allowed_tools"), "claude_dirs": ("claude", "add_dirs")}
 # Not bypassPermissions: a window that can switch every check off with one
@@ -201,6 +201,10 @@ class Prefs:
         if key == "interrupt":
             if value not in INTERRUPT_MODES:
                 raise Invalid(f"interrupt is one of: {', '.join(INTERRUPT_MODES)}")
+            return value
+        if key == "my_pictures":
+            if value not in ("", *PICTURE_MODES):
+                raise Invalid(f"my_pictures is one of: {', '.join(PICTURE_MODES)}, or blank for as pictures says")
             return value
         if key == "pictures":
             if value not in PICTURE_MODES:

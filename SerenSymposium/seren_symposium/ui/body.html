@@ -82,6 +82,7 @@
        which are folded is this browser's to remember (scripts.js, BARS).
        The chevron is the shell's .seren-chev, turned by aria-expanded. -->
   <aside id="side">
+    <div class="side-top">
     <button type="button" class="bar-toggle" id="side-toggle" aria-expanded="true" aria-controls="side-list"
             title="fold the projects away"><span class="seren-chev" aria-hidden="true"></span><span class="bar-name">Projects</span></button>
     <!-- Every chat, archived ones too: titles and what was said (GET /api/sessions/search).
@@ -89,6 +90,7 @@
     <div class="side-search"><input id="side-q" type="search" placeholder="search every chat  (Ctrl+K)" autocomplete="off"
          title="find words in any chat's title or messages - archived chats too. Every word has to be in the same message.">
       <button type="button" class="ghost icon kebab" id="side-more" aria-haspopup="menu" title="new project, import a chat, pick up from a terminal">⋮</button></div>
+    </div>
     <div class="side-list" id="side-list"></div>
   </aside>
 
@@ -264,6 +266,7 @@
         <label for="a-queue" title="what you send while an answer is coming waits above the box: this is how it goes once the answer is in. A chat can say otherwise (⚙ above the chat). Stopping an answer always holds what is waiting.">sent mid-answer</label><select id="a-queue"></select>
         <label for="a-interrupt" title="when what you send while an answer is coming goes. A chat can say otherwise (its gear), and so can a single message (beside the send button).">interrupting</label><select id="a-interrupt"></select>
         <label for="a-pictures" title="how pictures sit in the log: each at full size, several side by side as thumbs, or folded to one line per message. A chat can say otherwise (its gear).">pictures</label><select id="a-pictures"></select>
+        <label for="a-my_pictures" title="the same, for the pictures you send - fold yours and leave the rest, or the other way round. A chat can say otherwise (its gear).">your pictures</label><select id="a-my_pictures"></select>
         <label for="a-translate" title="what the picture panel's translate drafts a prompt from. A chat can say otherwise, in its own picture panel.">picture prompts from</label><select id="a-translate"></select>
         <span></span><label class="check"><input type="checkbox" id="a-confirm_destructive"> ask before deleting or rewinding</label>
         <p class="note">Kept with your chats (<span id="a-prefs-file"></span>), not in the yaml, so a reinstall leaves them alone.</p>
@@ -332,6 +335,7 @@
       <label for="s-system_prompt">system prompt</label><textarea id="s-system_prompt"></textarea>
       <span></span><label class="check"><input type="checkbox" id="s-system_inherit"> after its project's prompt (unticked: this one only)</label>
       <label for="s-pictures" title="how this chat's pictures sit in the log: each at full size, several side by side as thumbs, or folded to one line per message">pictures</label><select id="s-pictures"></select>
+      <label for="s-my_pictures" title="the same, for the pictures you send in this chat">your pictures</label><select id="s-my_pictures"></select>
     </div>
     <div class="form cs-pane" data-pane="claude" hidden>
       <label for="s-permission_mode" class="claude-only">permission mode</label><select id="s-permission_mode" class="claude-only"></select>
@@ -368,6 +372,14 @@
     <button type="button" class="ghost icon" id="st-refresh" title="look again"><svg class="i"><use href="#i-refresh"/></svg></button>
     <button class="ghost" title="close">✕</button></form>
   <div id="st-body"></div>
+</dialog>
+
+<!-- ── A task left running in the background, looked into (the "running" chip) ── -->
+<dialog class="sheet wide" id="task-sheet">
+  <form method="dialog" class="sheet-head"><h3 id="tk-title">Running</h3>
+    <button type="button" class="ghost icon" id="tk-refresh" title="look again"><svg class="i"><use href="#i-refresh"/></svg></button>
+    <button class="ghost" title="close">✕</button></form>
+  <div id="tk-body"></div>
 </dialog>
 
 <!-- ── One tool call in full (the expand corner on a step under the fold) ── -->

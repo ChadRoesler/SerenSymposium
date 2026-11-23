@@ -17,7 +17,7 @@ async function call(method, path, body) {
   return j;
 }
 
-const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty", "cwd", "queue", "interrupt", "pictures"];
+const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty", "cwd", "queue", "interrupt", "pictures", "my_pictures"];
 const NUMBER = new Set(["temperature", "max_tokens", "repeat_penalty"]);
 // A chat's settings sit on top of its project's; the project calls one of
 // them by a shorter name.
@@ -65,9 +65,14 @@ function drawBehind() {
   $("#behind").hidden = !running.length;
   $("#behind").innerHTML = running.map(b => {
     const who = b.seat ? seatWho(b.seat) : voiceName("claude");
-    const what = (b.tasks || []).join(" · ") || "a task";
+    // Each task opens on a click: what it ran, how long, its output so far (23 Nov 2026).
+    const details = (b.details || []).filter(d => d.id);
+    const what = details.length
+      ? details.map(d => `<button type="button" class="task-open" data-btask="${esc(d.id)}" title="what it is running, and its output so far">`
+          + `${esc(d.description || d.type || "a task")} <i>${esc(howLong(d.since))}</i></button>`).join(" · ")
+      : esc((b.tasks || []).join(" · ") || "a task");
     return `<span class="task" title="${esc(who)} left this running; the chat is not held by it, and ${esc(who)} says so when it ends">`
-      + `<b>running</b><span>${esc(who)}: ${esc(what)}</span>`
+      + `<b>running</b><span>${esc(who)}: ${what}</span>`
       + `<button type="button" data-bstop="${esc(b.seat || "")}" title="end it now - nobody is woken">×</button></span>`;
   }).join("");
   if (running.length && !BEHIND_TIMER) BEHIND_TIMER = setInterval(lookBehind, 4000);
@@ -81,9 +86,61 @@ async function lookBehind() {
   if (current?.id !== sid || chatBusy() || FOLLOWER || OPENING) return;
   const was = JSON.stringify(current.background || []), now = JSON.stringify(s.background || []);
   if (s.messages.length !== current.messages.length || s.answering) return openSession(sid);   // it came back, or someone is answering
-  if (was !== now) { current.background = s.background; drawBehind(); }
+  current.background = s.background;
+  if (was !== now || (s.background || []).length) drawBehind();     // the "running for" ticks on
 }
+// How long since `t` (seconds), in the fewest words: 40s, 12m, 5h 12m, 2d 3h.
+function howLong(t) {
+  const s = Math.max(0, Math.round(Date.now() / 1000 - Number(t || 0)));
+  if (!t) return "";
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  return d ? `${d}d ${h % 24}h` : h ? `${h}h ${m % 60}m` : `${m}m`;
+}
+
+// A task left running, looked into: refreshed every few seconds while open.
+let TASK_OPEN = null, TASK_TIMER = null;
+async function drawTask() {
+  if (!TASK_OPEN || !current) return;
+  const [sid, id] = TASK_OPEN;
+  let t;
+  try { t = await call("GET", `/api/sessions/${encodeURIComponent(sid)}/background/${encodeURIComponent(id)}`); }
+  catch (ex) {
+    $("#tk-body").innerHTML = `<p class="muted">${esc(ex.message)}</p>`;
+    clearInterval(TASK_TIMER); TASK_TIMER = null; return;
+  }
+  if (!TASK_OPEN || TASK_OPEN[1] !== id) return;
+  const who = t.seat ? seatWho(t.seat) : voiceName("claude");
+  $("#tk-title").textContent = t.description || t.type || "Running";
+  const by = t.started_by, o = t.output;
+  const box = $("#tk-body"), out = box.querySelector(".tk-out");
+  const stuck = out && out.scrollTop + out.clientHeight >= out.scrollHeight - 8;   // following the end: keep following
+  box.innerHTML = `<dl class="tk-facts"><dt>who</dt><dd>${esc(who)}</dd>`
+    + `<dt>running for</dt><dd>${esc(howLong(t.since))} <span class="muted">(since ${esc(new Date(t.since * 1000).toLocaleString())})</span></dd>`
+    + `<dt>kind</dt><dd><code>${esc(t.type || "?")}</code> · id <code>${esc(t.id)}</code></dd>`
+    + (o ? `<dt>last wrote</dt><dd>${esc(howLong(o.written_at))} ago · ${(o.size / 1024).toFixed(1)} KB</dd>` : "")
+    + `</dl>`
+    + (by ? `<h4>what it ran (${esc(by.tool)})</h4><pre class="sf-pre">${esc(by.input?.command || JSON.stringify(by.input, null, 2))}</pre>` : "")
+    + (o ? `<h4>its output so far${o.cut ? " (the end of it)" : ""}</h4><pre class="sf-pre tk-out">${esc(o.tail || "(nothing yet)")}</pre>`
+         + `<p class="muted tk-path">${esc(o.path)}</p>`
+         : `<p class="muted">No output file for this one - an agent task keeps its words in its own transcript.</p>`);
+  const fresh = box.querySelector(".tk-out");
+  if (fresh && (stuck || !out)) fresh.scrollTop = fresh.scrollHeight;
+}
+function openTask(id) {
+  if (!current) return;
+  TASK_OPEN = [current.id, id];
+  $("#tk-body").innerHTML = `<p class="muted">looking…</p>`;
+  if (!$("#task-sheet").open) $("#task-sheet").showModal();
+  drawTask();
+  clearInterval(TASK_TIMER); TASK_TIMER = setInterval(drawTask, 3000);
+}
+$("#task-sheet").addEventListener("close", () => { TASK_OPEN = null; clearInterval(TASK_TIMER); TASK_TIMER = null; });
+$("#tk-refresh").onclick = () => drawTask();
+
 $("#behind").onclick = async e => {
+  const open = e.target.closest("[data-btask]");
+  if (open) return openTask(open.dataset.btask);
   const x = e.target.closest("[data-bstop]");
   if (!x || !current) return;
   x.disabled = true;
@@ -128,6 +185,13 @@ const picturesMode = () => {
   const own = current ? current.settings?.pictures : DRAFT.settings.pictures;
   return PICTURE_NAMES[own] ? own : PICTURE_NAMES[CFG?.pictures] ? CFG.pictures : "strip";
 };
+// The pictures YOU send, on their own (23 Nov 2026): this chat's, every
+// chat's, else as everyone's go.
+const myPicturesMode = () => {
+  const own = current ? current.settings?.my_pictures : DRAFT.settings.my_pictures;
+  return PICTURE_NAMES[own] ? own : PICTURE_NAMES[CFG?.my_pictures] ? CFG.my_pictures : picturesMode();
+};
+const isYours = m => m.role === "user" && !m.source && !m.seat;
 const interruptMode = () => {
   const own = current ? current.settings?.interrupt : DRAFT.settings.interrupt;
   const usual = INTERRUPT_NAMES[own] ? own : INTERRUPT_NAMES[CFG?.interrupt] ? CFG.interrupt : "round";
@@ -368,7 +432,9 @@ async function setArchived(id, on) {
 // What is typed in the bar's box, and what came back for it. The server reads
 // every chat, archived ones too; a reply that lands after newer words were
 // typed is dropped.
-const SEARCH = { q: "", hits: [], asked: 0, timer: 0, pending: false };
+// `all`: chat id -> every match in it, for the chats whose "and N more" was
+// opened (23 Nov 2026); kept until the words change.
+const SEARCH = { q: "", hits: [], asked: 0, timer: 0, pending: false, all: new Map() };
 const searchTerms = q => q.toLowerCase().split(/\s+/).filter(Boolean);
 function hiliteTerms(text, terms) {
   let out = esc(text);
@@ -383,11 +449,14 @@ function drawHits() {
   }
   $("#side-list").innerHTML = SEARCH.hits.map(h => {
     const here = current && h.id === current.id;
-    const snips = h.matches.map(m => {
+    const all = SEARCH.all.get(h.id), shown = all || h.matches;
+    const snips = shown.map(m => {
       const who = m.role === "user" ? "you" : (m.seat || voiceName("claude"));
       return `<span class="snip" data-hit="${esc(h.id)}" data-at="${m.index}"><b>${esc(who)}:</b> ${hiliteTerms(m.snippet, terms)}</span>`;
     }).join("");
-    const more = h.hits > h.matches.length ? `<div class="more">and ${h.hits - h.matches.length} more in this chat</div>` : "";
+    // "and N more" opens every match in the chat, newest first; again folds it.
+    const more = all ? `<button type="button" class="more" data-more="${esc(h.id)}">show only the newest ${h.matches.length}</button>`
+      : h.hits > h.matches.length ? `<button type="button" class="more" data-more="${esc(h.id)}">and ${h.hits - h.matches.length} more in this chat</button>` : "";
     return `<div class="hit" data-hit="${esc(h.id)}" aria-current="${here}" title="${esc(h.title || "untitled")}${h.archived ? " · archived" : ""}">`
          + `<div class="hit-head"><span class="hit-title">${h.title_hit ? hiliteTerms(h.title || "untitled", terms) : esc(h.title || "untitled")}</span>`
          + `<span class="hit-where">${esc(h.folder || "chats")}${h.archived ? " · archived" : ""}</span></div>`
@@ -405,7 +474,16 @@ async function runSearch() {
     return;
   }
   if (n !== SEARCH.asked) return;                  // newer words were typed meanwhile
-  SEARCH.pending = false; SEARCH.hits = got.sessions; drawHits();
+  SEARCH.pending = false; SEARCH.hits = got.sessions; SEARCH.all.clear(); drawHits();
+}
+async function openMore(id) {
+  if (SEARCH.all.has(id)) { SEARCH.all.delete(id); return drawHits(); }
+  const q = SEARCH.q;
+  try {
+    const got = await call("GET", `/api/sessions/search?q=${encodeURIComponent(q)}&chat=${encodeURIComponent(id)}`);
+    if (q !== SEARCH.q || !got.sessions?.[0]) return;
+    SEARCH.all.set(id, got.sessions[0].matches); drawHits();
+  } catch (ex) { alert(`could not search that chat: ${ex.message}`); }
 }
 $("#side-q").addEventListener("input", () => {
   SEARCH.q = $("#side-q").value.trim();
@@ -434,6 +512,8 @@ async function openAt(id, index) {
 }
 
 $("#side").onclick = async e => {
+  const more = e.target.closest("[data-more]");
+  if (more) { e.stopPropagation(); return openMore(more.dataset.more); }
   const snip = e.target.closest(".snip[data-hit]");
   if (snip) return openAt(snip.dataset.hit, Number(snip.dataset.at));
   const hit = e.target.closest(".hit[data-hit]");
@@ -1078,7 +1158,7 @@ function bubble(m, i, count, opts = {}) {
   }
   const atts = attachmentsEl(m.files, current?.id, m.content);
   if (atts) d.append(atts);
-  layoutPictures(d, picturesMode());
+  layoutPictures(d, isYours(m) ? myPicturesMode() : picturesMode());
   if (!opts.bare) {
     const meta = document.createElement("div"); meta.className = "meta";
     const line = asked ? "" : receipt(m.meta);
@@ -1163,21 +1243,23 @@ function stepHtml(s) {
   const mark = s.ok === undefined ? "…" : s.ok ? "✓" : "✗";
   // The corner opens the whole call - every argument, all that came back -
   // from the CLI's transcript; the fold keeps a preview (22 Nov 2026).
-  const full = s.id ? `<button type="button" class="step-full" data-tool="${esc(s.id)}" title="see all of it">${icon("expand")}</button>` : "";
+  const full = s.id ? `<button type="button" class="step-full" data-tool="${esc(s.id)}" data-cli="${esc(s.sid || "")}" `
+    + `title="see all of it">${icon("expand")}</button>` : "";
   return `<div class="step tool${s.ok === false ? " bad" : ""}"><span class="mark">${mark}</span>`
        + `<span class="body"><code>${esc(s.tool)}</code> <span class="sum">${esc(s.summary || "")}</span>`
        + (s.result ? `<div class="res">${full}<pre>${esc(s.result)}</pre></div>` : full) + `</span></div>`;
 }
 
 // One tool call in full, in its own sheet.
-async function openStep(toolId) {
+async function openStep(toolId, cli = "") {
   const sid = current?.id;
   if (!sid) return;
   $("#sf-title").textContent = "Tool call";
   $("#sf-body").innerHTML = `<p class="muted">reading the transcript…</p>`;
   if (!$("#step-sheet").open) $("#step-sheet").showModal();
   try {
-    const st = await call("GET", `/api/sessions/${encodeURIComponent(sid)}/steps/${encodeURIComponent(toolId)}`);
+    const st = await call("GET", `/api/sessions/${encodeURIComponent(sid)}/steps/${encodeURIComponent(toolId)}`
+                                 + (cli ? `?cli=${encodeURIComponent(cli)}` : ""));
     $("#sf-title").textContent = st.tool || "Tool call";
     const given = st.input === null || st.input === undefined ? "" : JSON.stringify(st.input, null, 2);
     const result = st.result === null ? "(nothing came back yet)" : st.result;
@@ -1193,7 +1275,7 @@ document.addEventListener("click", e => {
   const b = e.target.closest?.(".step-full");
   if (!b) return;
   e.preventDefault(); e.stopPropagation();
-  openStep(b.dataset.tool);
+  openStep(b.dataset.tool, b.dataset.cli || "");
 });
 
 function stepsLine(steps, liveNow) {
@@ -2016,7 +2098,7 @@ async function follow(sid, r, ctrl, pre = null, asked = null, retry = false) {
       if (last?.kind === "thinking") last.text += ev.content; else into.push({ kind: "thinking", text: ev.content });
       later();
     } else if (ev.type === "tool_call") {
-      (interleave ? parts : steps).push({ kind: "tool", id: ev.id, tool: ev.tool, summary: ev.summary }); later();
+      (interleave ? parts : steps).push({ kind: "tool", id: ev.id, tool: ev.tool, summary: ev.summary, sid: ev.sid }); later();
     } else if (ev.type === "tool_result") {
       const s = (interleave ? parts : steps).find(x => x.id === ev.id);
       if (s) { s.ok = ev.ok; s.result = ev.preview; later(); }
@@ -2715,6 +2797,10 @@ function drawChatSettings() {
   $("#s-pictures").innerHTML = `<option value="">every chat's (${esc(PICTURE_NAMES[usualPics])})</option>`
     + Object.entries(PICTURE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
   $("#s-pictures").value = own.pictures ?? "";
+  const usualMine = PICTURE_NAMES[CFG.my_pictures] ? `every chat's for yours (${PICTURE_NAMES[CFG.my_pictures]})` : "as the pictures above";
+  $("#s-my_pictures").innerHTML = `<option value="">${esc(usualMine)}</option>`
+    + Object.entries(PICTURE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+  $("#s-my_pictures").value = own.my_pictures ?? "";
   // The prompts add up (22 Oct 2026): its project's, then this chat's after it.
   const inherit = own.system_inherit !== false, theirs = String(preset.system_prompt || "").trim();
   $("#s-system_inherit").checked = inherit;
@@ -2785,7 +2871,7 @@ function setChatSetting(k, v) {
     if (v === null) delete DRAFT.settings[k]; else DRAFT.settings[k] = v;
     drawChatSettings(); lockComposer(); picDrawHow(); return drawLog();
   }
-  patch({ settings: { [k]: v } }).then(() => { drawChatSettings(); drawTitlebar(); lockComposer(); picDrawHow(); if (k === "pictures") drawLog(); })
+  patch({ settings: { [k]: v } }).then(() => { drawChatSettings(); drawTitlebar(); lockComposer(); picDrawHow(); if (k === "pictures" || k === "my_pictures") drawLog(); })
     .catch(ex => { alert(ex.message); drawChatSettings(); });
 }
 $("#s-permission_mode").addEventListener("change", e => setChatSetting("permission_mode", e.target.value || null));
@@ -2850,6 +2936,9 @@ function drawSettings() {
   $("#a-interrupt").value = INTERRUPT_NAMES[CFG.interrupt] ? CFG.interrupt : "round";
   $("#a-pictures").innerHTML = Object.entries(PICTURE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
   $("#a-pictures").value = PICTURE_NAMES[CFG.pictures] ? CFG.pictures : "strip";
+  $("#a-my_pictures").innerHTML = `<option value="">as the pictures above</option>`
+    + Object.entries(PICTURE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
+  $("#a-my_pictures").value = PICTURE_NAMES[CFG.my_pictures] ? CFG.my_pictures : "";
   $("#a-translate").innerHTML = Object.entries(TRANSLATE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
   $("#a-translate").value = TRANSLATE_NAMES[CFG.translate] ? CFG.translate : "chat";
   $("#a-prefs-file").textContent = CFG.prefs_file || "";
@@ -2914,7 +3003,7 @@ for (const [box, key] of [["#c-tool-add", "claude_tools"], ["#c-dir-add", "claud
   });
 }
 
-for (const k of ["you", "claude_name", "confirm_destructive", "queue", "translate", "interrupt", "pictures"]) {
+for (const k of ["you", "claude_name", "confirm_destructive", "queue", "translate", "interrupt", "pictures", "my_pictures"]) {
   $(`#a-${k}`).addEventListener("change", async e => {
     const v = e.target.type === "checkbox" ? e.target.checked : e.target.value.trim();
     try { await call("PATCH", "/api/prefs", { [k]: v }); } catch (ex) { alert(ex.message); }

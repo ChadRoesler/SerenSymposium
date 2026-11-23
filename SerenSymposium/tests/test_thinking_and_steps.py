@@ -149,3 +149,10 @@ def test_a_tool_call_opens_in_full_from_the_transcript(make_client, tmp_path, mo
     assert tc.get(f"/api/sessions/{sid}/steps/toolu_nobody").status_code == 404
     assert tc.get(f"/api/sessions/{sid}/steps/..%2F..%2Fetc").status_code == 404
     assert tc.get(f"/api/sessions/nope/steps/{step['id']}").status_code == 404
+
+    # A step opened while its turn still runs is in no kept message yet: the
+    # window names the conversation, as the live tool_call event told it.
+    other = tc.post("/api/sessions", json={"folder": "plain"}).json()["id"]
+    assert tc.get(f"/api/sessions/{other}/steps/{step['id']}").status_code == 404
+    assert tc.get(f"/api/sessions/{other}/steps/{step['id']}", params={"cli": step["sid"]}).json()["result"] == long
+    assert tc.get(f"/api/sessions/{other}/steps/{step['id']}", params={"cli": "../x"}).status_code == 404

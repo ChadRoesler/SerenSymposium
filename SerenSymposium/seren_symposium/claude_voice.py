@@ -372,6 +372,7 @@ class Cli:
         self.stream = stream
         self.ticket = ticket                # where this process's permission asks go (its first turn's)
         self.tasks: list[dict[str, Any]] = []       # background tasks in flight, as the CLI last listed them
+        self.task_seen: dict[str, float] = {}       # task id -> when the CLI first listed it (it says no start time)
         self.notes: list[str] = []                  # what the CLI said of tasks that ended, since the last answer
         self.started = time.time()
         self.idle = asyncio.Event()         # clear while it is in a turn it began on its own
@@ -443,12 +444,19 @@ Wake = Callable[[dict[str, Any], "ClaudeTurn", list[str]], Awaitable[None]]
 
 
 def parked(key: Optional[str]) -> Optional[dict[str, Any]]:
-    """What conversation `key` has running in the background, for the window: {tasks: [words], since}."""
+    """What conversation `key` has running in the background, for the window:
+    {tasks: [words], since, details: [{id, type, description, since}]} - the
+    details so a task can be opened and looked into (23 Nov 2026: "after 5
+    hours its still going ... being able to click and see it")."""
     cli = PARKED.get(key or "")
     if cli is None or not cli.alive():
         return None
     return {"tasks": [str(t.get("description") or t.get("task_type") or "a task")[:200] for t in cli.tasks],
-            "since": cli.started}
+            "since": cli.started,
+            "details": [{"id": str(t.get("task_id") or ""), "type": str(t.get("task_type") or ""),
+                         "description": str(t.get("description") or "")[:500],
+                         "since": cli.task_seen.get(str(t.get("task_id") or ""), cli.started)}
+                        for t in cli.tasks]}
 
 
 def parked_ticket(key: Optional[str]) -> Optional[str]:
@@ -674,6 +682,9 @@ def _digest(ev: dict[str, Any], turn: ClaudeTurn, blocks: dict[Any, dict[str, An
     elif kind == "system" and ev.get("subtype") == "background_tasks_changed" and cli is not None:
         # What it has running in the background, whole, each time it changes.
         cli.tasks = [t for t in ev.get("tasks") or [] if isinstance(t, dict)]
+        for t in cli.tasks:
+            if isinstance(t.get("task_id"), str):
+                cli.task_seen.setdefault(t["task_id"], time.time())
         yield {"type": "background", "tasks": [str(t.get("description") or t.get("task_type") or "a task")[:200]
                                                for t in cli.tasks]}
     elif kind == "system" and ev.get("subtype") == "task_notification" and cli is not None:
@@ -714,11 +725,12 @@ def _digest(ev: dict[str, Any], turn: ClaudeTurn, blocks: dict[Any, dict[str, An
                     given = json.loads(b["json"] or "{}")
                 except ValueError:
                     given = {}
+                # `sid`: whose transcript holds it in full (terminal.tool_step).
+                # A chat's conversation can be started over, so the step says;
+                # and a step opened while its turn still runs is not kept yet.
                 call = {"id": b.get("id"), "tool": b.get("name") or "a tool",
-                        "summary": summarize(b.get("name") or "", given, 200)}
-                # Whose transcript holds it in full (terminal.tool_step): a
-                # chat's conversation can be started over, so the step says.
-                turn.step({"kind": "tool", **call, "sid": turn.session_id})
+                        "summary": summarize(b.get("name") or "", given, 200), "sid": turn.session_id}
+                turn.step({"kind": "tool", **call})
                 yield {"type": "tool_call", **call}
     elif kind == "user" and not ev.get("parent_tool_use_id"):
         content = (ev.get("message") or {}).get("content")
