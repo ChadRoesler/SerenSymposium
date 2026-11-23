@@ -541,6 +541,14 @@ details.st-server > summary { cursor: pointer; font-size: 12.5px; overflow-wrap:
               font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
 .bar-toggle:hover { color: var(--text); background: var(--surface-2); }
 .rail .bar-toggle { margin: 0; }
+/* The Panels fold stays at the top while the panels scroll under it, like the
+   Projects one (23 Nov 2026: the panels grow with files and such). The rail's
+   padding moves into it; the background is the rail's own, made solid. */
+.rail > .bar-toggle { position: sticky; top: -12px; z-index: 4; margin: -12px -12px 0; padding: 12px 18px 6px;
+                      width: calc(100% + 24px); border-radius: 0;
+                      background: color-mix(in srgb, var(--surface) 45%, var(--bg)); }
+.rail > .bar-toggle:hover { background: color-mix(in srgb, var(--surface-2) 70%, var(--bg)); }
+#chat.rail-folded .rail > .bar-toggle { position: static; margin: 0; padding: 6px 0; width: 100%; background: none; }
 #chat.side-folded #side { padding: 10px 3px; overflow: hidden; }
 #chat.side-folded .side-list { display: none; }
 #chat.rail-folded .rail { padding: 12px 3px; overflow: hidden; }
