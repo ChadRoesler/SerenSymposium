@@ -59,11 +59,14 @@ def own_prompt(preset: Optional[FolderPreset], settings: dict[str, Any]) -> str:
 
 
 def own_parts(preset: Optional[FolderPreset], settings: dict[str, Any]) -> list[tuple[str, str]]:
+    """The prompts in order: the project's, the chat's, and - for a seat of a
+    room - the seat's own (`seat_prompt`): the world, the place, who it is."""
     chat = str(settings.get("system_prompt") or "").strip()
     project = (preset.system_prompt if preset else "").strip()
+    seat = str(settings.get("seat_prompt") or "").strip()
     if settings.get("system_inherit") is False:
         project = ""
-    return [(k, t) for k, t in (("project", project), ("chat", chat)) if t]
+    return [(k, t) for k, t in (("project", project), ("chat", chat), ("seat", seat)) if t]
 
 
 def est_tokens(chars: int) -> int:
@@ -99,6 +102,12 @@ def _prompt_layers(preset: Optional[FolderPreset], settings: dict[str, Any], fol
     out.append(_layer("chat", "system", "This chat", text=chat, where="this chat's settings (⚙)", edit="chat",
                       state="on" if chat else "empty",
                       note=("Added after its project's prompt." if chat and project and inherit else "")))
+    # A room's seat: who it is, after the place (23 Nov 2026) - its alone.
+    if settings.get("seat_name"):
+        seat = str(settings.get("seat_prompt") or "").strip()
+        out.append(_layer("seat", "system", f"Seat: {settings['seat_name']}", text=seat,
+                          where="the seat's 📜, under the chat's ⚙ (Room)", state="on" if seat else "empty",
+                          note=("Added after the chat's prompt; only this seat is given it." if seat else "")))
     return out
 
 

@@ -284,8 +284,16 @@ def plan_seat(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], seat
     handover where every line says who said it, and the room's framing after
     the system prompt. `pending`: the person's message isn't in the chat yet
     (no seat has come back this round), so it ends the handover from here."""
+    # Its own system prompt, after the project's and the chat's: the world,
+    # the place, then who this seat is (stack.own_parts, 23 Nov 2026).
+    # And what it runs on, over the chat's: its model, how hard it thinks, what
+    # it shows of it (permissions.thinking reads seat_* as the top layer).
     plan = plan_claude(cfg, store, {**s, "claude": seat.get("claude")},
-                       {**layered, "cwd": seat.get("cwd") or layered.get("cwd") or ""},
+                       {**layered, "cwd": seat.get("cwd") or layered.get("cwd") or "",
+                        "seat_prompt": seat.get("system_prompt") or "",
+                        **({"model_override": seat["model"]} if seat.get("model") else {}),
+                        "seat_effort": seat.get("effort") or "",
+                        "seat_thinking_display": seat.get("thinking_display") or ""},
                        s["messages"], prompt, files)
     known = seat.get("claude") or {}
     thread = list(s["messages"]) + ([{"role": "user", "content": prompt, "files": files or []}] if pending else [])
@@ -1838,7 +1846,8 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         host = body.get("host") or _seat_name_for(s["settings"].get("cwd") or cfg.claude.cwd, "host")
         try:
             s = store.add_seat(sid, body.get("name") or "", cwd=cwd, conversation=conversation,
-                               fork=bool(fork), host=host)
+                               fork=bool(fork), host=host, system_prompt=body.get("system_prompt") or "",
+                               own={k: body.get(k) for k in ("model", "effort", "thinking_display") if body.get(k)})
         except Invalid as ex:
             return JSONResponse({"error": str(ex)}, status_code=400)
         return JSONResponse(s, status_code=201)
@@ -1857,8 +1866,9 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
 
     @app.patch("/api/sessions/{sid}/seats/{name}")
     async def seat_change(request: Request, sid: str, name: str):
-        """{name?, hue?} - call a seat something else (what it said goes
-        with it), or give it another colour."""
+        """{name?, hue?, system_prompt?} - call a seat something else (what
+        it said goes with it), give it another colour, or say who it is: its
+        own system prompt, after the project's and the chat's."""
         body = await _json(request)
         if sid in request.app.state.answering:
             return _busy()
@@ -2072,7 +2082,10 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
                 # The seat's own conversation, start-up report and folder, in the chat's place.
                 s = {**{k: v for k, v in s.items() if k not in ("claude", "claude_init")},
                      **{k: at[k] for k in ("claude", "claude_init") if at.get(k)}}
-                own = {**own, "voice": "claude", **({"cwd": at["cwd"]} if at.get("cwd") else {})}
+                own = {**own, "voice": "claude", **({"cwd": at["cwd"]} if at.get("cwd") else {}),
+                       "seat_name": at["name"], "seat_prompt": at.get("system_prompt") or "",
+                       **({"model_override": at["model"]} if at.get("model") else {}),
+                       "seat_effort": at.get("effort") or "", "seat_thinking_display": at.get("thinking_display") or ""}
         elif settings:
             try:
                 own = json.loads(settings)

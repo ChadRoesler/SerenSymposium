@@ -127,6 +127,44 @@ class Invalid(ValueError):
     """What the caller sent cannot be a session; the message says why."""
 
 
+MAX_SEAT_PROMPT = 20_000
+# What a seat may carry of its own besides its name, folder and colour (23
+# Nov 2026): who it is, and what it runs on - Haiku on low for the barmaid
+# with three words, Opus on high for the villain. Each over the chat's.
+SEAT_OWN = ("system_prompt", "model", "effort", "thinking_display")
+
+
+def _seat_value(key: str, value: Any) -> str:
+    """One of SEAT_OWN, checked: "" or None is none (the chat's shows through)."""
+    if key == "system_prompt":
+        return _seat_prompt(value)
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise Invalid(f"a seat's {key} is text")
+    from .permissions import _MODEL, EFFORTS, THINKING_DISPLAYS
+    if key == "model" and not _MODEL.fullmatch(value):
+        raise Invalid("a seat's model is a model id or alias (claude-haiku-5-5, opus)")
+    if key == "effort" and value not in EFFORTS:
+        raise Invalid(f"a seat's effort is one of {', '.join(e for e in EFFORTS if e)}")
+    if key == "thinking_display" and value not in THINKING_DISPLAYS:
+        raise Invalid(f"a seat's thinking_display is one of {', '.join(t for t in THINKING_DISPLAYS if t)}")
+    return value
+
+
+def _seat_prompt(value: Any) -> str:
+    """A seat's own system prompt: who that seat is (23 Nov 2026, from Chad's
+    accountant: NPCs in a campaign - the project is the world, the chat a
+    place, each seat a character). Stripped; "" or None is none."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise Invalid("a seat's system prompt is text")
+    if len(value) > MAX_SEAT_PROMPT:
+        raise Invalid(f"a seat's system prompt is at most {MAX_SEAT_PROMPT} characters")
+    return value.strip()
+
+
 def clean_settings(raw: Any) -> dict[str, Any]:
     """Only the known keys, of the right type. None or "" means "no opinion"
     and drops the key, so the folder's value shows through again."""
@@ -592,7 +630,8 @@ class SessionStore:
     # ── A room's seats (seren_symposium.room) ───────────────────────────
 
     def add_seat(self, sid: str, name: str, cwd: str = "", conversation: Optional[str] = None,
-                 fork: bool = False, host: str = "host") -> Optional[dict[str, Any]]:
+                 fork: bool = False, host: str = "host", system_prompt: str = "",
+                 own: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
         """A seat at this chat's table: a name, the folder it works in, and -
         picked up from a terminal - the CLI conversation it carries on. That
         conversation has heard nothing of this room yet (seen 0), so its
@@ -609,6 +648,9 @@ class SessionStore:
             raise Invalid("a seat's name is 1-32 letters, digits, _ . - or ·")
         if not isinstance(cwd, str):
             raise Invalid("cwd is a string")
+        given = {k: _seat_value(k, v) for k, v in {**(own or {}), "system_prompt": system_prompt}.items()
+                 if k in SEAT_OWN}
+        prompt = given.get("system_prompt") or ""
         if not s.get("seats") and s.get("claude"):
             if not room.valid_name(host) or host == name:
                 raise Invalid(f"the chat's own Claude takes a seat too: name it something besides {name}")
@@ -634,6 +676,11 @@ class SessionStore:
                 seat["claude"] = dict(back["claude"])
             if isinstance(back.get("hue"), int) and back["hue"] not in {x.get("hue") for x in seats}:
                 seat["hue"] = back["hue"]
+        given["system_prompt"] = prompt
+        for k in SEAT_OWN:                          # who she was, and what she ran on, too
+            v = given.get(k) or (back.get(k) if back is not None else "") or ""
+            if v:
+                seat[k] = v
         seats.append(seat)
         s["updated"] = _now()
         self._write(s)
@@ -661,7 +708,7 @@ class SessionStore:
             raise Invalid(f"no seat called {name}")
         s["seats"] = [x for x in s["seats"] if x.get("name") != name]
         s["left"] = [g for g in s.get("left") or [] if g.get("name") != name][-15:] + [
-            {k: gone[k] for k in ("name", "cwd", "hue", "claude") if k in gone}]
+            {k: gone[k] for k in ("name", "cwd", "hue", "claude", *SEAT_OWN) if k in gone}]
         if not s["seats"]:
             s.pop("seats")
             if isinstance(gone.get("claude"), dict) and gone["claude"].get("session") and not s.get("claude"):
@@ -688,10 +735,12 @@ class SessionStore:
         return s
 
     def change_seat(self, sid: str, name: str, changes: Any) -> Optional[dict[str, Any]]:
-        """{name?, hue?}: call a seat something else, or give it another
-        colour. A new name goes on what it already said too, so the chat
-        reads as one seat's and the others are handed it under one name;
-        its conversation and what it has heard are untouched."""
+        """{name?, hue?, system_prompt?, model?, effort?, thinking_display?}:
+        call a seat something else, give it another colour, say who it is or
+        what it runs on. A new name goes on what it already said too, so the
+        chat reads as one seat's and the others are handed it under one name;
+        its conversation and what it has heard are untouched. The rest ("" takes
+        one away, and the chat's shows through) count from its next turn."""
         from . import room
         s = self.get(sid)
         if s is None:
@@ -699,19 +748,27 @@ class SessionStore:
         seat = room.seat(s, name)
         if seat is None:
             raise Invalid(f"no seat called {name}")
-        if not isinstance(changes, dict) or not changes or set(changes) - {"name", "hue"}:
-            raise Invalid("a seat's name or hue can be changed")
-        if "hue" in changes:
-            hue = changes["hue"]
-            if isinstance(hue, bool) or not isinstance(hue, int) or not 0 <= hue < 360:
-                raise Invalid("hue is a whole number from 0 to 359")
-            seat["hue"] = hue
+        if not isinstance(changes, dict) or not changes or set(changes) - {"name", "hue", *SEAT_OWN}:
+            raise Invalid(f"a seat's name, hue, {', '.join(SEAT_OWN)} can be changed")
+        # Everything checked before anything is kept: a bad one changes nothing.
+        checked = {k: _seat_value(k, changes[k]) for k in SEAT_OWN if k in changes}
+        hue = changes.get("hue")
+        if "hue" in changes and (isinstance(hue, bool) or not isinstance(hue, int) or not 0 <= hue < 360):
+            raise Invalid("hue is a whole number from 0 to 359")
         new = changes.get("name", name)
         if new != name:
             if not room.valid_name(new):
                 raise Invalid("a seat's name is 1-32 letters, digits, _ . - or ·")
             if room.seat(s, new) is not None:
                 raise Invalid(f"there is already a seat called {new}")
+        for k, v in checked.items():
+            if v:
+                seat[k] = v
+            else:
+                seat.pop(k, None)
+        if "hue" in changes:
+            seat["hue"] = hue
+        if new != name:
             seat["name"] = new
             for m in s["messages"]:
                 if m.get("seat") == name:

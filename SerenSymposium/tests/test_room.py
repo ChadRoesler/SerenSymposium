@@ -171,6 +171,71 @@ def test_a_message_goes_round_the_table_in_order_each_in_its_own_folder(client, 
     assert lod["claude"]["session"] != kit["claude"]["session"]
 
 
+def test_each_seat_is_told_who_it_is_and_only_it_is(client, repos, runs):
+    """23 Nov 2026, from Chad's accountant: NPCs in a campaign. The project is
+    the world, the chat a place, each seat a character - its own system
+    prompt, after the other two, given to that seat alone (an NPC's secret
+    stays its own). It counts from the next turn, and comes back with a seat
+    who left and is invited again."""
+    sid = client.post("/api/sessions", json={"settings": {"voice": "claude",
+                                                           "system_prompt": "The Rusty Tankard, a dockside inn."}}).json()["id"]
+    r = client.post(f"/api/sessions/{sid}/seats", json={"name": "lodestar", "cwd": str(repos["SerenLodestar"]),
+                                                         "system_prompt": "You are Brann, the innkeeper. You owe the thieves' guild."})
+    assert r.status_code == 201 and r.json()["seats"][0]["system_prompt"].startswith("You are Brann")
+    client.post(f"/api/sessions/{sid}/seats", json={"name": "kitchen", "cwd": str(repos["SerenKitchen"])})
+    stream(client, {"session": sid, "prompt": "We walk in."})
+    brann, other = (flag(run["argv"], "--append-system-prompt") for run in runs())
+    assert brann.index("The Rusty Tankard") < brann.index("You are Brann") < brann.index("You are lodestar"), \
+        "the place, then who this seat is, then where it sits"
+    assert "Brann" not in other and "thieves" not in other, "a seat's prompt is its own"
+
+    r = client.patch(f"/api/sessions/{sid}/seats/kitchen", json={"system_prompt": "You are Mira, a fence."})
+    assert r.status_code == 200
+    stream(client, {"session": sid, "prompt": "We sit down."})
+    assert "You are Mira, a fence." in flag(runs()[-1]["argv"], "--append-system-prompt"), "from the next turn"
+    assert client.patch(f"/api/sessions/{sid}/seats/kitchen", json={"system_prompt": 7}).status_code == 400
+    assert client.patch(f"/api/sessions/{sid}/seats/kitchen", json={"system_prompt": ""}).json()["seats"][1].get("system_prompt") is None
+
+    # The stack shows who the seat is, as its own layer.
+    layers = client.get("/api/stack", params={"session": sid, "seat": "lodestar"}).json()["layers"]
+    seat_layer = next(l for l in layers if l.get("id") == "seat" or str(l.get("title", "")).startswith("Seat:"))
+    assert "You are Brann" in json.dumps(seat_layer)
+
+    client.delete(f"/api/sessions/{sid}/seats/lodestar")
+    back = client.post(f"/api/sessions/{sid}/seats", json={"name": "lodestar"}).json()
+    assert next(x for x in back["seats"] if x["name"] == "lodestar")["system_prompt"].startswith("You are Brann"), \
+        "invited back, she is who she was"
+
+
+def test_each_seat_runs_on_its_own_model_and_thinks_as_hard_as_it_says(client, repos, runs):
+    """The barmaid on Haiku at low, the villain on Opus at high: a seat's own
+    model and thinking, over the chat's - and a bad value changes nothing."""
+    sid = client.post("/api/sessions", json={"settings": {"voice": "claude", "model_override": "sonnet",
+                                                           "effort": "medium"}}).json()["id"]
+    client.post(f"/api/sessions/{sid}/seats", json={"name": "lodestar", "cwd": str(repos["SerenLodestar"]),
+                                                     "model": "claude-haiku-5-5", "effort": "low"})
+    client.post(f"/api/sessions/{sid}/seats", json={"name": "kitchen", "cwd": str(repos["SerenKitchen"])})
+    stream(client, {"session": sid, "prompt": "The doors open."})
+    barmaid, villain = runs()
+    assert (flag(barmaid["argv"], "--model"), flag(barmaid["argv"], "--effort")) == ("claude-haiku-5-5", "low")
+    assert (flag(villain["argv"], "--model"), flag(villain["argv"], "--effort")) == ("sonnet", "medium"), "the chat's"
+
+    assert client.patch(f"/api/sessions/{sid}/seats/kitchen",
+                        json={"model": "opus", "effort": "high", "thinking_display": "summarized"}).status_code == 200
+    stream(client, {"session": sid, "prompt": "Someone screams."})
+    last = runs()[-1]
+    assert (flag(last["argv"], "--model"), flag(last["argv"], "--effort"), flag(last["argv"], "--thinking-display")) == \
+        ("opus", "high", "summarized")
+
+    for bad in ({"model": "x&calc.exe"}, {"effort": "eleven"}, {"thinking_display": "all of it"},
+                {"effort": "high", "hue": 999}):
+        assert client.patch(f"/api/sessions/{sid}/seats/kitchen", json=bad).status_code == 400, bad
+    kitchen = next(x for x in client.get(f"/api/sessions/{sid}").json()["seats"] if x["name"] == "kitchen")
+    assert (kitchen["model"], kitchen["effort"]) == ("opus", "high"), "a refused change changes nothing"
+    cleared = client.patch(f"/api/sessions/{sid}/seats/kitchen", json={"model": "", "effort": ""}).json()
+    assert "model" not in cleared["seats"][1] and "effort" not in cleared["seats"][1], "blank: the chat's again"
+
+
 def test_next_round_each_resumes_its_own_and_hears_only_whats_new(client, repos, runs):
     sid = a_room(client, repos, "lodestar", "kitchen")
     stream(client, {"session": sid, "prompt": "one"})

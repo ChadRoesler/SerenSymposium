@@ -596,7 +596,15 @@ details.st-server > summary { cursor: pointer; font-size: 12.5px; overflow-wrap:
 
 /* A room's seats, under the chat's ⚙ (seren_symposium.room) */
 .seat-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; }
-.seat-row { display: grid; grid-template-columns: auto auto auto minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; }
+.seat-row { display: grid; grid-template-columns: auto auto auto minmax(0, 1fr) auto auto auto auto; gap: 8px; align-items: center; }
+/* Who a seat is (23 Nov 2026): its own system prompt, open under its row. */
+.seat-row .seat-who { opacity: .45; }
+.seat-row .seat-who.set { opacity: 1; }
+.seat-prompt { margin: 2px 0 8px 30px; display: flex; flex-direction: column; gap: 4px; }
+.seat-prompt textarea { min-height: 90px; resize: vertical; font-size: 12.5px; }
+.seat-runs { display: flex; flex-wrap: wrap; gap: 6px; }
+.seat-runs input { flex: 1 1 160px; min-width: 0; font-size: 12.5px; }
+.seat-runs select { flex: 1 1 140px; min-width: 0; font-size: 12.5px; }
 .seat-face { background: none; border: 0; padding: 0; line-height: 0; cursor: pointer; }
 .seat-face .avatar { margin: 0; }
 
@@ -662,6 +670,7 @@ form#composer { position: relative; }
 .seat-row .note { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .seat-add { display: flex; flex-wrap: wrap; gap: 6px; }
 .seat-add input { flex: 1 1 120px; min-width: 0; }
+.seat-add textarea { flex: 1 1 100%; min-height: 54px; resize: vertical; font-size: 12.5px; }
 
 /* ── 21 Nov 2026: archive and search in the projects bar ── */
 .side-search { flex: none; margin: 0 0 6px; }

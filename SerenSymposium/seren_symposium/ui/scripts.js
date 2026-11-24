@@ -18,7 +18,11 @@ async function call(method, path, body) {
 }
 
 const SETTINGS = ["voice", "system_prompt", "model_override", "temperature", "max_tokens", "repeat_penalty", "cwd", "queue", "interrupt", "pictures", "my_pictures"];
-const NUMBER = new Set(["temperature", "max_tokens", "repeat_penalty"]);
+// How hard Claude thinks and what it shows of it (pickOptions; up here, as the seats use them too).
+const EFFORT_LABELS = { low: "low - quick and cheap", medium: "medium", high: "high - thinks harder",
+                        xhigh: "extra high - long coding and agent work", max: "max - whatever it costs" };
+const THINKING_LABELS = { summarized: "a summary of it", highlights: "highlights",
+                          omitted: "nothing (it still thinks, still billed)" };const NUMBER = new Set(["temperature", "max_tokens", "repeat_penalty"]);
 // A chat's settings sit on top of its project's; the project calls one of
 // them by a shorter name.
 const PRESET = { model_override: "model" };
@@ -592,6 +596,7 @@ $("#pu-body").onclick = async e => {
 // round them in order, each hearing the ones before. @name puts a seat
 // first, @name! asks only the ones named. The order here is the order the
 // table goes round: ↑ ↓ move a seat, its name renames it, its dot recolours it.
+const SEAT_PROMPT_OPEN = new Set();               // seats whose "who they are" is open under their row
 function drawSeats() {
   const box = $("#s-seats");
   if (!current) { box.innerHTML = `<p class="note">Send the first message, then invite seats.</p>`; return; }
@@ -604,12 +609,28 @@ function drawSeats() {
           + `<span class="note" title="${esc(x.cwd || "")}">${esc(x.cwd ? lastPart(x.cwd) : "claude.cwd")}</span>`
           + `<button type="button" class="ghost" data-move="${esc(x.name)}" data-by="-1" title="answer earlier"${i ? "" : " disabled"}>↑</button>`
           + `<button type="button" class="ghost" data-move="${esc(x.name)}" data-by="1" title="answer later"${i < seats.length - 1 ? "" : " disabled"}>↓</button>`
-          + `<button type="button" class="ghost" data-unseat="${esc(x.name)}" title="let ${esc(x.name)} go - what they said stays">✕</button></div>`).join("")
+          + `<button type="button" class="ghost seat-who${x.system_prompt || x.model || x.effort || x.thinking_display ? " set" : ""}" data-who="${esc(x.name)}" `
+          + `title="who ${esc(x.name)} is and what they run on: their own system prompt, model and thinking, over the chat's`
+          + `${[x.model, x.effort && `thinks ${x.effort}`].filter(Boolean).length ? ` (now: ${esc([x.model, x.effort && `thinks ${x.effort}`].filter(Boolean).join(", "))})` : ""}">📜</button>`
+          + `<button type="button" class="ghost" data-unseat="${esc(x.name)}" title="let ${esc(x.name)} go - what they said stays">✕</button></div>`
+          // Who this seat is (23 Nov 2026): the project is the world, the chat
+          // the place, the seat the character. Only this seat is given it.
+          + `<div class="seat-prompt" data-for="${esc(x.name)}"${SEAT_PROMPT_OPEN.has(x.name) ? "" : " hidden"}>`
+          + `<textarea data-prompt-for="${esc(x.name)}" placeholder="who ${esc(x.name)} is - only ${esc(x.name)} is told this, `
+          + `after the project's prompt and the chat's">${esc(x.system_prompt || "")}</textarea>`
+          // What it runs on, over the chat's: the barmaid on Haiku, the villain on Opus.
+          + `<div class="seat-runs"><input data-seat-k="model" list="claude-models" value="${esc(x.model || "")}" `
+          + `placeholder="model: the chat's" spellcheck="false" title="${esc(x.name)}'s model, over the chat's">`
+          + `<select data-seat-k="effort" title="how hard ${esc(x.name)} thinks">${pickOptions(EFFORT_LABELS, "thinks: the chat's", x.effort || "")}</select>`
+          + `<select data-seat-k="thinking_display" title="what ${esc(x.name)} shows of its thinking">`
+          + `${pickOptions(THINKING_LABELS, "shows: the chat's", x.thinking_display || "")}</select></div>`
+          + `<div class="row-buttons"><button type="button" class="ghost" data-save-who="${esc(x.name)}">save</button></div></div>`).join("")
         + `</div>`
       : `<p class="note">One Claude here. Invite a seat and this becomes a room: each seat its own session in its own folder, `
         + `answering in turn and hearing the others. @name puts one first; @name! asks only them.</p>`)
     + `<div class="seat-add"><input id="seat-name" placeholder="name" maxlength="32" spellcheck="false">`
     + `<input id="seat-cwd" placeholder="folder it works in" spellcheck="false">`
+    + `<textarea id="seat-prompt" placeholder="who they are (optional): their own system prompt - an NPC, a role, a voice"></textarea>`
     + `<button type="button" class="ghost" id="seat-invite">invite</button>`
     + `<button type="button" class="ghost" id="seat-pickup">from a terminal…</button>`
     + `<button type="button" class="ghost" data-face="default" title="the picture worn by everyone who has not picked one">default avatar…</button></div>`;
@@ -621,8 +642,20 @@ $("#s-seats").onclick = async e => {
     const gone = e.target.closest("[data-unseat]"), move = e.target.closest("[data-move]");
     const rename = e.target.closest("[data-rename]"), hue = e.target.closest("[data-hue]");
     const face = e.target.closest("[data-face]");
+    const who = e.target.closest("[data-who]"), saveWho = e.target.closest("[data-save-who]");
     if (face) return openAvatar(face.dataset.face, "", true, face.dataset.face === "default" ? "all" : "chat");
-    if (gone) {
+    if (who) {
+      const n = who.dataset.who;
+      SEAT_PROMPT_OPEN.has(n) ? SEAT_PROMPT_OPEN.delete(n) : SEAT_PROMPT_OPEN.add(n);
+      return drawSeats();
+    }
+    if (saveWho) {
+      const n = saveWho.dataset.saveWho, panel = saveWho.closest(".seat-prompt");
+      const body = { system_prompt: panel.querySelector("[data-prompt-for]")?.value ?? "" };
+      for (const el of panel.querySelectorAll("[data-seat-k]")) body[el.dataset.seatK] = el.value.trim();
+      current = await call("PATCH", `/api/sessions/${sid}/seats/${encodeURIComponent(n)}`, body);
+      SEAT_PROMPT_OPEN.delete(n);
+    } else if (gone) {
       current = await call("DELETE", `/api/sessions/${sid}/seats/${encodeURIComponent(gone.dataset.unseat)}`);
     } else if (move) {
       const order = current.seats.map(x => x.name), at = order.indexOf(move.dataset.move), to = at + Number(move.dataset.by);
@@ -642,8 +675,9 @@ $("#s-seats").onclick = async e => {
       current = await call("PATCH", `/api/sessions/${sid}/seats/${encodeURIComponent(hue.dataset.hue)}`, { hue: next });
     } else if (e.target.id === "seat-invite") {
       const name = $("#seat-name").value.trim(), cwd = $("#seat-cwd").value.trim();
+      const system_prompt = $("#seat-prompt").value.trim();
       if (!name) return $("#seat-name").focus();
-      current = await call("POST", `/api/sessions/${sid}/seats`, { name, cwd });
+      current = await call("POST", `/api/sessions/${sid}/seats`, { name, cwd, system_prompt });
     } else if (e.target.id === "seat-pickup") {
       return openPickup(true);
     } else return;
@@ -2260,10 +2294,7 @@ const SCOPE_NAMES = { chat: "this chat", project: "this project", all: "every ch
 // How hard Claude thinks (--effort) and what it shows of it (--thinking-display),
 // in the same layers as the permissions: chat, project, every chat, carabiner,
 // the CLI (22 Nov 2026). The thinking itself never comes back; a summary does.
-const EFFORT_LABELS = { low: "low - quick and cheap", medium: "medium", high: "high - thinks harder",
-                        xhigh: "extra high - long coding and agent work", max: "max - whatever it costs" };
-const THINKING_LABELS = { summarized: "a summary of it", highlights: "highlights",
-                          omitted: "nothing (it still thinks, still billed)" };
+
 function pickOptions(labels, blank, value) {
   return `<option value="">${esc(blank)}</option>`
     + Object.entries(labels).map(([k, l]) => `<option value="${k}"${value === k ? " selected" : ""}>${esc(l)}</option>`).join("");

@@ -133,14 +133,16 @@ def carabiner_session(cfg: SymposiumConfig) -> dict[str, Any]:
 def thinking(cfg: SymposiumConfig, preset: Optional[FolderPreset], settings: dict[str, Any],
              session_block: Optional[dict[str, Any]] = None) -> dict[str, str]:
     """{effort, effort_from, thinking_display, thinking_from}: the first layer
-    with an opinion, chat, project, every chat, carabiner; "cli" when none has
-    one. A project's counts only when its voice is claude, as with its model."""
+    with an opinion - a room's seat (`seat_effort`, `seat_thinking_display`),
+    chat, project, every chat, carabiner; "cli" when none has one. A
+    project's counts only when its voice is claude, as with its model."""
     k = carabiner_session(cfg) if session_block is None else session_block
     claude_preset = preset if preset is not None and preset.voice == "claude" else None
     out: dict[str, str] = {}
     for key, ok, said in (("effort", EFFORTS, "effort_from"), ("thinking_display", THINKING_DISPLAYS, "thinking_from")):
         out[key], out[said] = "", "cli"
-        for name, value in (("chat", settings.get(key)), ("project", getattr(claude_preset, key, "")),
+        for name, value in (("seat", settings.get(f"seat_{key}")), ("chat", settings.get(key)),
+                            ("project", getattr(claude_preset, key, "")),
                             ("symposium", getattr(cfg.claude, key, "")), ("carabiner", k.get(key))):
             if value and value in ok:
                 out[key], out[said] = value, name
