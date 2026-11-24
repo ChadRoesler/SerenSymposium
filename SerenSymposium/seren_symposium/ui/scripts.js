@@ -71,8 +71,9 @@ function drawBehind() {
       ? details.map(d => `<button type="button" class="task-open" data-btask="${esc(d.id)}" title="what it is running, and its output so far">`
           + `${esc(d.description || d.type || "a task")} <i>${esc(howLong(d.since))}</i></button>`).join(" · ")
       : esc((b.tasks || []).join(" · ") || "a task");
-    return `<span class="task" title="${esc(who)} left this running; the chat is not held by it, and ${esc(who)} says so when it ends">`
-      + `<b>running</b><span>${esc(who)}: ${what}</span>`
+    const before = b.let_go ? ` (from before Symposium restarted)` : "";
+    return `<span class="task" title="${esc(who)} left this running; the chat is not held by it, and ${esc(who)} says so when it ends${esc(before)}">`
+      + `<b>running</b><span>${esc(who)}${b.let_go ? " <i>· from before the restart</i>" : ""}: ${what}</span>`
       + `<button type="button" data-bstop="${esc(b.seat || "")}" title="end it now - nobody is woken">×</button></span>`;
   }).join("");
   if (running.length && !BEHIND_TIMER) BEHIND_TIMER = setInterval(lookBehind, 4000);

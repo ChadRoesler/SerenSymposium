@@ -400,6 +400,80 @@ def test_a_task_left_running_outlives_the_answer_and_comes_back_to_say_so(make_c
     assert _until(lambda: conversation not in claude_voice.PARKED)
 
 
+def test_a_restart_lets_the_task_run_on_and_the_next_start_tells_the_chat(make_client, tmp_path, monkeypatch):
+    """Chad, 23 Nov 2026: "what happens if symposium crashes or goes down,
+    while a long running background task is ongoing?" Symposium stops with a
+    build running: the CLI is let go, not killed, and written down; the next
+    Symposium shows it as running from before the restart, and when it ends,
+    what it said - in its transcript, nobody reading - is put in the chat."""
+    from seren_symposium import behind, claude_voice
+    gate, projects = tmp_path / "the-build-is-done", tmp_path / "projects"
+    monkeypatch.setenv("FAKE_CLAUDE_BACKGROUND", "60")
+    monkeypatch.setenv("FAKE_CLAUDE_BACKGROUND_GATE", str(gate))
+    monkeypatch.setenv("FAKE_CLAUDE_PROJECTS", str(projects))
+    monkeypatch.setattr(behind, "PROCESS_NAMES", ("claude", "python"))     # the fake CLI is a python
+    monkeypatch.setattr(behind, "PICKUP_EVERY", 0.2)
+    cfg = config()
+    cfg.sessions.dir = str(tmp_path / "sessions")
+    cfg.claude.projects_dir = str(projects)
+    tc = make_client(cfg)
+    sid = tc.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    _events(tc.post("/api/chat/stream", json={"session": sid, "prompt": "build the firmware"}).text)
+    conversation = tc.get(f"/api/sessions/{sid}").json()["claude"]["session"]
+    ledger = behind.Ledger(tmp_path / behind.FILE_NAME)
+    entry = ledger.entries()[conversation]
+    assert entry["chat"] == sid and entry["tasks"][0]["description"] == "Build the firmware", "written down"
+
+    tc.__exit__(None, None, None)                                   # Symposium stops: an upgrade, say
+    assert behind.pid_alive(entry["pid"]), "let go, not killed"
+    assert ledger.entries()[conversation].get("let_go"), "and stamped for the next start"
+
+    tc2 = make_client(cfg)                                          # the next Symposium
+    running = tc2.get(f"/api/sessions/{sid}").json()["background"]
+    assert running and running[0]["let_go"] and running[0]["tasks"] == ["Build the firmware"]
+
+    gate.write_text("go")                                           # the build ends, nobody reading
+    assert _until(lambda: _said(tc2, sid)[-1] == ("assistant", None, "The build finished: exit 0."), seconds=20)
+    woke = tc2.get(f"/api/sessions/{sid}").json()["messages"][-1]
+    assert woke["meta"]["picked_up"] is True and "while Symposium was away" in woke["meta"]["woke"][0]
+    assert _until(lambda: not tc2.get(f"/api/sessions/{sid}").json()["background"])
+    assert ledger.entries() == {} and conversation not in claude_voice.LET_GO
+
+
+def test_a_cli_that_died_before_it_could_report_is_asked(make_client, tmp_path, monkeypatch):
+    """The box went down with the build: the process is gone and never said
+    anything. The next start resumes that conversation with a note marked as
+    Symposium's (never the person's), and what it answers goes in the chat."""
+    from seren_symposium import behind
+    log = tmp_path / "runs.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    monkeypatch.setattr(behind, "PICKUP_EVERY", 0.2)
+    cfg = config()
+    cfg.sessions.dir = str(tmp_path / "sessions")
+    cfg.claude.projects_dir = str(tmp_path / "projects")
+    tc = make_client(cfg)
+    sid = tc.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    _events(tc.post("/api/chat/stream", json={"session": sid, "prompt": "build the firmware"}).text)
+    conversation = tc.get(f"/api/sessions/{sid}").json()["claude"]["session"]
+    tc.__exit__(None, None, None)
+    behind.Ledger(tmp_path / behind.FILE_NAME).put(conversation, {
+        "chat": sid, "seat": None, "conversation": conversation, "pid": 999999, "started": time.time() - 100,
+        "let_go": time.time() - 50, "tasks": [{"id": "bg1", "type": "local_bash", "description": "Build the firmware"}]})
+
+    monkeypatch.setenv("FAKE_CLAUDE_REPLY", "It got to 30/42, then the box went down.")
+    tc2 = make_client(cfg)
+    assert _until(lambda: _said(tc2, sid)[-1][2] == "It got to 30/42, then the box went down.", seconds=20)
+    assert len(_said(tc2, sid)) == 3, "its answer, and no message of the person's for the note"
+    asked = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert flag(asked["argv"], "--resume") == conversation
+    assert "[Symposium, not the person]" in asked["prompt"] and "Build the firmware" in asked["prompt"]
+    assert behind.Ledger(tmp_path / behind.FILE_NAME).entries() == {}
+
+
+def flag(argv, name):
+    return argv[argv.index(name) + 1] if name in argv else None
+
+
 def test_a_seat_with_a_task_running_does_not_hold_the_round(make_client, tmp_path, monkeypatch):
     """The room: the seat who started the build has answered, so the next
     seat is asked; neither waits on the build. When it ends, each says so

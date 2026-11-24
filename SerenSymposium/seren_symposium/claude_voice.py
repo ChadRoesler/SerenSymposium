@@ -378,6 +378,9 @@ class Cli:
         self.idle = asyncio.Event()         # clear while it is in a turn it began on its own
         self.idle.set()
         self.watcher: Optional[asyncio.Task] = None
+        self.owner: dict[str, Any] = {}             # {chat, seat}: whose it is, for the ledger (seren_symposium.behind)
+        self.last_woke = 0.0                        # when what it said on its own was last kept in the chat
+        self.cwd = cwd or ""
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=cwd or None, env=env, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -441,22 +444,49 @@ PARKED: dict[str, Cli] = {}
 # What a set-aside conversation calls when it answers on its own:
 # (the `done` or `error` event, the turn's ClaudeTurn, what the CLI said of the tasks that ended).
 Wake = Callable[[dict[str, Any], "ClaudeTurn", list[str]], Awaitable[None]]
+# The set-aside conversations, written down so they outlive Symposium
+# (seren_symposium.behind; the app sets it). None: memory only, as before.
+LEDGER: Optional[Any] = None
+# Conversations an earlier Symposium let go, still running: picked up from the
+# ledger at start (behind.pick_up), shown like PARKED ones until they end.
+LET_GO: dict[str, dict[str, Any]] = {}
+
+
+def _details(cli: Cli) -> list[dict[str, Any]]:
+    return [{"id": str(t.get("task_id") or ""), "type": str(t.get("task_type") or ""),
+             "description": str(t.get("description") or "")[:500],
+             "since": cli.task_seen.get(str(t.get("task_id") or ""), cli.started)}
+            for t in cli.tasks]
+
+
+def _write_down(cli: Cli, key: str) -> None:
+    if LEDGER is not None and cli.owner.get("chat"):
+        LEDGER.put(key, {**cli.owner, "conversation": key, "pid": cli.proc.pid, "started": cli.started,
+                         "cwd": cli.cwd, "tasks": _details(cli), "last_woke": cli.last_woke,
+                         "written": time.time()})
+
+
+def _cross_off(key: Optional[str]) -> None:
+    if LEDGER is not None and key:
+        LEDGER.drop(key)
 
 
 def parked(key: Optional[str]) -> Optional[dict[str, Any]]:
     """What conversation `key` has running in the background, for the window:
     {tasks: [words], since, details: [{id, type, description, since}]} - the
     details so a task can be opened and looked into (23 Nov 2026: "after 5
-    hours its still going ... being able to click and see it")."""
+    hours its still going ... being able to click and see it"). One an
+    earlier Symposium let go says so: `let_go` (when)."""
     cli = PARKED.get(key or "")
     if cli is None or not cli.alive():
-        return None
+        gone = LET_GO.get(key or "")
+        if gone is None:
+            return None
+        tasks = gone.get("tasks") or []
+        return {"tasks": [str(t.get("description") or t.get("type") or "a task")[:200] for t in tasks],
+                "since": gone.get("started"), "details": tasks, "let_go": gone.get("let_go")}
     return {"tasks": [str(t.get("description") or t.get("task_type") or "a task")[:200] for t in cli.tasks],
-            "since": cli.started,
-            "details": [{"id": str(t.get("task_id") or ""), "type": str(t.get("task_type") or ""),
-                         "description": str(t.get("description") or "")[:500],
-                         "since": cli.task_seen.get(str(t.get("task_id") or ""), cli.started)}
-                        for t in cli.tasks]}
+            "since": cli.started, "details": _details(cli)}
 
 
 def parked_ticket(key: Optional[str]) -> Optional[str]:
@@ -469,16 +499,61 @@ def stop_parked(key: Optional[str]) -> bool:
     """End a set-aside process, and what it was running. False when there was none."""
     cli = PARKED.pop(key or "", None)
     if cli is None:
-        return False
+        gone = LET_GO.pop(key or "", None)
+        if gone is None:
+            return False
+        kill_tree(gone.get("pid"))
+        _cross_off(key)
+        return True
     if cli.watcher is not None:
         cli.watcher.cancel()
+    kill_tree(cli.proc.pid)
     cli.kill()
+    _cross_off(key)
     return True
+
+
+def kill_tree(pid: Any) -> None:
+    """A CLI and everything it started - its background tasks run as its
+    children, and ending the CLI alone can leave them running unseen. Only a
+    pid that is still a claude (behind.pid_alive), never a stranger's."""
+    from .behind import pid_alive
+    if not pid_alive(pid):
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    else:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
 
 
 def stop_all_parked() -> None:
     for key in list(PARKED):
         stop_parked(key)
+
+
+def let_go_all_parked() -> None:
+    """Symposium is going: what the conversations have running runs on. The
+    watchers stop, the processes do not (their input closes as we go, and the
+    CLI then finishes its task, reports into its transcript and exits); the
+    ledger keeps them, stamped, for the next start to pick up (behind)."""
+    now = time.time()
+    for key, cli in list(PARKED.items()):
+        PARKED.pop(key, None)
+        if cli.watcher is not None:
+            cli.watcher.cancel()                # cancelled = taken: _watch leaves the process be
+        if LEDGER is not None and cli.owner.get("chat") and cli.alive():
+            _write_down(cli, key)
+            entry = LEDGER.entries().get(key)
+            if entry is not None:
+                LEDGER.put(key, {**entry, "let_go": now})
+        try:
+            cli.proc.stdin.close()              # nothing more will be asked: it finishes, reports, exits
+        except (OSError, ValueError, AttributeError):
+            pass
 
 
 async def _take_parked(key: str) -> Optional[Cli]:
@@ -506,8 +581,11 @@ async def _take_parked(key: str) -> Optional[Cli]:
     return cli if cli.alive() else None
 
 
-def _park(cli: Cli, key: str, cfg: ClaudeConfig, on_wake: Wake) -> None:
+def _park(cli: Cli, key: str, cfg: ClaudeConfig, on_wake: Wake, owner: Optional[dict[str, Any]] = None) -> None:
     PARKED[key] = cli
+    if owner:
+        cli.owner = dict(owner)
+    _write_down(cli, key)
     cli.watcher = asyncio.get_running_loop().create_task(_watch(cli, key, cfg, on_wake))
 
 
@@ -537,6 +615,8 @@ async def _watch(cli: Cli, key: str, cfg: ClaudeConfig, on_wake: Wake) -> None:
             if ev.get("type") != "system" or ev.get("subtype") in ("init", "task_notification"):
                 cli.idle.clear()            # it has begun a turn of its own (a task ending starts one)
             for out in _digest(ev, turn, blocks, cfg, cli):
+                if out["type"] == "background":
+                    _write_down(cli, key)   # _digest has just taken the new list in
                 if out["type"] not in ("done", "error"):
                     continue
                 why, cli.notes = list(cli.notes), []
@@ -544,6 +624,9 @@ async def _watch(cli: Cli, key: str, cfg: ClaudeConfig, on_wake: Wake) -> None:
                     await on_wake(out, turn, why)
                 except Exception:  # noqa: BLE001 - what it said must not end the watch
                     log.exception("claude conversation %s came back on its own and could not be kept", key)
+                cli.last_woke = time.time()     # kept: a pick-up after a restart must not say it again
+                if cli.tasks:
+                    _write_down(cli, key)
                 turn, blocks = ClaudeTurn(key), {}
                 cli.idle.set()
                 if not cli.tasks:
@@ -556,7 +639,10 @@ async def _watch(cli: Cli, key: str, cfg: ClaudeConfig, on_wake: Wake) -> None:
         if not taken:
             if PARKED.get(key) is cli:
                 PARKED.pop(key, None)
+            if cli.tasks:
+                kill_tree(cli.proc.pid)     # set aside too long: what it runs goes with it, not on unseen
             cli.kill()
+            _cross_off(key)
 
 
 class ClaudeTurn:
@@ -765,7 +851,8 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                  replace: bool = False, mode: Optional[str] = None,
                  own_tools: bool = True, cwd: str = "", fork: bool = False,
                  ephemeral: bool = False, on_wake: Optional[Wake] = None,
-                 effort: str = "", thinking_display: str = "") -> AsyncIterator[dict[str, Any]]:
+                 effort: str = "", thinking_display: str = "",
+                 owner: Optional[dict[str, Any]] = None) -> AsyncIterator[dict[str, Any]]:
     """One turn, as Symposium stream events (see the module docstring).
     Always ends with exactly one `done` or `error`. `permit` ({url, ticket})
     is where the CLI's permission asks go; without it, unlisted tools are
@@ -808,8 +895,10 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                     yield out
                 if ended:
                     if on_wake is not None and cfg.background and not ephemeral and cli.tasks and cli.alive():
-                        _park(cli, turn.session_id, cfg, on_wake)
+                        _park(cli, turn.session_id, cfg, on_wake, owner)
                         kept = True
+                    elif not ephemeral:
+                        _cross_off(turn.session_id)     # nothing of it left running
                     return
         finally:
             timer.cancel()

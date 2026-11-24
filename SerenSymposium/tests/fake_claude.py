@@ -203,6 +203,19 @@ def main():
     out({"type": "system", "subtype": "task_updated", "task_id": "bg1", "patch": {"status": "completed"}})
     out({"type": "system", "subtype": "task_notification", "task_id": "bg1", "status": "completed",
          "summary": 'Background command "Build the firmware" completed (exit code 0)'})
+    # As the real CLI does (measured 23 Nov 2026): the notification and its own
+    # turn are kept in its transcript too - read back by a Symposium that let
+    # it go (seren_symposium.behind). FAKE_CLAUDE_PROJECTS=dir turns it on.
+    if projects := os.environ.get("FAKE_CLAUDE_PROJECTS"):
+        now = time.time()                       # milliseconds, as the real CLI writes them
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now * 1000) % 1000:03d}Z"
+        folder = os.path.join(projects, "fake-project")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, f"{sid}.jsonl"), "a", encoding="utf-8") as f:
+            for kind, text in (("user", "<task-notification><task-id>bg1</task-id></task-notification>"),
+                               ("assistant", "The build finished: exit 0.")):
+                f.write(json.dumps({"type": kind, "timestamp": stamp,
+                                    "message": {"content": [{"type": "text", "text": text}]}}) + "\n")
     out({"type": "system", "subtype": "background_tasks_changed", "tasks": []})
     out({"type": "system", "subtype": "init", "session_id": sid, "model": "fake-model"})
     answer("The build finished: exit 0.")

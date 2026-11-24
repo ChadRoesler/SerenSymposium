@@ -76,7 +76,7 @@ from seren_meninges import get_version
 from seren_meninges.viewer import render_from_dir
 
 from . import __version__ as _fallback_version
-from . import attachments, avatars, preface, carabiner, claude_voice, ears, pictures, room, screen, stack, terminal
+from . import attachments, avatars, behind, preface, carabiner, claude_voice, ears, pictures, room, screen, stack, terminal
 from . import permissions
 from .config import FolderPreset, SymposiumConfig, load_config
 from .prefs import Invalid as BadPref
@@ -269,7 +269,10 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
         # Where it runs (a picked-up chat: where its conversation began), and
         # whether its first turn here forks it off a terminal still holding it.
         "cwd": layered.get("cwd") or "",
-        "fork": bool(resume and known.get("fork")),
+        # A conversation an earlier Symposium let go is still running in its
+        # own process: this turn forks off it rather than write the same
+        # transcript beside it (seren_symposium.behind); it reports on its own.
+        "fork": bool(resume and (known.get("fork") or resume in claude_voice.LET_GO)),
     }
 
 
@@ -683,6 +686,84 @@ def waker(cfg: SymposiumConfig, store: SessionStore, session: str, seat: Optiona
     return woke
 
 
+def pickup_handlers(cfg: SymposiumConfig, store: SessionStore, state: Any):
+    """What behind.pick_up is handed, for the conversations an earlier
+    Symposium let go (or lost in a crash) and this one finds still running:
+    where each one's transcript is, and how the chat is told it ended."""
+    root = terminal.projects_dir(cfg.claude.projects_dir)
+
+    def transcript_of(conversation: str) -> Optional[Path]:
+        return terminal.find(root, conversation)
+
+    async def quiet(chat: str) -> None:
+        for _ in range(600):                        # a turn running there finishes first (10 min at most)
+            if chat not in state.answering:
+                return
+            await asyncio.sleep(1.0)
+
+    def what(entry: dict[str, Any]) -> str:
+        return " · ".join(str(t.get("description") or t.get("type") or "a task") for t in entry.get("tasks") or []) \
+            or "a task"
+
+    async def on_told(entry: dict[str, Any], told: list[str]) -> None:
+        """It said how it went, in its transcript, while nobody was reading:
+        kept in the chat as it would have been, marked as picked up."""
+        await quiet(entry["chat"])
+        for text in told:
+            meta = {"node": cfg.claude.name, "picked_up": True,
+                    "woke": [f"{what(entry)} - ended while Symposium was away"]}
+            store.record_woken(entry["chat"], entry.get("seat"), text, meta, entry["conversation"])
+
+    async def on_silent(entry: dict[str, Any]) -> None:
+        """Its process went before it could say anything (the box went down,
+        say): the conversation is resumed with a note so it says, in its own
+        words, how it went - never a line under its name it did not write."""
+        chat, seat = entry["chat"], entry.get("seat")
+        s = store.get(chat)
+        if s is None:
+            return
+        await quiet(chat)
+        s = store.get(chat) or s
+        ends = []
+        for t in entry.get("tasks") or []:
+            info = terminal.task_info(None, entry["conversation"], str(t.get("id") or ""))
+            out = info.get("output")
+            ends.append(f"- {t.get('description') or t.get('type') or 'a task'} (id {t.get('id')}): "
+                        + (f"its output file ends:\n```\n{out['tail'][-1500:]}\n```" if out else "no output file"))
+        note = ("[Symposium, not the person] Symposium went away (a restart or a crash) while you had "
+                "background work running, and your process ended before it could report. What it had going:\n"
+                + "\n".join(ends) + "\nSay in the chat how it went, from what it left.")
+        conv = entry["conversation"]
+        layered = {**s["settings"], "folder": s["folder"]}
+        if seat:
+            spot = room.seat(s, seat)
+            if not isinstance(spot, dict):
+                return
+            plan = plan_seat(cfg, store, s, {**spot, "claude": {"session": conv, "seen": len(s["messages"])}},
+                             layered, note, None, pending=False)
+        else:
+            plan = plan_claude(cfg, store, {**s, "claude": {"session": conv, "seen": len(s["messages"])}},
+                               layered, s["messages"], note)
+        heard, done = claude_voice.ClaudeTurn(conv), None
+        state.answering.add(chat)
+        try:
+            async for ev in claude_voice.events(
+                    cfg.claude, prompt=plan["prompt"], resume=conv, model=plan["model"],
+                    system_prompt=plan["system_prompt"], add_dirs=plan.get("add_dirs"), allow=plan.get("allow"),
+                    turn=heard, replace=bool(plan.get("system_replace")), mode=plan.get("mode"), own_tools=False,
+                    cwd=entry.get("cwd") or plan.get("cwd") or "", effort=plan.get("effort") or "",
+                    thinking_display=plan.get("thinking_display") or "",
+                    on_wake=waker(cfg, store, chat, seat), owner={"chat": chat, "seat": seat}):
+                if ev["type"] in ("done", "error"):
+                    done = ev
+        finally:
+            state.answering.discard(chat)
+        if done is not None:
+            await waker(cfg, store, chat, seat)(done, heard, [f"{what(entry)} - ended while Symposium was away"])
+
+    return transcript_of, on_told, on_silent
+
+
 def background_of(s: dict[str, Any]) -> list[dict[str, Any]]:
     """What this chat's conversations have running in the background, for the
     window: [{seat (None: the chat's one voice), conversation, tasks, since}]."""
@@ -692,6 +773,14 @@ def background_of(s: dict[str, Any]) -> list[dict[str, Any]]:
         got = claude_voice.parked(known.get("session"))
         if got:
             out.append({"seat": name, "conversation": known["session"], **got})
+    # Let go by an earlier start and still running, though the chat has moved
+    # on to a fork of it since (plan_claude): still this chat's, still shown.
+    listed = {b["conversation"] for b in out}
+    for conv, entry in list(claude_voice.LET_GO.items()):
+        if entry.get("chat") == s.get("id") and conv not in listed:
+            got = claude_voice.parked(conv)
+            if got:
+                out.append({"seat": entry.get("seat"), "conversation": conv, **got})
     return out
 
 
@@ -736,7 +825,8 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                                      mode=ask.get("mode"), own_tools="mode" not in ask,
                                      cwd=ask.get("cwd") or "", fork=bool(ask.get("fork")),
                                      effort=ask.get("effort") or "", thinking_display=ask.get("thinking_display") or "",
-                                     on_wake=waker(cfg, store, turn.session, turn.seat) if turn.session else None)
+                                     on_wake=waker(cfg, store, turn.session, turn.seat) if turn.session else None,
+                                     owner={"chat": turn.session, "seat": turn.seat} if turn.session else None)
         async for event in (_with_asks(spoken, desk) if desk else spoken):
             # A seat of a room with nothing to add says so (room.passed): it
             # has heard the round, and nothing of its goes in the chat. Judged
@@ -1141,10 +1231,26 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             app.state.updates = None
             log.info("update checking unavailable (%s)", exc)
 
+        # What the chats leave running is written down, so it outlives us, and
+        # what an earlier start let go (or lost in a crash) is picked up
+        # (seren_symposium.behind, 23 Nov 2026).
+        claude_voice.LEDGER = behind.Ledger(cfg.sessions_dir().parent / behind.FILE_NAME)
+        transcript_of, on_told, on_silent = pickup_handlers(cfg, app.state.sessions, app.state)
+        app.state.pickup = asyncio.create_task(behind.pick_up(
+            claude_voice.LEDGER, claude_voice.LET_GO, transcript_of, on_told, on_silent))
+
         yield
-        # Anything a conversation had left running goes with us: a process
-        # nobody is reading would run on, unseen, with no one to tell.
-        claude_voice.stop_all_parked()
+        # What the conversations have running runs on (claude.let_go): the
+        # ledger keeps it and the next start picks it up. Killed instead, the
+        # CLI went but its task ran on unseen, with no one to report it -
+        # measured on the real CLI, 23 Nov 2026.
+        if cfg.claude.let_go:
+            claude_voice.let_go_all_parked()
+        else:
+            claude_voice.stop_all_parked()
+        app.state.pickup.cancel()
+        claude_voice.LET_GO.clear()
+        claude_voice.LEDGER = None
         await app.state.client.aclose()
 
     app = FastAPI(title="SerenSymposium", version=APP_VERSION, lifespan=lifespan)

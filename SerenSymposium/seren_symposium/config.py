@@ -250,6 +250,11 @@ class ClaudeConfig(BaseModel):
     background: bool = True
     # The longest a set-aside process is left running, from when it started.
     background_max_seconds: float = 7200.0
+    # When Symposium stops (a restart, an upgrade), what the conversations
+    # have running runs on, and the next start picks it up and says how it
+    # ended (seren_symposium.behind). False: it is killed with Symposium, as
+    # before 23 Nov 2026 - which, measured, killed the CLI but not its task.
+    let_go: bool = True
     # What every turn is told about it, after the framing ("" tells nothing).
     background_note: str = (
         "A command you would otherwise wait on (a build, a flash, a long test run, a download): start it in the "
