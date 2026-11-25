@@ -551,6 +551,41 @@ def test_each_seat_has_its_own_prompt_stack(client, repos, runs, monkeypatch):
     assert all("claude_init" not in x for x in client.get(f"/api/sessions/{sid}").json()["seats"])
 
 
+def test_a_rewind_takes_every_seat_back_to_the_same_place(client, repos, runs, monkeypatch):
+    """Chad, 25 Nov 2026: "a rewind on one should rewind all in the tangle ...
+    or else we end up with a few being ahead of the others and going WTF
+    mate". Two rounds; one seat passes in the first. Rewound to the end of the
+    first round, EVERY seat is branched at where it stood then - the one that
+    passed too, which left no message to find it by - and the next round each
+    is handed only what it had not heard by that point."""
+    monkeypatch.setenv("FAKE_CLAUDE_SEATS", json.dumps({"lodestar": "lodestar one", "kitchen": "pass"}))
+    sid = a_room(client, repos, "lodestar", "kitchen")
+    stream(client, {"session": sid, "prompt": "round one"})
+    after_one = client.get(f"/api/sessions/{sid}").json()
+    lod1, kit1 = after_one["seats"]
+    assert len(after_one["messages"]) == 2, "the person, lodestar; kitchen passed"
+    monkeypatch.setenv("FAKE_CLAUDE_SEATS", json.dumps({"lodestar": "lodestar two", "kitchen": "kitchen two"}))
+    stream(client, {"session": sid, "prompt": "round two"})
+    assert len(client.get(f"/api/sessions/{sid}").json()["messages"]) == 5
+
+    s = client.post(f"/api/sessions/{sid}/rewind", json={"to": 2}).json()
+    lod, kit = s["seats"]
+    assert lod["claude"]["session"] == lod1["claude"]["session"] and lod["claude"]["seen"] == 2
+    assert kit["claude"]["session"] == kit1["claude"]["session"] and kit["claude"]["seen"] == 2, \
+        "the seat that passed is back where it stood too, not thrown out"
+    assert lod["claude"]["at"] and kit["claude"]["at"] and lod["claude"]["fork"] and kit["claude"]["fork"]
+    assert all(m["seen"] <= 2 for m in lod["claude"]["marks"] + kit["claude"]["marks"]), "the future is left behind"
+
+    monkeypatch.setenv("FAKE_CLAUDE_SEATS", json.dumps({"lodestar": "lodestar again", "kitchen": "kitchen again"}))
+    stream(client, {"session": sid, "prompt": "round two, again"})
+    lod_run, kit_run = runs()[-2:]
+    for run, seat in ((lod_run, lod), (kit_run, kit)):
+        assert flag(run["argv"], "--resume") == seat["claude"]["session"] and "--fork-session" in run["argv"]
+        assert flag(run["argv"], "--resume-session-at") == seat["claude"]["at"]
+    assert "round two, again" in kit_run["prompt"] and "lodestar again" in kit_run["prompt"]
+    assert "round two\n" not in kit_run["prompt"] and "kitchen two" not in kit_run["prompt"], "nothing from the cut future"
+
+
 def test_rewinding_what_a_seat_heard_starts_it_over(client, repos, runs):
     sid = a_room(client, repos, "lodestar", "kitchen")
     stream(client, {"session": sid, "prompt": "one"})

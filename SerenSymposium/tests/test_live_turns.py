@@ -164,7 +164,7 @@ def test_a_running_turn_can_be_stopped(make_client, tmp_path, monkeypatch):
     assert [x["kind"] for x in said["meta"]["steps"]][:2] == ["said", "tool"]      # what it did, in order
     first = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
     conversation = first["argv"][first["argv"].index("--session-id") + 1]
-    assert s["claude"] == {"session": conversation, "seen": 1}, "it saw the message; its own answer goes back to it"
+    assert {k: v for k, v in s["claude"].items() if k != "marks"} == {"session": conversation, "seen": 1}, "it saw the message; its own answer goes back to it"
 
     gate.write_text("go")
     assert tc.post("/api/chat/stream", json={"session": sid, "prompt": "and now?"}).status_code == 200
@@ -395,7 +395,7 @@ def test_a_task_left_running_outlives_the_answer_and_comes_back_to_say_so(make_c
     woke = s["messages"][-1]
     assert (woke["role"], woke["content"]) == ("assistant", "The build finished: exit 0.")
     assert woke["meta"]["woke"] == ['Background command "Build the firmware" completed (exit code 0)']
-    assert s["claude"] == {"session": conversation, "seen": 5}, "it has seen its own words, and all before them"
+    assert {k: v for k, v in s["claude"].items() if k != "marks"} == {"session": conversation, "seen": 5}, "it has seen its own words, and all before them"
     assert _until(lambda: not tc.get(f"/api/sessions/{sid}").json()["background"]), "nothing left running"
     assert _until(lambda: conversation not in claude_voice.PARKED)
 
@@ -438,6 +438,33 @@ def test_a_restart_lets_the_task_run_on_and_the_next_start_tells_the_chat(make_c
     assert woke["meta"]["picked_up"] is True and "while Symposium was away" in woke["meta"]["woke"][0]
     assert _until(lambda: not tc2.get(f"/api/sessions/{sid}").json()["background"])
     assert ledger.entries() == {} and conversation not in claude_voice.LET_GO
+
+
+def test_a_task_from_before_a_rewind_still_reports_and_says_so(make_client, tmp_path, monkeypatch):
+    """The chat is rewound past where a build was started: the voice talks in
+    a branch now, but the build is real and still going. It stays on the chip,
+    and when it ends its word comes in marked as from before the rewind -
+    not as if the branch had said it (25 Nov 2026)."""
+    gate = tmp_path / "the-build-is-done"
+    monkeypatch.setenv("FAKE_CLAUDE_BACKGROUND", "30")
+    monkeypatch.setenv("FAKE_CLAUDE_BACKGROUND_GATE", str(gate))
+    tc = make_client(config())
+    sid = tc.post("/api/sessions", json={"folder": "den"}).json()["id"]
+    monkeypatch.delenv("FAKE_CLAUDE_BACKGROUND")
+    _events(tc.post("/api/chat/stream", json={"session": sid, "prompt": "hello"}).text)
+    monkeypatch.setenv("FAKE_CLAUDE_BACKGROUND", "30")
+    _events(tc.post("/api/chat/stream", json={"session": sid, "prompt": "build the firmware"}).text)
+    assert tc.get(f"/api/sessions/{sid}").json()["background"]
+
+    tc.post(f"/api/sessions/{sid}/rewind", json={"to": 2})            # back to before the build was asked for
+    running = tc.get(f"/api/sessions/{sid}").json()["background"]
+    assert running and running[0].get("rewound") is True, "still shown, said to be from before"
+
+    gate.write_text("go")
+    assert _until(lambda: len(_said(tc, sid)) == 3, seconds=15)
+    woke = tc.get(f"/api/sessions/{sid}").json()["messages"][-1]
+    assert woke["meta"].get("rewound") is True and woke["meta"]["woke"][0].startswith("from before a rewind")
+    assert _until(lambda: not tc.get(f"/api/sessions/{sid}").json()["background"])
 
 
 def test_a_cli_that_died_before_it_could_report_is_asked(make_client, tmp_path, monkeypatch):

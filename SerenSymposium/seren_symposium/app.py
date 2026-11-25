@@ -244,7 +244,7 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
     preset = cfg.folder(s["folder"])
     known = s.get("claude") or {}
     if known.get("session") and known.get("seen", 0) > len(messages):
-        known = branch_point(messages, s.get("_seat"), len(messages)) or {}
+        known = branch_point(messages, s.get("_seat"), len(messages), known.get("marks")) or {}
     resume = known.get("session") if known.get("seen", 0) <= len(messages) else None
     seen = known.get("seen", 0) if resume else 0
     missed = messages[seen:] if resume else messages
@@ -490,7 +490,10 @@ def plan_room(cfg: SymposiumConfig, s: dict[str, Any], layered: dict[str, Any], 
     """A message into a room: who answers it (room.who_answers), checked
     before anything runs. Each seat's own plan waits for its turn."""
     if keep is not None:
-        return JSONResponse({"error": "a room can't retry a round yet",
+        # The window's retry in a room is a rewind to before the message and
+        # the message sent again (every seat rewound with it); a client
+        # asking for `retry` itself is told how.
+        return JSONResponse({"error": "a room can't retry a round in one go",
                              "hint": "rewind to before the message and send it again"}, status_code=409)
     if not claude_voice.available(cfg.claude):
         return JSONResponse({"error": "the claude voice is not available here",
@@ -575,7 +578,7 @@ def keep_stopped(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
         return store.record_seat(turn.session, turn.seat, turn.prompt if turn.with_prompt else None,
                                  answer, meta, heard.session_id,
                                  files=turn.files if turn.with_prompt else None,
-                                 claude_init=heard.init or None, heard_it=saw, stopped=True)
+                                 claude_init=heard.init or None, heard_it=saw, stopped=True, mark=heard.mark())
     return store.record(turn.session, turn.prompt, answer, meta, keep=turn.keep,
                         claude_session=heard.session_id if saw else None, files=turn.files,
                         source=turn.source, by=turn.by, claude_init=heard.init or None, stopped=True)
@@ -675,7 +678,19 @@ def _permit_url(cfg: SymposiumConfig) -> str:
     return f"http://{f'[{host}]' if ':' in host else host}:{cfg.ui.port}/api/permit"
 
 
-def waker(cfg: SymposiumConfig, store: SessionStore, session: str, seat: Optional[str]):
+def rewound_away(s: Optional[dict[str, Any]], owner: Optional[dict[str, Any]]) -> bool:
+    """Whether the answer that left a task running has since been rewound out
+    of the chat (owner: {answer_at}, as claude_answer kept it): then the task
+    is from before a rewind. A task started before the rewind point is still
+    the branch's own - its answer is still there."""
+    at = (owner or {}).get("answer_at")
+    if not s or at is None:
+        return False
+    return not any(m.get("at") == at and m.get("role") == "assistant" for m in s.get("messages") or [])
+
+
+def waker(cfg: SymposiumConfig, store: SessionStore, session: str, seat: Optional[str],
+          owner: Optional[dict[str, Any]] = None):
     """What a set-aside conversation calls when it answers on its own - a
     task it left running has ended (claude_voice.events, `on_wake`): the
     answer is kept in the chat like any other, under the seat's name, marked
@@ -696,6 +711,13 @@ def waker(cfg: SymposiumConfig, store: SessionStore, session: str, seat: Optiona
         meta = {**late.receipt(event, heard.tools, heard.kept_steps()), **heard.mark()}
         meta.pop("seconds", None)                   # nobody was waiting, so there is nothing to time
         meta["woke"] = why or ["a task it had left running ended"]
+        # The chat was rewound (or edited) past where this task was started:
+        # the voice now talks in a branch, and this comes from the old line.
+        # Its work was real, so it is told - and said to be from before
+        # (25 Nov 2026: a voice "ahead of the others", the WTF Chad meant).
+        if rewound_away(store.get(session), owner):
+            meta["rewound"] = True
+            meta["woke"] = [f"from before a rewind: {w}" for w in meta["woke"]]
         pieces = heard.said()
         store.record_woken(session, seat, answer, meta, heard.session_id, answer_files=found,
                            final=pieces[-1]["text"].strip() if len(pieces) > 1 else None)
@@ -788,7 +810,9 @@ def background_of(s: dict[str, Any]) -> list[dict[str, Any]]:
         known = holder.get("claude") if isinstance(holder.get("claude"), dict) else {}
         got = claude_voice.parked(known.get("session"))
         if got:
-            out.append({"seat": name, "conversation": known["session"], **got})
+            cli = claude_voice.PARKED.get(known["session"])
+            out.append({"seat": name, "conversation": known["session"], **got,
+                        **({"rewound": True} if cli is not None and rewound_away(s, cli.owner) else {})})
     # Let go by an earlier start and still running, though the chat has moved
     # on to a fork of it since (plan_claude): still this chat's, still shown.
     listed = {b["conversation"] for b in out}
@@ -797,6 +821,15 @@ def background_of(s: dict[str, Any]) -> list[dict[str, Any]]:
             got = claude_voice.parked(conv)
             if got:
                 out.append({"seat": entry.get("seat"), "conversation": conv, **got})
+                listed.add(conv)
+    # Still running from before a rewind, once the voice has moved on to its
+    # branch: the task is real and still going - shown, and stoppable.
+    for conv, cli in list(claude_voice.PARKED.items()):
+        if cli.owner.get("chat") == s.get("id") and conv not in listed:
+            got = claude_voice.parked(conv)
+            if got:
+                out.append({"seat": cli.owner.get("seat"), "conversation": conv, **got,
+                            **({"rewound": True} if rewound_away(s, cli.owner) else {})})
     return out
 
 
@@ -826,6 +859,9 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
         if old_ticket:
             permits[old_ticket] = desk
     heard: Optional[claude_voice.ClaudeTurn] = None
+    # Whose a task this turn leaves running is (claude_voice, behind) - and,
+    # once the answer is kept, which answer started it (answer_at, below).
+    owner: dict[str, Any] = {"chat": turn.session, "seat": turn.seat}
     try:
         heard = claude_voice.ClaudeTurn(ask["resume"] or str(uuid.uuid4()))
         if desk is not None:
@@ -842,8 +878,8 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                                      cwd=ask.get("cwd") or "", fork=bool(ask.get("fork")),
                                      effort=ask.get("effort") or "", thinking_display=ask.get("thinking_display") or "",
                                      resume_at=ask.get("resume_at"),
-                                     on_wake=waker(cfg, store, turn.session, turn.seat) if turn.session else None,
-                                     owner={"chat": turn.session, "seat": turn.seat} if turn.session else None)
+                                     on_wake=waker(cfg, store, turn.session, turn.seat, owner) if turn.session else None,
+                                     owner=owner if turn.session else None)
         async for event in (_with_asks(spoken, desk) if desk else spoken):
             # A seat of a room with nothing to add says so (room.passed): it
             # has heard the round, and nothing of its goes in the chat. Judged
@@ -877,7 +913,8 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                         None if passing else {**turn.receipt(event, heard.tools, heard.kept_steps()), **heard.mark()},
                         heard.session_id, files=turn.files if turn.with_prompt else None,
                         answer_files=found, claude_init=heard.init,
-                        final=pieces[-1]["text"].strip() if len(pieces) > 1 and not passing else None)
+                        final=pieces[-1]["text"].strip() if len(pieces) > 1 and not passing else None,
+                        mark=heard.mark())
                 else:
                     saved = store.record(turn.session, turn.prompt, event["response"],
                                          {**turn.receipt(event, heard.tools, heard.kept_steps()), **heard.mark()}, keep=turn.keep,
@@ -885,6 +922,12 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                                          answer_files=found, source=turn.source, by=turn.by,
                                          claude_init=heard.init)
                 if saved is not None:
+                    # The answer this turn left: a task it leaves running is
+                    # from before a rewind once this message is gone (rewound).
+                    mine = [m for m in saved["messages"] if m.get("role") == "assistant"
+                            and (m.get("seat") or None) == (turn.seat or None)]
+                    if mine:
+                        owner["answer_at"] = mine[-1].get("at")
                     yield {"type": "saved", "session": summary(saved)}
                     if worn:
                         yield {"type": "avatar", "name": worn[0], "scope": worn[1]}

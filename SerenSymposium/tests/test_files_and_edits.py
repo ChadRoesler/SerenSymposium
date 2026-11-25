@@ -328,7 +328,9 @@ def test_rewinding_what_claude_saw_branches_its_conversation(make_client, runs):
 
     s = tc.post(f"/api/sessions/{sid}/rewind", json={"to": 2}).json()
     assert [m["content"] for m in s["messages"]] == ["one", "Hello there"]
-    assert s["claude"] == {"session": first, "seen": 2, "at": at, "fork": True}
+    assert {k: s["claude"][k] for k in ("session", "seen", "at", "fork")} == \
+        {"session": first, "seen": 2, "at": at, "fork": True}
+    assert [m["seen"] for m in s["claude"]["marks"]] == [2], "its checkpoints, the cut future left behind"
 
     lines(tc.post("/api/chat/stream", json={"session": sid, "prompt": "three"}))
     run = runs()[-1]

@@ -130,7 +130,26 @@ class Invalid(ValueError):
 _CLI_ID = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 
 
-def branch_point(messages: list[dict[str, Any]], seat: Optional[str], before: int) -> Optional[dict[str, Any]]:
+MAX_MARKS = 200
+
+
+def _marked(old: Optional[dict[str, Any]], new: dict[str, Any], mark: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """A conversation's record (`new`: {session, seen}) with its checkpoints
+    carried over from `old` and, with `mark` (ClaudeTurn.mark: cli_session,
+    cli_at), one more: after seeing `seen` messages of the chat it was at that
+    entry. Every turn adds one - a seat's pass too, which leaves no message to
+    find it by - so a rewind can take every voice back to the same place
+    (25 Nov 2026, Chad: "a rewind on one should rewind all in the tangle")."""
+    marks = [m for m in (old or {}).get("marks") or [] if isinstance(m, dict)]
+    if mark and isinstance(mark.get("cli_session"), str) and isinstance(mark.get("cli_at"), str):
+        marks.append({"seen": new["seen"], "session": mark["cli_session"], "at": mark["cli_at"]})
+    if marks:
+        new["marks"] = marks[-MAX_MARKS:]
+    return new
+
+
+def branch_point(messages: list[dict[str, Any]], seat: Optional[str], before: int,
+                 marks: Optional[list[dict[str, Any]]] = None) -> Optional[dict[str, Any]]:
     """Where a Claude conversation can be taken up again when the chat no
     longer matches it past `before` (an edit, a retry, a rewind): the newest
     answer of this voice (`seat`, None for the chat's one Claude) before that
@@ -140,7 +159,19 @@ def branch_point(messages: list[dict[str, Any]], seat: Optional[str], before: in
     real CLI 24 Nov 2026 - the branch knew APPLE and not the BANANA after it,
     and the original kept both). It has seen the chat up to that answer; what
     came after it is handed over. None: nothing to branch from (answers from
-    before 24 Nov 2026, a local model's), and the next turn starts over."""
+    before 24 Nov 2026, a local model's), and the next turn starts over.
+
+    `marks` first: the conversation's own checkpoints (_marked), newest at or
+    before the cut - they know a seat's passes, which the messages do not.
+    Then the answers in the chat, for what was said before checkpoints were
+    kept. The checkpoints from past the cut are left behind with it."""
+    good = [m for m in marks or [] if isinstance(m, dict) and isinstance(m.get("seen"), int)
+            and m["seen"] <= before and _CLI_ID.match(str(m.get("session") or ""))
+            and _CLI_ID.match(str(m.get("at") or ""))]
+    if good:
+        best = max(good, key=lambda m: m["seen"])
+        kept = [m for m in good if m["seen"] <= best["seen"]][-MAX_MARKS:]
+        return {"session": best["session"], "seen": best["seen"], "at": best["at"], "fork": True, "marks": kept}
     for j in range(min(before, len(messages)) - 1, -1, -1):
         m = messages[j]
         if m.get("role") != "assistant" or (m.get("seat") or None) != (seat or None):
@@ -651,14 +682,14 @@ class SessionStore:
         only starts over where there is nothing to branch from. For each seat
         of a room the same, one by one."""
         if (s.get("claude") or {}).get("seen", 0) > index:
-            bp = branch_point(s["messages"], None, index)
+            bp = branch_point(s["messages"], None, index, (s.get("claude") or {}).get("marks"))
             if bp:
                 s["claude"] = bp
             else:
                 s.pop("claude", None)
         for seat in s.get("seats") or []:
             if (seat.get("claude") or {}).get("seen", 0) > index:
-                bp = branch_point(s["messages"], seat.get("name"), index)
+                bp = branch_point(s["messages"], seat.get("name"), index, (seat.get("claude") or {}).get("marks"))
                 if bp:
                     seat["claude"] = bp
                 else:
@@ -820,7 +851,7 @@ class SessionStore:
                     answer_files: Optional[list[dict[str, Any]]] = None,
                     claude_init: Optional[dict[str, Any]] = None,
                     final: Optional[str] = None, heard_it: bool = True,
-                    stopped: bool = False) -> Optional[dict[str, Any]]:
+                    stopped: bool = False, mark: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
         """One seat's turn in a round. `prompt`: the person's message, which
         the FIRST seat to come back writes in (the round's others find it
         there). `answer` None: the seat passed - nothing of its goes in, but
@@ -856,8 +887,10 @@ class SessionStore:
         if heard_it:
             # `stopped`: counted as having seen everything but its own
             # cut-short answer, which is handed back to it (see record).
-            seat["claude"] = {"session": claude_session,
-                              "seen": len(s["messages"]) - (1 if stopped and answer is not None else 0)}
+            # `mark`: where its conversation got to - a pass too (_marked).
+            seat["claude"] = _marked(seat.get("claude"), {
+                "session": claude_session,
+                "seen": len(s["messages"]) - (1 if stopped and answer is not None else 0)}, mark)
         if claude_init:
             seat["claude_init"] = {**claude_init, "at": now}
         s["updated"] = now
@@ -896,6 +929,7 @@ class SessionStore:
         s.pop("archived", None)               # it spoke up: back in its project, to be seen
         if caught_up:
             known["seen"] = len(s["messages"])
+            holder["claude"] = _marked(known, known, meta)
         s["updated"] = now
         self._write(s)
         return s
@@ -1000,7 +1034,8 @@ class SessionStore:
         if not s["title"]:
             s["title"] = " ".join(prompt.split())[:48]
         if claude_session:
-            s["claude"] = {"session": claude_session, "seen": len(s["messages"]) - (1 if stopped else 0)}
+            s["claude"] = _marked(s.get("claude"), {"session": claude_session,
+                                                    "seen": len(s["messages"]) - (1 if stopped else 0)}, meta)
         if claude_init:
             s["claude_init"] = {**claude_init, "at": now}
         s["updated"] = now

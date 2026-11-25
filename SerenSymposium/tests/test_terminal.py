@@ -217,14 +217,14 @@ def test_a_cold_conversation_is_taken_over_where_it_began(client, box, runs):
     s = client.post("/api/claude/sessions/pickup", json={"id": sid}).json()
     assert s["title"] == "Loadstar stuff" and len(s["messages"]) == 4
     assert s["settings"] == {"voice": "claude", "cwd": str(repo)}
-    assert s["claude"] == {"session": sid, "seen": 4}                    # nothing to hand over
+    assert {k: v for k, v in s["claude"].items() if k != "marks"} == {"session": sid, "seen": 4}                    # nothing to hand over
 
     stream(client, {"session": s["id"], "prompt": "where were we"})
     (run,) = runs()
     assert flag(run["argv"], "--resume") == sid and "--fork-session" not in run["argv"]
     assert run["prompt"] == "where were we"                              # it has seen it all
     assert Path(run["cwd"]) == repo                                      # --resume finds it only there
-    assert client.get(f"/api/sessions/{s['id']}").json()["claude"] == {"session": sid, "seen": 6}
+    assert {k: v for k, v in client.get(f"/api/sessions/{s['id']}").json()["claude"].items() if k != "marks"} == {"session": sid, "seen": 6}
 
 
 def test_a_warm_conversation_is_forked_so_the_terminal_keeps_its_own(client, box, runs):

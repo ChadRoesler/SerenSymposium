@@ -77,7 +77,8 @@ function drawBehind() {
       : esc((b.tasks || []).join(" · ") || "a task");
     const before = b.let_go ? ` (from before Symposium restarted)` : "";
     return `<span class="task" title="${esc(who)} left this running; the chat is not held by it, and ${esc(who)} says so when it ends${esc(before)}">`
-      + `<b>running</b><span>${esc(who)}${b.let_go ? " <i>· from before the restart</i>" : ""}: ${what}</span>`
+      + `<b>running</b><span>${esc(who)}${b.let_go ? " <i>· from before the restart</i>" : ""}`
+      + `${b.rewound ? " <i>· from before a rewind</i>" : ""}: ${what}</span>`
       + `<button type="button" data-bstop="${esc(b.seat || "")}" title="end it now - nobody is woken">×</button></span>`;
   }).join("");
   if (running.length && !BEHIND_TIMER) BEHIND_TIMER = setInterval(lookBehind, 4000);
@@ -1442,7 +1443,21 @@ const sure = text => !CFG.confirm_destructive || confirm(text);
 
 async function act(what, i) {
   const msgs = current.messages, after = msgs.length - i - 1;
-  if (what === "retry") return send({ retry: true });
+  if (what === "retry") {
+    // A room asks the round again (25 Nov 2026): back to before your last
+    // message - every seat with it, so none is left ahead of the others - and
+    // it goes again, files and @names as they were.
+    if (current.seats?.length) {
+      const k = msgs.findLastIndex(m => m.role === "user" && !m.source);
+      if (k < 0) return;
+      const m = msgs[k];
+      current = await call("POST", `/api/sessions/${current.id}/rewind`, { to: k });
+      PENDING = (m.files || []).map(f => ({ id: uid(), name: f.orig || f.name, size: f.size, type: f.type, stored: f }));
+      await refresh(); drawLog();
+      return send({ prompt: m.content });
+    }
+    return send({ retry: true });
+  }
   if (what === "edit") {
     if (after > 0 && !sure(`Edit goes back to this message: the ${after} after it go. Carry on?`)) return;
     const m = msgs[i];

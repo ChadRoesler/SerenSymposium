@@ -592,7 +592,10 @@ async def _take_parked(key: str) -> Optional[Cli]:
 def _park(cli: Cli, key: str, cfg: ClaudeConfig, on_wake: Wake, owner: Optional[dict[str, Any]] = None) -> None:
     PARKED[key] = cli
     if owner:
-        cli.owner = dict(owner)
+        # The caller's own dict, not a copy: it fills in which answer started
+        # the task (answer_at) once that answer is kept - which, with asks
+        # read ahead (_with_asks), can be just after this.
+        cli.owner = owner
     _write_down(cli, key)
     cli.watcher = asyncio.get_running_loop().create_task(_watch(cli, key, cfg, on_wake))
 
