@@ -81,7 +81,7 @@ from . import permissions
 from .config import FolderPreset, SymposiumConfig, load_config
 from .prefs import Invalid as BadPref
 from .prefs import Prefs
-from .sessions import TRANSLATE_MODES, Invalid, SessionStore, file_entry, summary
+from .sessions import TRANSLATE_MODES, Invalid, SessionStore, branch_point, file_entry, summary
 
 APP_VERSION = get_version("seren-symposium", fallback=_fallback_version)
 # Symposium: olive-sage, the wreath at the table - and the one empty stretch
@@ -230,9 +230,12 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
     wire - except the messages this conversation never saw (all of them on
     its first turn, or those another voice answered since), handed over in
     front of the prompt. `messages` is the thread this turn follows: shorter
-    than what the CLI saw when this is a retry, and then the conversation it
-    would resume remembers the answer being replaced - so it starts over,
-    with the thread handed over, rather than answering with that in mind.
+    than what the CLI saw when this is a retry or an edit, and then the
+    conversation it would resume remembers the answer being replaced. So it is
+    branched at the newest answer before the change (sessions.branch_point:
+    --resume-session-at, forked), and what came after that answer is handed
+    over; only with nothing to branch from does it start over, the whole
+    thread handed over (as every edit did before 24 Nov 2026).
 
     The folder's model only counts when the folder's voice is claude too: a
     local model's name means nothing to the CLI. Files are named by path, and
@@ -240,8 +243,11 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
     claude.save_files, the one place it may write without being asked."""
     preset = cfg.folder(s["folder"])
     known = s.get("claude") or {}
+    if known.get("session") and known.get("seen", 0) > len(messages):
+        known = branch_point(messages, s.get("_seat"), len(messages)) or {}
     resume = known.get("session") if known.get("seen", 0) <= len(messages) else None
-    missed = messages[known.get("seen", 0):] if resume else messages
+    seen = known.get("seen", 0) if resume else 0
+    missed = messages[seen:] if resume else messages
     folder = store.files_dir(s["id"])
     told = [{**(t := as_told(m)), "content": attachments.with_files(
                 t["content"], attachments.for_claude(m.get("files") or [], folder))}
@@ -273,6 +279,9 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
         # own process: this turn forks off it rather than write the same
         # transcript beside it (seren_symposium.behind); it reports on its own.
         "fork": bool(resume and (known.get("fork") or resume in claude_voice.LET_GO)),
+        # Taken up at an earlier answer, not at its end (a branch, above).
+        "resume_at": known.get("at") if resume else None,
+        "seen": seen,
     }
 
 
@@ -288,17 +297,16 @@ def plan_seat(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], seat
     # the place, then who this seat is (stack.own_parts, 23 Nov 2026).
     # And what it runs on, over the chat's: its model, how hard it thinks, what
     # it shows of it (permissions.thinking reads seat_* as the top layer).
-    plan = plan_claude(cfg, store, {**s, "claude": seat.get("claude")},
+    plan = plan_claude(cfg, store, {**s, "claude": seat.get("claude"), "_seat": seat["name"]},
                        {**layered, "cwd": seat.get("cwd") or layered.get("cwd") or "",
                         "seat_prompt": seat.get("system_prompt") or "",
                         **({"model_override": seat["model"]} if seat.get("model") else {}),
                         "seat_effort": seat.get("effort") or "",
                         "seat_thinking_display": seat.get("thinking_display") or ""},
                        s["messages"], prompt, files)
-    known = seat.get("claude") or {}
     thread = list(s["messages"]) + ([{"role": "user", "content": prompt, "files": files or []}] if pending else [])
     resumed = plan["resume"] is not None
-    missed = thread[known.get("seen", 0):] if resumed else thread
+    missed = thread[plan["seen"]:] if resumed else thread          # the plan's: perhaps a branch
     folder = store.files_dir(s["id"])
     told = [{**(t := as_told(m, room.heard(m))), "content": attachments.with_files(
                 t["content"], attachments.for_claude(m.get("files") or [], folder))}
@@ -560,7 +568,7 @@ def keep_stopped(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
     if not turn.session:
         return None
     answer = heard.answer("")
-    meta = turn.receipt({"model": heard.model, "node": cfg.claude.name}, heard.tools, heard.kept_steps())
+    meta = {**turn.receipt({"model": heard.model, "node": cfg.claude.name}, heard.tools, heard.kept_steps()), **heard.mark()}
     meta["stopped"] = True
     saw = bool(heard.init)
     if turn.seat is not None:
@@ -685,7 +693,7 @@ def waker(cfg: SymposiumConfig, store: SessionStore, session: str, seat: Optiona
         answer, found = await bring_back_said(cfg, store, late, heard, event.get("response") or "", None)
         found += attachments.keep_tool_images(heard.images, store, session,
                                               int(cfg.files.max_mb * 1024 * 1024), heard.steps)
-        meta = late.receipt(event, heard.tools, heard.kept_steps())
+        meta = {**late.receipt(event, heard.tools, heard.kept_steps()), **heard.mark()}
         meta.pop("seconds", None)                   # nobody was waiting, so there is nothing to time
         meta["woke"] = why or ["a task it had left running ended"]
         pieces = heard.said()
@@ -833,6 +841,7 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                                      mode=ask.get("mode"), own_tools="mode" not in ask,
                                      cwd=ask.get("cwd") or "", fork=bool(ask.get("fork")),
                                      effort=ask.get("effort") or "", thinking_display=ask.get("thinking_display") or "",
+                                     resume_at=ask.get("resume_at"),
                                      on_wake=waker(cfg, store, turn.session, turn.seat) if turn.session else None,
                                      owner={"chat": turn.session, "seat": turn.seat} if turn.session else None)
         async for event in (_with_asks(spoken, desk) if desk else spoken):
@@ -865,13 +874,13 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                     saved = store.record_seat(
                         turn.session, turn.seat, turn.prompt if turn.with_prompt else None,
                         None if passing else event["response"],
-                        None if passing else turn.receipt(event, heard.tools, heard.kept_steps()),
+                        None if passing else {**turn.receipt(event, heard.tools, heard.kept_steps()), **heard.mark()},
                         heard.session_id, files=turn.files if turn.with_prompt else None,
                         answer_files=found, claude_init=heard.init,
                         final=pieces[-1]["text"].strip() if len(pieces) > 1 and not passing else None)
                 else:
                     saved = store.record(turn.session, turn.prompt, event["response"],
-                                         turn.receipt(event, heard.tools, heard.kept_steps()), keep=turn.keep,
+                                         {**turn.receipt(event, heard.tools, heard.kept_steps()), **heard.mark()}, keep=turn.keep,
                                          claude_session=heard.session_id, files=turn.files,
                                          answer_files=found, source=turn.source, by=turn.by,
                                          claude_init=heard.init)

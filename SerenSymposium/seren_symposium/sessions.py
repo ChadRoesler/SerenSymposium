@@ -127,6 +127,31 @@ class Invalid(ValueError):
     """What the caller sent cannot be a session; the message says why."""
 
 
+_CLI_ID = re.compile(r"^[0-9a-fA-F-]{8,64}$")
+
+
+def branch_point(messages: list[dict[str, Any]], seat: Optional[str], before: int) -> Optional[dict[str, Any]]:
+    """Where a Claude conversation can be taken up again when the chat no
+    longer matches it past `before` (an edit, a retry, a rewind): the newest
+    answer of this voice (`seat`, None for the chat's one Claude) before that
+    point that says which CLI conversation it was and the id of its last safe
+    entry (meta cli_session, cli_at). The next turn resumes THAT conversation
+    at that entry, forked (--resume-session-at, --fork-session: measured on the
+    real CLI 24 Nov 2026 - the branch knew APPLE and not the BANANA after it,
+    and the original kept both). It has seen the chat up to that answer; what
+    came after it is handed over. None: nothing to branch from (answers from
+    before 24 Nov 2026, a local model's), and the next turn starts over."""
+    for j in range(min(before, len(messages)) - 1, -1, -1):
+        m = messages[j]
+        if m.get("role") != "assistant" or (m.get("seat") or None) != (seat or None):
+            continue
+        meta = m.get("meta") or {}
+        conv, at = meta.get("cli_session"), meta.get("cli_at")
+        if isinstance(conv, str) and isinstance(at, str) and _CLI_ID.match(conv) and _CLI_ID.match(at):
+            return {"session": conv, "seen": j + 1, "at": at, "fork": True}
+    return None
+
+
 MAX_SEAT_PROMPT = 20_000
 # What a seat may carry of its own besides its name, folder and colour (23
 # Nov 2026): who it is, and what it runs on - Haiku on low for the barmaid
@@ -619,13 +644,25 @@ class SessionStore:
     @staticmethod
     def _forget_claude_past(s: dict[str, Any], index: int) -> None:
         """A change at message `index`: if Claude's conversation saw that far,
-        it no longer matches the chat, and the next turn starts a new one -
-        for each seat of a room the same, one by one."""
+        it no longer matches the chat. It used to be thrown away and the next
+        turn started a new one with the chat handed over as text - an edit
+        lost the real conversation (24 Nov 2026, Chad). Now the next turn
+        BRANCHES it at the newest answer before the change (branch_point), and
+        only starts over where there is nothing to branch from. For each seat
+        of a room the same, one by one."""
         if (s.get("claude") or {}).get("seen", 0) > index:
-            s.pop("claude", None)
+            bp = branch_point(s["messages"], None, index)
+            if bp:
+                s["claude"] = bp
+            else:
+                s.pop("claude", None)
         for seat in s.get("seats") or []:
             if (seat.get("claude") or {}).get("seen", 0) > index:
-                seat.pop("claude", None)
+                bp = branch_point(s["messages"], seat.get("name"), index)
+                if bp:
+                    seat["claude"] = bp
+                else:
+                    seat.pop("claude", None)
 
     # ── A room's seats (seren_symposium.room) ───────────────────────────
 

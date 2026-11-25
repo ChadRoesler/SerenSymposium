@@ -172,7 +172,9 @@ def main():
     def answer(words):
         for word in (words[:5], words[5:]):
             event({"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": word}})
-        out({"type": "assistant", "message": {"content": [{"type": "text", "text": words}]}})
+        # with its transcript entry's id, as the real CLI's stream has (a later
+        # turn can be branched at it: --resume-session-at)
+        out({"type": "assistant", "uuid": str(uuid.uuid4()), "message": {"content": [{"type": "text", "text": words}]}})
         out({"type": "result", "subtype": "success", "is_error": False, "result": words,
              "num_turns": 3, "session_id": sid})
 

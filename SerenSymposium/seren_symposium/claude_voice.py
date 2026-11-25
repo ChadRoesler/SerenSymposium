@@ -66,6 +66,7 @@ import base64
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -83,6 +84,8 @@ log = logging.getLogger("seren_symposium")
 # Bookkeeping the CLI does in front of every deferred MCP tool: not a tool
 # the answer reached for, so not one the receipt names.
 QUIET_TOOLS = {"ToolSearch"}
+
+_UUIDISH = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 
 # Set by a parent Claude Code; a child that inherits them thinks it is nested.
 PARENT_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT")
@@ -254,7 +257,8 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
          model: str = "", system_prompt: str = "", add_dirs: Optional[list[str]] = None,
          allow: Optional[list[str]] = None, ask: bool = False, replace: bool = False,
          mode: Optional[str] = None, own_tools: bool = True, fork: bool = False,
-         ephemeral: bool = False, effort: str = "", thinking_display: str = "") -> list[str]:
+         ephemeral: bool = False, effort: str = "", thinking_display: str = "",
+         resume_at: Optional[str] = None) -> list[str]:
     """`replace`: the system prompt is the whole one (--system-prompt, the
     preface in front), not an addition to the CLI's own. `mode` and
     `own_tools=False`: the turn's permissions were worked out in layers
@@ -277,6 +281,10 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
     out += ["--resume", resume] if resume else ["--session-id", new_id]
     if resume and fork:
         out += ["--fork-session"]
+    # Taken up at an earlier entry, not at its end: an edit or a retry
+    # branches the conversation there (sessions.branch_point).
+    if resume and resume_at and _UUIDISH.match(resume_at):
+        out += ["--resume-session-at", resume_at]
     if ephemeral:
         out += ["--no-session-persistence", "--settings", json.dumps({"disableAllHooks": True})]
     if model := (model or cfg.model):
@@ -652,6 +660,12 @@ class ClaudeTurn:
         self.session_id = session_id
         self.model: Optional[str] = None
         self.init: dict[str, Any] = {}          # digest_init of the CLI's init event
+        # The id of the last entry of this turn's that a later turn can be
+        # branched at (sessions.branch_point): a finished answer or a tool's
+        # result - never a tool call still waiting on its result, as a stopped
+        # turn can end on. The stream's uuids are the transcript's own
+        # (measured 24 Nov 2026).
+        self.safe_uuid: Optional[str] = None
         self.tools: list[str] = []
         # Under the fold: [{"kind": "thinking", "text"} | {"kind": "tool", "id",
         # "tool", "summary", "ok"?, "result"?} | {"kind": "asked", ...}]
@@ -712,6 +726,12 @@ class ClaudeTurn:
         else:
             self.step({"kind": "thinking", "text": text[:MAX_THINKING]})
 
+    def mark(self) -> dict[str, str]:
+        """For the answer's meta: which CLI conversation it was and where a
+        later turn can branch it (sessions.branch_point). Nothing when the
+        turn never got as far as a safe entry."""
+        return {"cli_session": self.session_id, "cli_at": self.safe_uuid} if self.safe_uuid else {}
+
     def kept_steps(self) -> list[dict[str, Any]]:
         """The steps as the receipt keeps them. A lone `said` at the very end
         is the answer in its usual place (the steps fold above it), so it is
@@ -758,6 +778,13 @@ def _digest(ev: dict[str, Any], turn: ClaudeTurn, blocks: dict[Any, dict[str, An
     `blocks`: content block index -> what it is so far, across lines. A
     `done` or an `error` ends the turn; the process may go on (Cli)."""
     kind = ev.get("type")
+    if kind in ("assistant", "user") and not ev.get("parent_tool_use_id") and isinstance(ev.get("uuid"), str):
+        content = (ev.get("message") or {}).get("content")
+        blocks_in = [c.get("type") for c in content if isinstance(c, dict)] if isinstance(content, list) else []
+        if kind == "user" and "tool_result" in blocks_in:
+            turn.safe_uuid = ev["uuid"]
+        elif kind == "assistant" and "tool_use" not in blocks_in:
+            turn.safe_uuid = ev["uuid"]
     if kind == "system" and ev.get("subtype") == "init":
         turn.model = ev.get("model")
         # The conversation this turn is in, as the CLI has it: the
@@ -852,7 +879,8 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                  own_tools: bool = True, cwd: str = "", fork: bool = False,
                  ephemeral: bool = False, on_wake: Optional[Wake] = None,
                  effort: str = "", thinking_display: str = "",
-                 owner: Optional[dict[str, Any]] = None) -> AsyncIterator[dict[str, Any]]:
+                 owner: Optional[dict[str, Any]] = None,
+                 resume_at: Optional[str] = None) -> AsyncIterator[dict[str, Any]]:
     """One turn, as Symposium stream events (see the module docstring).
     Always ends with exactly one `done` or `error`. `permit` ({url, ticket})
     is where the CLI's permission asks go; without it, unlisted tools are
@@ -877,7 +905,7 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
             cmd = argv(cfg, resume=resume, new_id=turn.session_id, model=model, system_prompt=system_prompt,
                        add_dirs=add_dirs, allow=allow, ask=bool(permit), replace=replace,
                        mode=mode, own_tools=own_tools, fork=fork, ephemeral=ephemeral,
-                       effort=effort, thinking_display=thinking_display)
+                       effort=effort, thinking_display=thinking_display, resume_at=resume_at)
             cli = Cli(cmd, where and os.path.expanduser(where), _env(permit, cfg), stream=cfg.background,
                       ticket=(permit or {}).get("ticket"))
         cli.notes.clear()

@@ -312,21 +312,43 @@ def two_turns(tc):
     return sid
 
 
-def test_rewinding_what_claude_saw_starts_a_new_conversation(make_client, runs):
-    """The CLI cannot unsay anything. Cut into what it saw, and the next turn
-    is a new conversation that is handed the chat as it now stands."""
+def test_rewinding_what_claude_saw_branches_its_conversation(make_client, runs):
+    """The CLI cannot unsay anything - but it can be taken up at an earlier
+    answer. Cut into what it saw, and the next turn branches its conversation
+    at the newest answer before the cut (--resume-session-at, forked), with
+    nothing handed over but what came after. Until 24 Nov 2026 it started a
+    new conversation and pasted the chat in, and the real one was lost:
+    Chad, "if i stop a response to edit a wording of mine, it abandons the
+    session"."""
     tc = make_client(config())
     sid = two_turns(tc)
-    first = tc.get(f"/api/sessions/{sid}").json()["claude"]["session"]
+    s = tc.get(f"/api/sessions/{sid}").json()
+    first, at = s["claude"]["session"], s["messages"][1]["meta"]["cli_at"]
+    assert s["messages"][1]["meta"]["cli_session"] == first
 
     s = tc.post(f"/api/sessions/{sid}/rewind", json={"to": 2}).json()
-    assert [m["content"] for m in s["messages"]] == ["one", "Hello there"] and "claude" not in s
+    assert [m["content"] for m in s["messages"]] == ["one", "Hello there"]
+    assert s["claude"] == {"session": first, "seen": 2, "at": at, "fork": True}
 
     lines(tc.post("/api/chat/stream", json={"session": sid, "prompt": "three"}))
     run = runs()[-1]
-    assert "--resume" not in run["argv"] and flag(run["argv"], "--session-id") != first
+    assert flag(run["argv"], "--resume") == first and "--fork-session" in run["argv"]
+    assert flag(run["argv"], "--resume-session-at") == at
+    assert run["prompt"] == "three", "it remembers up to there itself: nothing pasted in"
+    assert tc.get(f"/api/sessions/{sid}").json()["claude"]["seen"] == 4
+
+
+def test_rewinding_past_every_answer_starts_over(make_client, runs):
+    """Nothing before the cut to branch from: a new conversation, as before."""
+    tc = make_client(config())
+    sid = two_turns(tc)
+    s = tc.post(f"/api/sessions/{sid}/rewind", json={"to": 1}).json()
+    assert "claude" not in s
+    lines(tc.post("/api/chat/stream", json={"session": sid, "prompt": "again"}))
+    run = runs()[-1]
+    assert "--resume" not in run["argv"] and "--session-id" in run["argv"]
     assert run["prompt"] == ("Earlier in this chat, before you were answering in it:\n\n"
-                             "[user] one\n[assistant] Hello there\n\nNow:\n\nthree")
+                             "[user] one\n\nNow:\n\nagain")
 
 
 def test_rewinding_only_what_claude_never_saw_keeps_its_conversation(lodestar, runs):
@@ -339,14 +361,19 @@ def test_rewinding_only_what_claude_never_saw_keeps_its_conversation(lodestar, r
 
 
 def test_retry_in_a_claude_chat_does_not_answer_with_the_old_answer_in_mind(make_client, runs):
+    """A retry branches at the answer before the one it replaces: the
+    conversation without the old answer in it, nothing pasted in."""
     tc = make_client(config())
     sid = two_turns(tc)
+    s = tc.get(f"/api/sessions/{sid}").json()
+    first, at = s["claude"]["session"], s["messages"][1]["meta"]["cli_at"]
     lines(tc.post("/api/chat/stream", json={"session": sid, "retry": True}))
     run = runs()[-1]
-    assert "--resume" not in run["argv"]
-    assert run["prompt"].endswith("[user] one\n[assistant] Hello there\n\nNow:\n\ntwo")
+    assert flag(run["argv"], "--resume") == first and flag(run["argv"], "--resume-session-at") == at
+    assert "--fork-session" in run["argv"] and run["prompt"] == "two"
     s = tc.get(f"/api/sessions/{sid}").json()
     assert len(s["messages"]) == 4 and s["claude"]["seen"] == 4
+    assert "at" not in s["claude"], "the branch, once answered in, is just the conversation"
 
 
 def test_a_message_can_be_taken_out(make_client, runs):
