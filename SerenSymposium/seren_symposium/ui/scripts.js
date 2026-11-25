@@ -1215,6 +1215,11 @@ function bubble(m, i, count, opts = {}) {
     if (m.at) meta.append(Object.assign(document.createElement("time"), {
       className: "stamp", textContent: stamp(m.at), title: new Date(m.at * 1000).toLocaleString([], {
         dateStyle: "full", timeStyle: "medium" }), dateTime: new Date(m.at * 1000).toISOString() }));
+    // Kept for one seat alone (a picture of what it sees): you see it all,
+    // and see who else does not.
+    if (m.only_for) meta.append(Object.assign(document.createElement("span"), {
+      className: "only-for", textContent: `🔒 only ${seatWho(m.only_for)} knows`,
+      title: `no other seat is handed this - hidden knowledge, ${m.only_for}'s alone` }));
     const line = asked ? "" : receipt(m.meta);
     if (line) meta.append(Object.assign(document.createElement("span"), { className: "receipt", textContent: line }));
     meta.append(actionsEl(m, i, count));
@@ -3432,7 +3437,15 @@ function picDrawHow() {
   sel.innerHTML = `<option value="">every chat's (${esc(TRANSLATE_NAMES[usual])})</option>`
     + Object.entries(TRANSLATE_NAMES).map(([k, name]) => `<option value="${k}">${esc(name)}</option>`).join("");
   sel.value = translateOwn();
+  // In a room, whose eyes the picture is through: the room, or one seat (25 Nov 2026).
+  const seats = current?.seats || [], was = picEl("seat").value;
+  picEl("seat-row").hidden = !seats.length;
+  picEl("seat").innerHTML = `<option value="">the room - everyone sees it</option>`
+    + seats.map(x => `<option value="${esc(x.name)}">${esc(seatWho(x.name))}</option>`).join("");
+  picEl("seat").value = seats.some(x => x.name === was) ? was : "";
+  picEl("private").disabled = !picEl("seat").value;
 }
+$("#pic-seat").addEventListener("change", () => { picEl("private").disabled = !picEl("seat").value; });
 function takePic() {
   picDrawHow();
   const key = draftKey(), d = PIC_CHATS.get(key);
@@ -3560,11 +3573,13 @@ async function picTranslate() {
   tick(); job.timer = setInterval(tick, 1000);
   try {
     // whoever answers this chat writes the draft: Claude in a Claude chat, the chat's own model otherwise
-    const got = await call("POST", "/api/pictures/translate", { text, guide: m?.style?.guide || "", session: current?.id, folder, mode: how });
+    const seat = current?.seats?.length ? picEl("seat").value : "";
+    const got = await call("POST", "/api/pictures/translate", { text, guide: m?.style?.guide || "", session: current?.id, folder, mode: how,
+                                                                ...(seat ? { seat } : {}) });
     if (here()) {
       prompt.value = got.prompt || "";
       picEl("negative").value = got.negative || "";
-      const by = got.voice === "claude" ? voiceName("claude") : (got.model || "a local model");
+      const by = got.seat ? seatWho(got.seat) : got.voice === "claude" ? voiceName("claude") : (got.model || "a local model");
       picStatus(`drafted by ${by}${got.node && got.voice !== "claude" ? " on " + got.node : ""}`
         + ` from ${TRANSLATE_FROM[got.mode] || "your words"} in ${Math.round((Date.now() - started) / 1000)}s`
         + (got.instead_of && got.why ? ` (not ${TRANSLATE_FROM[got.instead_of] || got.instead_of}: ${got.why})` : "")
@@ -3611,7 +3626,9 @@ async function picDraw() {
   $("#chat .pic").classList.add("busy"); picNote("drawing… this can take a minute or two");
   try {
     const sid = (await ensureSession()).id;
-    const got = await call("POST", "/api/pictures/draw", { session: sid, asked, why: asked, request: req });
+    const seat = current?.seats?.length ? picEl("seat").value : "";
+    const got = await call("POST", "/api/pictures/draw", { session: sid, asked, why: asked, request: req,
+                                                           ...(seat ? { seat, private: picEl("private").checked } : {}) });
     if (current?.id === sid) {
       await openSession(sid);
       if (got.seed != null) picEl("seed").placeholder = `last: ${got.seed}`;

@@ -845,6 +845,23 @@ class SessionStore:
         self._write(s)
         return s
 
+    def shown_by(self, sid: str, seat: str, private: bool) -> Optional[dict[str, Any]]:
+        """The exchange just recorded (a request and a drawing, pictures.
+        keep_drawn) was a seat's: the drawing goes under its name, and with
+        `private` both are kept for that seat alone (`only_for`) - left out of
+        what every other seat is handed (app.plan_seat) and of what a
+        translator reads (pictures.chat_context)."""
+        from . import room
+        s = self.get(sid)
+        if s is None or room.seat(s, seat) is None or len(s["messages"]) < 2:
+            return None
+        asked, said = s["messages"][-2], s["messages"][-1]
+        said["seat"] = seat
+        if private:
+            asked["only_for"] = said["only_for"] = seat
+        self._write(s)
+        return s
+
     def record_seat(self, sid: str, name: str, prompt: Optional[str], answer: Optional[str],
                     meta: Optional[dict[str, Any]], claude_session: str,
                     files: Optional[list[dict[str, Any]]] = None,

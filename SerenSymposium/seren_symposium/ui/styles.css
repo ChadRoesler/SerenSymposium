@@ -158,6 +158,10 @@ button.chip { font: inherit; font-size: 12.5px; cursor: zoom-in; }
 .meta { display: flex; align-items: center; gap: 4px; margin-top: 6px; font: 11px var(--mono); color: var(--text-dim); }
 .meta .receipt { margin-right: 6px; }
 .meta .stamp { margin-right: 8px; color: var(--faint, var(--text-dim)); white-space: nowrap; }
+.meta .only-for { margin-right: 8px; color: var(--accent); white-space: nowrap; }
+.msg.me .meta .only-for { margin: 0 0 0 8px; }
+.pic-seat { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pic-seat select { flex: 1 1 140px; min-width: 0; }
 .msg.me .meta .stamp { margin: 0 0 0 8px; }
 .msg.me .meta { flex-direction: row-reverse; }
 .msg.me .meta .receipt { margin: 0 0 0 6px; }

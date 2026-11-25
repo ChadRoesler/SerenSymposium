@@ -586,6 +586,57 @@ def test_a_rewind_takes_every_seat_back_to_the_same_place(client, repos, runs, m
     assert "round two\n" not in kit_run["prompt"] and "kitchen two" not in kit_run["prompt"], "nothing from the cut future"
 
 
+def test_a_seat_shows_what_it_sees_and_only_it_knows(client, repos, runs, monkeypatch):
+    """Chad, 25 Nov 2026: in a campaign an NPC "displays what they see ... the
+    others/the main isnt answering, since this would be hidden knowledge".
+    The seat drafts the prompt from its own conversation (a side copy of it,
+    with its own prompt), the picture is kept under its name for it alone,
+    and the next round no other seat is handed it - while it is."""
+    from seren_symposium import pictures as pics
+    sid = client.post("/api/sessions", json={"settings": {"voice": "claude"}}).json()["id"]
+    client.post(f"/api/sessions/{sid}/seats", json={"name": "lodestar", "cwd": str(repos["SerenLodestar"]),
+                                                     "system_prompt": "You are Brann. A body is hidden in your cellar."})
+    client.post(f"/api/sessions/{sid}/seats", json={"name": "kitchen", "cwd": str(repos["SerenKitchen"])})
+    stream(client, {"session": sid, "prompt": "We arrive."})
+
+    forked = {}
+
+    async def fake_fork(claude, turn, text, guide, you):
+        forked.update(turn=turn, text=text)
+        return {"ok": True, "prompt": "a cellar, a body under sacks", "negative": "", "model": "fake", "node": "claude"}
+    monkeypatch.setattr(pics, "translate_fork", fake_fork)
+    lod = client.get(f"/api/sessions/{sid}").json()["seats"][0]
+    got = client.post("/api/pictures/translate", json={"text": "what Brann sees in his cellar",
+                                                        "session": sid, "seat": "lodestar"}).json()
+    assert got["seat"] == "lodestar" and got["mode"] == "fork" and got["prompt"].startswith("a cellar")
+    assert forked["turn"]["resume"] == lod["claude"]["session"], "a copy of HIS conversation"
+    assert "A body is hidden in your cellar" in forked["turn"]["system_prompt"], "with his own prompt"
+    assert client.post("/api/pictures/translate", json={"text": "x", "session": sid, "seat": "nobody"}).status_code == 400
+
+    # drawn: Lodestar's image route stands in
+    import base64
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\nfake").decode()
+
+    async def fake_post(url, json=None, timeout=None):
+        import httpx
+        return httpx.Response(200, json={"ok": True, "images": [{"data": png, "mime": "image/png"}], "seed": 7,
+                                         "model": "flux", "node": "spark"}, request=httpx.Request("POST", url))
+    monkeypatch.setattr(client.app.state.client, "post", fake_post)
+    r = client.post("/api/pictures/draw", json={"session": sid, "asked": "what Brann sees in his cellar",
+                                                 "request": {"prompt": got["prompt"]}, "seat": "lodestar", "private": True})
+    assert r.status_code == 200, r.text
+    s = client.get(f"/api/sessions/{sid}").json()
+    asked, shown = s["messages"][-2:]
+    assert shown["seat"] == "lodestar" and shown["only_for"] == "lodestar" and asked["only_for"] == "lodestar"
+
+    stream(client, {"session": sid, "prompt": "Morning comes."})
+    lod_run, kit_run = runs()[-2:]
+    assert "Brann sees in his cellar" in lod_run["prompt"], "he knows what he showed you"
+    assert "cellar" not in kit_run["prompt"], "the kitchen is never handed it"
+    assert client.post("/api/pictures/draw", json={"session": sid, "request": {"prompt": "x"},
+                                                   "seat": "nobody"}).status_code == 400
+
+
 def test_rewinding_what_a_seat_heard_starts_it_over(client, repos, runs):
     sid = a_room(client, repos, "lodestar", "kitchen")
     stream(client, {"session": sid, "prompt": "one"})

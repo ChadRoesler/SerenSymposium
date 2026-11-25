@@ -308,9 +308,12 @@ def plan_seat(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], seat
     resumed = plan["resume"] is not None
     missed = thread[plan["seen"]:] if resumed else thread          # the plan's: perhaps a branch
     folder = store.files_dir(s["id"])
+    # What one seat was shown alone (only_for: a picture of what it sees) is
+    # handed to that seat and to no other (25 Nov 2026).
     told = [{**(t := as_told(m, room.heard(m))), "content": attachments.with_files(
                 t["content"], attachments.for_claude(m.get("files") or [], folder))}
-            for m in missed if not terminal.harness_notice(m)]
+            for m in missed if not terminal.harness_notice(m)
+            and m.get("only_for") in (None, "", seat["name"])]
     plan["prompt"] = room.handover(_trim_history(told, cfg.claude.handover_max_chars, also=("seat", "by", "stopped")),
                                    seat["name"], cfg.ui.you, cfg.claude.name, resumed)
     names = [x["name"] for x in s.get("seats") or []]
@@ -2381,6 +2384,40 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         if asked not in TRANSLATE_MODES:
             return JSONResponse({"error": f"mode is one of {', '.join(TRANSLATE_MODES)}"}, status_code=400)
         mode, why = asked, ""
+        # A seat of a room asked to draft it: what IT sees, from its own
+        # conversation - its prompt, its secrets, what it has heard - and no
+        # one else's (25 Nov 2026, Chad: NPCs, "hidden knowledge").
+        seat_name = str(body.get("seat") or "")
+        if seat_name:
+            spot = room.seat(s, seat_name) if s and s.get("seats") else None
+            if spot is None:
+                return JSONResponse({"error": f"no seat called {seat_name} in this chat"}, status_code=400)
+            if not claude_voice.available(cfg.claude):
+                return JSONResponse({"error": "the claude voice is not available here"}, status_code=409)
+            conv = (spot.get("claude") or {}).get("session")
+            if conv:
+                plan = plan_seat(cfg, store, s, spot, {**settings, "folder": s["folder"]}, "", None, pending=False)
+                turn = {"resume": conv, "model": plan["model"], "system_prompt": plan["system_prompt"],
+                        "replace": bool(plan["system_replace"]), "add_dirs": plan["add_dirs"], "allow": [],
+                        "mode": "default", "own_tools": False, "cwd": plan["cwd"],
+                        "permit": ({"url": _permit_url(cfg), "ticket": f"side-copy-{uuid.uuid4().hex}"}
+                                   if cfg.claude.ask else None)}
+                out = await pictures.translate_fork(cfg.claude, turn, text, guide, cfg.ui.you)
+                return JSONResponse({**out, "voice": "claude", "mode": "fork", "seat": seat_name,
+                                     **({"instead_of": asked} if asked != "fork" else {})},
+                                    status_code=200 if out.get("ok") else 502)
+            # Not said anything yet: no conversation to copy. Drafted from what
+            # it may know of the chat, and its own prompt - never another's.
+            context = pictures.chat_context(s["messages"], cfg.ui.you, cfg.claude.name, cfg.ui.translate_messages,
+                                            cfg.ui.translate_max_chars, viewer=seat_name)
+            who = str(spot.get("system_prompt") or "").strip()
+            if who:
+                context = f"Who is seeing this ({seat_name}):\n{who}" + (f"\n\n{context}" if context else "")
+            out = await pictures.translate(request.app.state.client, text, guide, claude=cfg.claude,
+                                           claude_model=str(spot.get("model") or ""), context=context)
+            return JSONResponse({**out, "voice": "claude", "mode": "chat", "seat": seat_name, "instead_of": asked,
+                                 "why": f"{seat_name} has not said anything yet: no conversation to copy"},
+                                status_code=200 if out.get("ok") else 502)
         if mode == "fork":
             known = (s or {}).get("claude") or {}
             why = ("a room has a conversation per seat, not one to copy" if (s or {}).get("seats")
@@ -2404,8 +2441,9 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         else:
             context = ""
             if mode == "chat" and s:
+                # No seat drafting it: nothing kept for one seat alone is read.
                 context = pictures.chat_context(s["messages"], cfg.ui.you, cfg.claude.name if use_claude else "assistant",
-                                                cfg.ui.translate_messages, cfg.ui.translate_max_chars)
+                                                cfg.ui.translate_messages, cfg.ui.translate_max_chars, viewer=None)
             if mode == "chat" and not context:
                 mode = "plain"                          # nothing has been said here yet: the words are all there is
             out = await pictures.translate(request.app.state.client, text, guide,
@@ -2433,8 +2471,10 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
     async def pictures_draw(request: Request):
         """Draw it, and keep it in the chat. {session, asked, why, request:
         {prompt, negative?, model?, loras?, width?, height?, seed?, count?} or
-        {workflow, node}}. Without a session the pictures come back base64
-        and are kept nowhere."""
+        {workflow, node}, seat?, private?}. Without a session the pictures
+        come back base64 and are kept nowhere. `seat`: a seat of the room
+        showed it, under its name; `private`: for that seat alone - no other
+        seat is handed it (pictures.keep_drawn)."""
         body = await _json(request)
         if not isinstance(body, dict) or not isinstance(body.get("request"), dict):
             return JSONResponse({"error": "a JSON body with a request"}, status_code=400)
@@ -2442,6 +2482,9 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         sid = str(body.get("session") or "")
         if sid and store.get(sid) is None:
             return JSONResponse({"error": f"no session '{sid}'"}, status_code=404)
+        seat_name = str(body.get("seat") or "")
+        if seat_name and (not sid or room.seat(store.get(sid), seat_name) is None):
+            return JSONResponse({"error": f"no seat called {seat_name} in this chat"}, status_code=400)
         req = {**body["request"], "holder": "symposium", "save_as": "symposium"}
         try:
             r = await request.app.state.client.post("/api/v1/image", json=req, timeout=pictures.DRAW_TIMEOUT)
@@ -2454,7 +2497,8 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
         why = str(body.get("why") or "").strip()
         if not sid:
             return {k: v for k, v in out.items()}
-        kept = await asyncio.to_thread(pictures.keep_drawn, store, sid, asked, why, out, body["request"])
+        kept = await asyncio.to_thread(pictures.keep_drawn, store, sid, asked, why, out, body["request"],
+                                       seat_name or None, bool(body.get("private")) and bool(seat_name))
         if kept is None:
             return JSONResponse({"error": "the node finished but sent no picture back", **{k: v for k, v in out.items() if k != "images"}},
                                 status_code=502)

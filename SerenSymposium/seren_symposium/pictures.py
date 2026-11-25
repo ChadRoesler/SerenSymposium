@@ -104,14 +104,18 @@ def parse_translation(text: str) -> dict[str, str]:
     return {"prompt": (text or "").strip(), "negative": ""}
 
 
-def chat_context(messages: list[dict[str, Any]], you: str, voice: str, limit: int, max_chars: int) -> str:
+def chat_context(messages: list[dict[str, Any]], you: str, voice: str, limit: int, max_chars: int,
+                 viewer: Optional[str] = None) -> str:
     """The chat's latest messages as text a translator can read: who said
     what, newest last, at most `limit` of them and `max_chars` in all. A long
     message keeps its END (where an answer lands on what it means), a seat's
-    answer is its last piece, and a stopped or empty one is left out."""
+    answer is its last piece, and a stopped or empty one is left out. So is
+    what was kept for one seat alone (`only_for`), unless `viewer` is that seat."""
     lines: list[str] = []
     room = max(0, max_chars)
     for m in reversed(messages[-max(0, limit):] if limit > 0 else []):
+        if m.get("only_for") and m.get("only_for") != viewer:
+            continue
         words = str(m.get("final") or m.get("content") or "").strip()
         if not words or room <= 0:
             continue
@@ -225,12 +229,19 @@ def drawn_settings(out: dict[str, Any], request: Optional[dict[str, Any]] = None
 
 
 def keep_drawn(store: SessionStore, sid: str, asked: str, why: str, out: dict[str, Any],
-               request: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+               request: Optional[dict[str, Any]] = None, seat: Optional[str] = None,
+               private: bool = False) -> Optional[dict[str, Any]]:
     """The drawing into the chat: each picture a file beside the session,
     carrying what made it (drawn_settings), the turn recorded - the request
     as what you said, the pictures as the answer with a receipt (model,
     node, seed, seconds). None when there is no such session or nothing
-    came back."""
+    came back.
+
+    `seat`: a seat of a room showed it - what IT sees (25 Nov 2026, Chad:
+    an NPC "displays what they see ... this would be hidden knowledge"). The
+    pictures are its answer, under its name; with `private`, the request and
+    the pictures are that seat's alone (`only_for`): no other seat is handed
+    them, and it is - so it knows what it showed you."""
     images = out.get("images") or []
     drawn = drawn_settings(out, request)
     entries = []
@@ -259,6 +270,8 @@ def keep_drawn(store: SessionStore, sid: str, asked: str, why: str, out: dict[st
             "loras": out.get("loras"), "width": out.get("width"), "height": out.get("height"),
             "settings": out.get("settings") or {}, "notes": out.get("notes") or []}
     saved = store.record(sid, asked, answer, meta, answer_files=entries)
+    if saved is not None and seat:
+        saved = store.shown_by(sid, seat, private) or saved
     return {"files": entries, "answer": answer, "meta": meta, "session": saved}
 
 

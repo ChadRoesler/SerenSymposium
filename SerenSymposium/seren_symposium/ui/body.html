@@ -158,6 +158,13 @@
              copy of the chat's own conversation (this chat's `translate` setting, over every chat's) -->
         <label class="pic-label" for="pic-how">translate from</label>
         <select id="pic-how" title="what the prompt is drafted from. My words only: the request and nothing else. My words and this chat: the recent messages go along, so 'us' and 'that' mean something. The whole conversation: a side copy of this chat's own Claude conversation writes it and is thrown away - it knows everything said here, and it is the slow one."></select>
+        <!-- In a room: whose eyes it is through (25 Nov 2026). A seat drafts it from its own conversation -
+             its prompt, its secrets - and shows it under its name; kept for it alone, no other seat hears of it. -->
+        <div class="pic-seat" id="pic-seat-row" hidden>
+          <label class="pic-label" for="pic-seat">seen by</label>
+          <select id="pic-seat" title="a seat of this room: it writes the prompt from what IT knows, and shows the picture as its own"></select>
+          <label class="check" title="nobody else at the table is handed the picture or what you asked for: hidden knowledge"><input type="checkbox" id="pic-private" checked> only they know</label>
+        </div>
         <div class="pic-go">
           <button type="button" class="ghost" id="pic-translate" title="have whoever answers this chat write the prompt in this model's style">translate</button>
           <button type="button" class="ghost" id="pic-plan" title="what would be drawn, and where, without drawing">plan</button>
