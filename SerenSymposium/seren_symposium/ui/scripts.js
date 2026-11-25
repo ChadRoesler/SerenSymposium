@@ -253,6 +253,19 @@ const isImage = t => /^image\/(png|jpeg|gif|webp|bmp|svg\+xml)$/.test(t || "");
 const isScreen = f => f.screen === true || /^screen-\d{8}-\d{6}\.jpg$/.test(f.orig || "");
 const size = n => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 const when = at => new Date(at * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+// A message's time in the fewest words: "21:14" today, "Yesterday 21:14",
+// "Mon 21:14" this week, "Nov 12, 21:14" before that (and the year when not this one).
+function stamp(at) {
+  const d = new Date(at * 1000), now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const day = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((day(now) - day(d)) / 86400000);
+  if (days === 0) return time;
+  if (days === 1) return `Yesterday ${time}`;
+  if (days > 1 && days < 7) return `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric",
+    ...(d.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }) })}, ${time}`;
+}
 
 async function reloadConfig() {
   CFG = await (await fetch("/api/config")).json();
@@ -1196,6 +1209,11 @@ function bubble(m, i, count, opts = {}) {
   layoutPictures(d, isYours(m) ? myPicturesMode() : picturesMode());
   if (!opts.bare) {
     const meta = document.createElement("div"); meta.className = "meta";
+    // When it was said (24 Nov 2026, Chad: "a way for me to keep track a bit
+    // better of what's going on"): the time today, the day too before that.
+    if (m.at) meta.append(Object.assign(document.createElement("time"), {
+      className: "stamp", textContent: stamp(m.at), title: new Date(m.at * 1000).toLocaleString([], {
+        dateStyle: "full", timeStyle: "medium" }), dateTime: new Date(m.at * 1000).toISOString() }));
     const line = asked ? "" : receipt(m.meta);
     if (line) meta.append(Object.assign(document.createElement("span"), { className: "receipt", textContent: line }));
     meta.append(actionsEl(m, i, count));
@@ -1324,11 +1342,28 @@ function stepsLine(steps, liveNow) {
           tools && `${tools} tool${tools === 1 ? "" : "s"}`, asked && `asked you ${asked}×`].filter(Boolean).join(" · ");
 }
 
+// The scroll box of a step, if it has one: the thinking itself, or a tool's result.
+const stepScroller = s => s.matches(".think") ? s : s.querySelector("pre");
 function stepsEl(steps, liveNow = false, el = null) {
   const d = el || Object.assign(document.createElement("details"), { className: "steps" });
   const open = d.open;
+  // Drawn again every time the thinking grows, and a new box starts at its
+  // top: reading along, you were thrown back up with every word (24 Nov
+  // 2026, Chad). So each box keeps where it was - and one scrolled to its end
+  // stays at the end, following the words as they come.
+  const kept = [...d.querySelectorAll(".step-list > .step")].map(s => {
+    const sc = stepScroller(s);
+    return sc && sc.scrollTop > 0
+      ? { top: sc.scrollTop, end: sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 4 } : null;
+  });
   d.innerHTML = `<summary>${esc(stepsLine(steps, liveNow))}</summary><div class="step-list">${steps.map(stepHtml).join("")}</div>`;
   d.open = open;
+  if (kept.some(Boolean)) {
+    d.querySelectorAll(".step-list > .step").forEach((s, i) => {
+      const k = kept[i], sc = k && stepScroller(s);
+      if (sc) sc.scrollTop = k.end ? sc.scrollHeight : k.top;
+    });
+  }
   return d;
 }
 
