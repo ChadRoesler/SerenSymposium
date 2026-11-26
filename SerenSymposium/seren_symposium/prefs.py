@@ -60,7 +60,7 @@ FILE_NAME = "symposium-prefs.json"
 MAX_NAME = 120
 # The settings a project carries, and how a value for each is checked.
 PROJECT_FIELDS = ("voice", "system_prompt", "model", "temperature", "max_tokens", "repeat_penalty",
-                  "permission_mode", "allowed_tools", "tools_inherit", "effort", "thinking_display")
+                  "permission_mode", "allowed_tools", "tools_inherit", "effort", "thinking_display", "leave_out")
 APP_FIELDS = {"you": ("ui", "you"), "claude_name": ("claude", "name"),
               "claude_effort": ("claude", "effort"), "claude_thinking": ("claude", "thinking_display"),
               "confirm_destructive": ("ui", "confirm_destructive"),
@@ -106,6 +106,12 @@ def _preset(name: str, values: dict[str, Any]) -> FolderPreset:
     if values.get("permission_mode") not in (None, *WINDOW_MODES):
         names = ", ".join(m or "(every chat's)" for m in WINDOW_MODES)
         raise Invalid(f"permission_mode is one of: {names}")
+    if values.get("leave_out") is not None:
+        from .stack import LEAVABLE
+        lo = values["leave_out"]
+        if not isinstance(lo, list) or not all(isinstance(k, str) and k in LEAVABLE for k in lo):
+            raise Invalid(f"leave_out is a list of: {', '.join(LEAVABLE)}")
+        values = {**values, "leave_out": sorted(set(lo))}
     if values.get("effort") not in (None, *EFFORTS):
         raise Invalid(f"effort is one of: {', '.join(e or '(every chat’s)' for e in EFFORTS)}")
     if values.get("thinking_display") not in (None, *THINKING_DISPLAYS):

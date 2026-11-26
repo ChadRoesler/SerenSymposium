@@ -69,6 +69,11 @@ class FolderPreset(BaseModel):
     # every chat's, then the carabiner's; seren_symposium.permissions.thinking).
     effort: str = ""
     thinking_display: str = ""
+    # What of the house chats here leave out (stack.LEAVABLE: cli, preface,
+    # framing, memory, hooks, tools). None: everything is passed; a chat's
+    # own list, even an empty one, is over this (26 Nov 2026: a campaign of
+    # NPCs on Haiku wants none of it).
+    leave_out: Optional[list[str]] = None
 
 
 class LodestarClientConfig(BaseModel):

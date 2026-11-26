@@ -75,6 +75,9 @@ SETTINGS = {
     # chat's and the carabiner's (seren_symposium.permissions.thinking)
     "effort": str,
     "thinking_display": str,
+    # what of the house this chat leaves out (stack.LEAVABLE), over its
+    # project's; an empty list passes everything whatever the project says
+    "leave_out": list,
     # the folder the claude voice runs in for this chat, over claude.cwd: a
     # chat picked up from a terminal runs where that conversation was started
     "cwd": str,
@@ -238,6 +241,12 @@ def clean_settings(raw: Any) -> dict[str, Any]:
             if not isinstance(value, bool):
                 raise Invalid(f"{key} is true or false")
             out[key] = value
+            continue
+        if key == "leave_out":
+            from .stack import LEAVABLE
+            if not isinstance(value, list) or not all(isinstance(k, str) and k in LEAVABLE for k in value):
+                raise Invalid(f"leave_out is a list of: {', '.join(LEAVABLE)}")
+            out[key] = sorted(set(value))         # an empty one too: everything passed, whatever its project says
             continue
         if key == "colors":
             if not isinstance(value, dict) or len(value) > 64:

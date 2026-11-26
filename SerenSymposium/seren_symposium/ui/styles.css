@@ -659,6 +659,11 @@ i.avatar.blank.none { background: var(--surface-2); color: var(--text-dim); bord
 
 /* the prompt stack of a room: one per seat */
 .st-seats { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+/* What of Seren is passed here (26 Nov 2026): a row of whole-stack choices, a tick on each layer. */
+.st-pass-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 12.5px; }
+.st-pass-row .muted { margin-right: auto; }
+.st-pass { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; font-size: 11.5px; color: var(--text-dim); cursor: pointer; }
+.st-layer.off > summary b { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--text-dim) 60%, transparent); }
 .st-seats button { display: inline-flex; align-items: center; gap: 6px; }
 .st-seats button.on { border-color: var(--seat); color: color-mix(in srgb, var(--seat) 80%, var(--text)); }
 

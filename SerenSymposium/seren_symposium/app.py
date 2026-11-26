@@ -257,7 +257,8 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
     ks = permissions.carabiner_session(cfg)
     model = layered.get("model_override") or (
         preset.model if preset and preset.voice == "claude" else "") or cfg.claude.model or ks.get("model") or ""
-    system, replace = claude_system(cfg, stack.own_prompt(preset, layered), str(folder))
+    leave_out, _ = stack.left_out(preset, layered)
+    system, replace = claude_system(cfg, stack.own_prompt(preset, layered), str(folder), leave_out)
     # Permissions in layers: the CLI's own, the carabiner's, every chat's, the
     # project's, this chat's (seren_symposium.permissions). The chat's own
     # folder is always writable when save_files is on, whatever they say.
@@ -281,6 +282,8 @@ def plan_claude(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], la
         "fork": bool(resume and (known.get("fork") or resume in claude_voice.LET_GO)),
         # Taken up at an earlier answer, not at its end (a branch, above).
         "resume_at": known.get("at") if resume else None,
+        # What of the house this chat or its project leaves out (stack.LEAVABLE).
+        "leave_out": sorted(leave_out),
         "seen": seen,
     }
 
@@ -322,13 +325,25 @@ def plan_seat(cfg: SymposiumConfig, store: SessionStore, s: dict[str, Any], seat
     return plan
 
 
-def claude_system(cfg: SymposiumConfig, own: str, files: str) -> tuple[str, bool]:
+LEFT_ALONE = "Answer in this conversation."
+
+
+def claude_system(cfg: SymposiumConfig, own: str, files: str,
+                  leave_out: Optional[set[str]] = None) -> tuple[str, bool]:
     """What the CLI is told in its system prompt, and whether that REPLACES
     the CLI's own: the preface (Margin's page, seren_symposium.preface) when
     there is one, then the chat's or folder's own prompt, then the framing.
-    Without a preface the same text is appended to the CLI's prompt."""
-    pre = preface.text(cfg.claude.preface)
-    return "\n\n".join(p for p in (pre, own, claude_framing(cfg, files)) if p), bool(pre)
+    Without a preface the same text is appended to the CLI's prompt.
+
+    `leave_out` (stack.LEAVABLE, the chat's or its project's): the preface
+    and the framing not added; "cli" - the CLI's own prompt replaced by what
+    is left, the chat's own words alone (an NPC on Haiku, 26 Nov 2026)."""
+    out = leave_out or set()
+    pre = "" if "preface" in out else preface.text(cfg.claude.preface)
+    framing = "" if "framing" in out else claude_framing(cfg, files)
+    text = "\n\n".join(p for p in (pre, own, framing) if p)
+    replace = bool(pre) or "cli" in out
+    return (text or LEFT_ALONE) if replace else text, replace
 
 
 def claude_framing(cfg: SymposiumConfig, files: str) -> str:
@@ -880,7 +895,7 @@ async def claude_answer(cfg: SymposiumConfig, store: SessionStore, turn: Turn,
                                      mode=ask.get("mode"), own_tools="mode" not in ask,
                                      cwd=ask.get("cwd") or "", fork=bool(ask.get("fork")),
                                      effort=ask.get("effort") or "", thinking_display=ask.get("thinking_display") or "",
-                                     resume_at=ask.get("resume_at"),
+                                     resume_at=ask.get("resume_at"), leave_out=ask.get("leave_out"),
                                      on_wake=waker(cfg, store, turn.session, turn.seat, owner) if turn.session else None,
                                      owner=owner if turn.session else None)
         async for event in (_with_asks(spoken, desk) if desk else spoken):
@@ -2154,8 +2169,11 @@ def create_app(config: Optional[SymposiumConfig] = None) -> FastAPI:
             out = await asyncio.to_thread(_claude_stack, store, s, folder, preset, own, messages, at)
         else:
             out = await _local_stack(request.app.state.client, folder, preset, own, messages)
+        gone, gone_from = stack.left_out(preset, own)
         return {"voice": voice, "folder": folder, "session": session or None, "layers": out,
                 **({"seat": at["name"], "seats": [x["name"] for x in s["seats"]]} if at else {}),
+                # What of the house is left out here, and whose choice that is (stack.LEAVABLE).
+                "leave_out": sorted(gone), "leave_out_from": gone_from, "leavable": list(stack.LEAVABLE),
                 **stack.summarize(out)}
 
     def _claude_stack(store: SessionStore, s: Optional[dict[str, Any]], folder: str,

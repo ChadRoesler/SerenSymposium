@@ -52,6 +52,28 @@ MAX_FILE_CHARS = 60_000
 MEMORY_INDEX_LINES = 200
 
 
+# What a chat or a project can leave out of what its Claude is given (26 Nov
+# 2026, Chad: an NPC on a small Haiku "would get the preface, the framing ...
+# we'd want to be able to uncheck passing some of those things"). Each is
+# Seren's, not the chat's own words: Claude Code's own prompt (replaced by the
+# chat's), the preface, the framing, the memory files, the session-start
+# hooks (the carabiner's bookmark is one) and the house's tools (MCP servers).
+LEAVABLE = ("cli", "preface", "framing", "memory", "hooks", "tools")
+
+
+def left_out(preset: Optional[FolderPreset], settings: dict[str, Any]) -> tuple[set[str], str]:
+    """What is left out here, and whose choice it is: the chat's list when it
+    has one (an empty one passes everything), else its project's, else
+    nothing - ("chat" | "project" | "")."""
+    own = settings.get("leave_out")
+    if isinstance(own, list):
+        return {k for k in own if k in LEAVABLE}, "chat"
+    proj = getattr(preset, "leave_out", None)
+    if isinstance(proj, list):
+        return {k for k in proj if k in LEAVABLE}, "project"
+    return set(), ""
+
+
 def own_prompt(preset: Optional[FolderPreset], settings: dict[str, Any]) -> str:
     """The project's prompt, then the chat's; only the chat's when it says
     not to inherit."""
@@ -204,35 +226,51 @@ def claude_stack(cfg: SymposiumConfig, preset: Optional[FolderPreset], folder: s
     chat", "another chat", or "" when none is known yet); `turn` says
     whether the next turn resumes and what it would hand over."""
     version = init.get("version") or ""
+    out, out_from = left_out(preset, settings)
+    whose = {"chat": "this chat", "project": "its project"}.get(out_from, "")
+    gone = f"Left out here ({whose}'s choice)." if whose else "Left out here."
+    preface = "" if "preface" in out else preface
+    framing = "" if "framing" in out else framing
+    cli_off = "cli" in out
     layers = [_layer("cli", "system", "Claude Code's own prompt",
                      where=f"built into the CLI{f' {version}' if version else ''}",
-                     state="replaced" if preface else "on",
-                     note=("Replaced by the preface below." if preface
+                     state="replaced" if preface or cli_off else "on",
+                     note=(f"{gone} The prompts below are the whole system prompt." if cli_off and not preface
+                           else "Replaced by the preface below." if preface
                            else "Built in, so it can't be read from here. Several thousand words; "
                                 "a preface (claude.preface) replaces it."))]
-    if preface or cfg.claude.preface.url or cfg.claude.preface.file:
+    if "preface" in out:
+        layers.append(_layer("preface", "system", "The preface", state="off", note=gone))
+    elif preface or cfg.claude.preface.url or cfg.claude.preface.file:
         layers.append(_layer("preface", "system", "The preface",
                              where=cfg.claude.preface.file or f"{cfg.claude.preface.url.rstrip('/')}/preface",
                              text=preface, state="on" if preface else "empty",
                              note="" if preface else "Set, but nothing came back: the CLI keeps its own prompt."))
     layers += _prompt_layers(preset, settings, folder)
     layers.append(_layer("framing", "system", "The framing", where="claude.framing in the yaml",
-                         text=framing, state="on" if framing else "empty",
-                         note="What each turn is told about the window."))
+                         text=framing, state="off" if "framing" in out else "on" if framing else "empty",
+                         note=gone if "framing" in out else "What each turn is told about the window."))
 
     cwd = init.get("cwd") or settings.get("cwd") or cfg.claude.cwd or os.getcwd()
-    files = memory_files(cwd, init.get("memory_auto") or "")
+    files = [] if "memory" in out else memory_files(cwd, init.get("memory_auto") or "")
     layers.append(_layer("memory", "loaded", "Memory files", where=f"read by the CLI from {cwd}",
                          chars=sum(f["chars"] for f in files), files=files,
-                         state="on" if files else "empty",
-                         note="The CLI reads these itself at start, whatever the system prompt says."))
+                         state="off" if "memory" in out else "on" if files else "empty",
+                         note=(f"{gone} No CLAUDE.md, no auto memory." if "memory" in out
+                               else "The CLI reads these itself at start, whatever the system prompt says.")))
     hooks = session_hooks(cwd)
     layers.append(_layer("hooks", "loaded", "Session-start hooks", where="Claude Code's settings files",
-                         items=hooks, count=len(hooks), state="on" if hooks else "empty",
-                         note=("Each runs as the CLI starts and adds what it prints (a carabiner's bookmark, "
-                               "say); that text is not shown here." if hooks else "")))
+                         items=hooks, count=len(hooks),
+                         state="off" if "hooks" in out else "on" if hooks else "empty",
+                         note=(f"{gone} None of them runs: no bookmark, nothing they would add." if "hooks" in out
+                               else "Each runs as the CLI starts and adds what it prints (a carabiner's bookmark, "
+                                    "say); that text is not shown here." if hooks else "")))
 
-    if init:
+    if "tools" in out:
+        layers.append(_layer("tools", "tools", "The house's tools", state="off",
+                             note=f"{gone} No MCP server is loaded (the window's own permission tool aside); "
+                                  "Claude Code's built-in tools still are."))
+    elif init:
         grouped = group_tools(init)
         trim = ("Only some servers load: claude.mcp_servers." if cfg.claude.mcp_servers
                 else "Every server the CLI knows loads"
@@ -260,6 +298,11 @@ def claude_stack(cfg: SymposiumConfig, preset: Optional[FolderPreset], folder: s
                          allow=perms.get("allow") or [], stopped_at=perms.get("stopped_at"),
                          note="The CLI's own settings always count too."))
     layers.append(_layer("history", "turn", "The conversation", **turn))
+    # Each layer that can be left out says so, and whether it is (the window's checkbox).
+    for layer in layers:
+        if layer.get("key") in LEAVABLE:
+            layer["leavable"] = True
+            layer["left_out"] = layer["key"] in out
     return layers
 
 

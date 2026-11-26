@@ -258,7 +258,7 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
          allow: Optional[list[str]] = None, ask: bool = False, replace: bool = False,
          mode: Optional[str] = None, own_tools: bool = True, fork: bool = False,
          ephemeral: bool = False, effort: str = "", thinking_display: str = "",
-         resume_at: Optional[str] = None) -> list[str]:
+         resume_at: Optional[str] = None, leave_out: Optional[list[str]] = None) -> list[str]:
     """`replace`: the system prompt is the whole one (--system-prompt, the
     preface in front), not an addition to the CLI's own. `mode` and
     `own_tools=False`: the turn's permissions were worked out in layers
@@ -309,7 +309,14 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
         out += ["--tools", ",".join(dict.fromkeys([*cfg.builtin_tools, "ToolSearch"]))]
     if not cfg.skills:
         out += ["--disable-slash-commands"]
-    named = user_mcp_servers(cfg.mcp_servers, cfg.claude_json)
+    # Left out in this chat or project (stack.LEAVABLE, 26 Nov 2026: NPCs on a
+    # small model need none of the house): the house's tools - no MCP server
+    # but the window's own permission tool - and the session-start hooks,
+    # the carabiner's bookmark among them.
+    leave = set(leave_out or ())
+    if "hooks" in leave and not ephemeral:
+        out += ["--settings", json.dumps({"disableAllHooks": True})]
+    named = {} if "tools" in leave else user_mcp_servers(cfg.mcp_servers, cfg.claude_json)
     # alwaysLoad: that server's tools are in the list from the start, not
     # behind ToolSearch (claude.mcp_always_load).
     servers: dict[str, Any] = {n: ({**s, "alwaysLoad": True} if n in cfg.mcp_always_load else s)
@@ -319,15 +326,17 @@ def argv(cfg: ClaudeConfig, *, resume: Optional[str], new_id: str,
         out += ["--permission-prompt-tool", "mcp__symposium__permit"]
     if servers:
         out += ["--mcp-config", json.dumps({"mcpServers": servers})]
-    if named:
+    if named or "tools" in leave:
         out += ["--strict-mcp-config"]
     return out
 
 
-def _env(permit: Optional[dict[str, str]] = None, cfg: Optional[ClaudeConfig] = None) -> dict[str, str]:
+def _env(permit: Optional[dict[str, str]] = None, cfg: Optional[ClaudeConfig] = None,
+         leave_out: Optional[list[str]] = None) -> dict[str, str]:
     env = dict(os.environ)
     for k in PARENT_ENV:
         env.pop(k, None)
+    env.pop("CLAUDE_CODE_DISABLE_CLAUDE_MDS", None)
     if cfg is not None:
         # What Claude Code brings of its own that this house did not ask for:
         # the account's claude.ai connectors, and its auto memory.
@@ -340,6 +349,11 @@ def _env(permit: Optional[dict[str, str]] = None, cfg: Optional[ClaudeConfig] = 
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         if cfg.auto_memory == "off":
             env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    # The memory files left out here (stack.LEAVABLE): no CLAUDE.md read from
+    # the folder and above, and no auto memory either.
+    if "memory" in (leave_out or ()):
+        env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] = "1"
+        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     if permit:
         # Not argv: any process can read a command line. The CLI hands its
         # environment to the permission tool it starts.
@@ -883,7 +897,8 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
                  ephemeral: bool = False, on_wake: Optional[Wake] = None,
                  effort: str = "", thinking_display: str = "",
                  owner: Optional[dict[str, Any]] = None,
-                 resume_at: Optional[str] = None) -> AsyncIterator[dict[str, Any]]:
+                 resume_at: Optional[str] = None,
+                 leave_out: Optional[list[str]] = None) -> AsyncIterator[dict[str, Any]]:
     """One turn, as Symposium stream events (see the module docstring).
     Always ends with exactly one `done` or `error`. `permit` ({url, ticket})
     is where the CLI's permission asks go; without it, unlisted tools are
@@ -908,8 +923,9 @@ async def events(cfg: ClaudeConfig, *, prompt: str, resume: Optional[str], model
             cmd = argv(cfg, resume=resume, new_id=turn.session_id, model=model, system_prompt=system_prompt,
                        add_dirs=add_dirs, allow=allow, ask=bool(permit), replace=replace,
                        mode=mode, own_tools=own_tools, fork=fork, ephemeral=ephemeral,
-                       effort=effort, thinking_display=thinking_display, resume_at=resume_at)
-            cli = Cli(cmd, where and os.path.expanduser(where), _env(permit, cfg), stream=cfg.background,
+                       effort=effort, thinking_display=thinking_display, resume_at=resume_at,
+                       leave_out=leave_out)
+            cli = Cli(cmd, where and os.path.expanduser(where), _env(permit, cfg, leave_out), stream=cfg.background,
                       ticket=(permit or {}).get("ticket"))
         cli.notes.clear()
         timer = cli.deadline(cfg.timeout_seconds)

@@ -2956,9 +2956,9 @@ $("#chat-settings").addEventListener("click", e => { if (e.target === $("#chat-s
 function setChatSetting(k, v) {
   if (!current) {
     if (v === null) delete DRAFT.settings[k]; else DRAFT.settings[k] = v;
-    drawChatSettings(); lockComposer(); picDrawHow(); return drawLog();
+    drawChatSettings(); lockComposer(); picDrawHow(); drawLog(); return Promise.resolve();
   }
-  patch({ settings: { [k]: v } }).then(() => { drawChatSettings(); drawTitlebar(); lockComposer(); picDrawHow(); if (k === "pictures" || k === "my_pictures") drawLog(); })
+  return patch({ settings: { [k]: v } }).then(() => { drawChatSettings(); drawTitlebar(); lockComposer(); picDrawHow(); if (k === "pictures" || k === "my_pictures") drawLog(); })
     .catch(ex => { alert(ex.message); drawChatSettings(); });
 }
 $("#s-permission_mode").addEventListener("change", e => setChatSetting("permission_mode", e.target.value || null));
@@ -3787,7 +3787,34 @@ const stackChars = n => `${Number(n).toLocaleString()} chars ≈ ${Math.ceil(n /
 const chips = list => list?.length ? `<div class="st-chips">${list.map(x => `<span>${esc(x)}</span>`).join("")}</div>` : "";
 
 // A room has a stack per seat: which one the sheet is showing ("" = the first).
-let STACK_SEAT = "";
+let STACK_SEAT = "", STACK_LAST = null;
+// What is left out, kept where it belongs: a project's view changes the
+// project, a chat's view this chat (an explicit list, an empty one too).
+async function setLeaveOut(list) {
+  try {
+    if (STACK_FOR != null) {
+      await call("PATCH", "/api/projects", { name: STACK_FOR, set: { leave_out: list } });
+      await reloadConfig();
+    } else {
+      await setChatSetting("leave_out", list);           // the chat is patched, then the stack read again
+    }
+  } catch (ex) { alert(ex.message); }
+  drawStack();
+}
+$("#st-body").addEventListener("change", e => {
+  const box = e.target.closest("[data-pass]");
+  if (!box || !STACK_LAST) return;
+  const now = new Set(STACK_LAST.leave_out || []);
+  box.checked ? now.delete(box.dataset.pass) : now.add(box.dataset.pass);
+  setLeaveOut([...now].sort());
+});
+$("#st-body").addEventListener("click", e => {
+  const all = e.target.closest("[data-pass-all]");
+  if (!all || !STACK_LAST) return;
+  e.preventDefault();
+  const how = all.dataset.passAll;
+  setLeaveOut(how === "all" ? [...STACK_LAST.leavable] : how === "none" ? [] : null);
+});
 async function openStack(project) {
   if (project == null) return openChatSheet("stack");      // a chat's stack is a tab of its sheet
   STACK_FOR = project;
@@ -3822,7 +3849,18 @@ async function drawStack() {
   const seats = st.seats?.length ? `<div class="st-seats">` + st.seats.map(n =>
       `<button type="button" class="ghost${n === st.seat ? " on" : ""}" data-seat="${esc(n)}" style="--seat:${seatColor(n)}">`
       + `<i class="seat-dot"></i>${esc(n)}</button>`).join("") + `</div>` : "";
-  let html = seats + `<p class="st-total">${esc(voiceName(st.voice))}${st.folder ? ` · ${esc(st.folder)}` : ""} · `
+  STACK_LAST = st;
+  // What of the house is passed here (26 Nov 2026): each layer Seren adds can
+  // be left out, by the chat or by its project - an NPC on Haiku needs none.
+  const lo = st.leave_out || [], from = st.leave_out_from;
+  const passing = st.voice === "claude" && st.leavable ? `<div class="st-pass-row">`
+    + `<span class="muted">${lo.length ? `${lo.length} of Seren's layers left out${from ? ` (${from === "chat" ? "this chat's" : "its project's"} choice)` : ""}`
+                                       : "everything of Seren's is passed"}</span>`
+    + `<button type="button" class="ghost" data-pass-all="none">pass everything</button>`
+    + `<button type="button" class="ghost" data-pass-all="all" title="no preface, framing, bookmark, memory files, house tools or Claude Code's own prompt: the chat's own words alone">leave all of Seren out</button>`
+    + (STACK_FOR == null && from === "chat" ? `<button type="button" class="ghost" data-pass-all="inherit">as its project</button>` : "")
+    + `</div>` : "";
+  let html = seats + passing + `<p class="st-total">${esc(voiceName(st.voice))}${st.folder ? ` · ${esc(st.folder)}` : ""} · `
     + `${esc(stackChars(st.total_chars))} that can be counted here`
     + (st.voice === "claude" ? "; Claude Code's own prompt and its tools' descriptions come on top." : ".") + `</p>`
     + (bar ? `<div class="st-bar">${bar}</div>` : "");
@@ -3841,8 +3879,10 @@ function stackLayer(l) {
   const size = l.chars ? stackChars(l.chars) : l.count != null ? `${l.count}` : "";
   const state = STACK_STATES[l.state] ? `<span class="st-state">${STACK_STATES[l.state]}</span>` : "";
   const button = edit ? `<button type="button" class="ghost" data-edit="${edit}">edit</button>` : "";
+  const pass = l.leavable ? `<label class="st-pass" title="pass this here - untick to leave it out${STACK_FOR != null ? " of every chat in this project" : " of this chat"}">`
+    + `<input type="checkbox" data-pass="${esc(l.key)}"${l.left_out ? "" : " checked"}> pass</label>` : "";
   return `<details class="st-layer ${esc(l.state)}" data-key="${esc(l.key)}"><summary><b>${esc(title)}</b>`
-    + `<span class="muted">${esc(where || "")}</span>${state}<span class="st-size">${esc(size)}</span>${button}</summary>`
+    + `<span class="muted">${esc(where || "")}</span>${state}<span class="st-size">${esc(size)}</span>${pass}${button}</summary>`
     + `<div class="st-in">${stackBody(l)}${l.note ? `<p class="note">${esc(l.note)}</p>` : ""}</div></details>`;
 }
 

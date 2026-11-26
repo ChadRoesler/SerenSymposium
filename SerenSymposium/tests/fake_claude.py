@@ -87,7 +87,8 @@ def main():
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps({"argv": args, "prompt": prompt, "cwd": os.getcwd(),
                                 "env": {k: os.environ[k] for k in ("ENABLE_CLAUDEAI_MCP_SERVERS",
-                                                                   "CLAUDE_CODE_DISABLE_AUTO_MEMORY") if k in os.environ}}) + "\n")
+                                                                   "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+                                                                   "CLAUDE_CODE_DISABLE_CLAUDE_MDS") if k in os.environ}}) + "\n")
     sid = args[args.index("--resume") + 1] if "--resume" in args else args[args.index("--session-id") + 1]
     if "--resume" in args and "--fork-session" in args:
         sid = str(uuid.uuid4())
